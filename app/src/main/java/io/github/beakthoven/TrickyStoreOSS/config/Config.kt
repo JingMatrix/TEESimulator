@@ -166,6 +166,7 @@ object PkgConfig {
                     // a reload where needed.
                     // The main logic for loading is now handled dynamically in KeyBoxUtils.
                     Logger.i("Keybox file $path changed. It will be re-read on next use.")
+                    KeyBoxUtils.clearCache(path)
                 }
                 path == PATCHLEVEL_FILE -> updatePatchLevel(f)
             }

@@ -224,6 +224,11 @@ object KeyBoxUtils {
     fun hasKeyboxes(): Boolean =
         loadedKeyboxFiles.isNotEmpty() && loadedKeyboxFiles.values.any { it.isNotEmpty() }
 
+    fun clearCache(fileName: String) {
+        loadedKeyboxFiles.remove(fileName)
+        Logger.i("Cleared cache for keybox file: $fileName")
+    }
+
     // This function is now deprecated and should be removed. We keep it for now to show the
     // transition.
     // Its logic is now inside readFromFile.
