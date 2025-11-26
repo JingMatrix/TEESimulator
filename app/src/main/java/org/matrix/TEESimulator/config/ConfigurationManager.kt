@@ -81,6 +81,9 @@ object ConfigurationManager {
     /** Determines if a new certificate needs to be generated for a given UID. */
     fun shouldGenerate(uid: Int): Boolean = getPackageModeForUid(uid) == Mode.GENERATE
 
+    /** Determines if no operation is needed for a given UID. */
+    fun shouldSkipUid(uid: Int): Boolean = getPackageModeForUid(uid) == null
+
     /** Resolves the operating mode for a given UID based on its packages and the TEE status. */
     private fun getPackageModeForUid(uid: Int): Mode? {
         val packages = getPackagesForUid(uid)

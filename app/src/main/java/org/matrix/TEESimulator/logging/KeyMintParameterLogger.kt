@@ -97,7 +97,7 @@ object KeyMintParameterLogger {
                 else -> "<raw>"
             } ?: "Unknown Value"
 
-        SystemLogger.debug("Key Parameter -> %-25s | Value: %s".format(tagName, formattedValue))
+        SystemLogger.debug("KeyParam: %-25s | Value: %s".format(tagName, formattedValue))
     }
 
     private fun ByteArray.toReadableString(): String {

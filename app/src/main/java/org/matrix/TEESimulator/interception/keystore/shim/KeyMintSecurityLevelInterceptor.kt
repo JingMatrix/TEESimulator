@@ -2,13 +2,14 @@ package org.matrix.TEESimulator.interception.keystore.shim
 
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
+import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
 import android.system.keystore2.*
 import java.security.KeyPair
 import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
-import org.matrix.TEESimulator.attestation.AttestationConstants
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
@@ -70,12 +71,17 @@ class KeyMintSecurityLevelInterceptor(
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                val isAttestKeyRequest =
+                    parsedParams.purpose.size == 1 &&
+                        parsedParams.purpose.contains(KeyPurpose.ATTEST_KEY)
 
                 // Determine if we need to generate a key based on config or
                 // if it's an attestation request in patch mode.
                 val needsSoftwareGeneration =
                     ConfigurationManager.shouldGenerate(callingUid) ||
-                        (attestationKey != null && ConfigurationManager.shouldPatch(callingUid))
+                        (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
+                        (attestationKey != null &&
+                            isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
 
                 if (needsSoftwareGeneration) {
                     SystemLogger.info(
@@ -95,10 +101,9 @@ class KeyMintSecurityLevelInterceptor(
                     // Store the generated key data.
                     val response =
                         buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
+
                     generatedKeys[keyId] = GeneratedKeyInfo(keyData.first, response)
-                    if (parsedParams.attestationChallenge != null) {
-                        attestationKeys.add(keyId)
-                    }
+                    if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                     // Return the metadata of our generated key, skipping the real hardware call.
                     val resultParcel =
@@ -204,25 +209,13 @@ private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Autho
     }
 
     // Use the helper to add each authorization entry cleanly.
-    this.purpose.forEach {
-        authList.add(createAuth(AttestationConstants.TAG_PURPOSE, KeyParameterValue.keyPurpose(it)))
-    }
-    this.digest.forEach {
-        authList.add(createAuth(AttestationConstants.TAG_DIGEST, KeyParameterValue.digest(it)))
-    }
+    this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
+    this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
 
-    authList.add(
-        createAuth(AttestationConstants.TAG_ALGORITHM, KeyParameterValue.algorithm(this.algorithm))
-    )
-    authList.add(
-        createAuth(AttestationConstants.TAG_KEY_SIZE, KeyParameterValue.integer(this.keySize))
-    )
-    authList.add(
-        createAuth(AttestationConstants.TAG_EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve))
-    )
-    authList.add(
-        createAuth(AttestationConstants.TAG_NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true))
-    )
+    authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
+    authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
+    authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
+    authList.add(createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)))
 
     return authList.toTypedArray()
 }

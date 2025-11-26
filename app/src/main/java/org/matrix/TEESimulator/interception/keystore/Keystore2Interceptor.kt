@@ -12,6 +12,7 @@ import android.system.keystore2.KeyEntryResponse
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
+import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.CertificateHelper
 
@@ -98,13 +99,33 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 callingUid,
                 callingPid,
             )
+
+            if (ConfigurationManager.shouldSkipUid(callingUid)) {
+                SystemLogger.debug(
+                    "[TX_ID: $txId] Skip post-transaction hook for UID=${callingUid}"
+                )
+                return TransactionResult.ContinueAndSkipPost
+            }
+
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
 
-            if (ConfigurationManager.shouldGenerate(callingUid)) {
-                // TODO: Redesign the interaction with KeyMintSecurityLevelInterceptor
-            } else if (ConfigurationManager.shouldPatch(callingUid)) {
-                return TransactionResult.Continue
+            if (code == DELETE_KEY_TRANSACTION) {
+                KeyMintSecurityLevelInterceptor.cleanupKeyData(keyId)
+                return TransactionResult.ContinueAndSkipPost
             }
+
+            val response =
+                KeyMintSecurityLevelInterceptor.getGeneratedKeyResponse(keyId)
+                    ?: return TransactionResult.Continue
+
+            if (KeyMintSecurityLevelInterceptor.isAttestationKey(keyId))
+                SystemLogger.debug("${descriptor.alias} was an attestation key")
+
+            SystemLogger.info("[TX_ID: $txId] Found generated response for ${descriptor.alias}:")
+            response.metadata?.authorizations?.forEach {
+                KeyMintParameterLogger.logParameter(it.keyParameter)
+            }
+            return InterceptorUtils.createTypedObjectReply(response)
         } else {
             logTransaction(
                 txId,
@@ -134,6 +155,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             return TransactionResult.SkipTransaction
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
+
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val keyDescriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
