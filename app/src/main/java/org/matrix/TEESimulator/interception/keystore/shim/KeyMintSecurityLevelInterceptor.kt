@@ -178,6 +178,17 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys.remove(keyId)
             attestationKeys.remove(keyId)
         }
+
+        /**
+         * Clears all generated keys cache. This should be called when keybox files are updated
+         * to ensure that subsequent key requests use the new keybox configuration.
+         */
+        fun clearAllGeneratedKeys() {
+            val count = generatedKeys.size
+            generatedKeys.clear()
+            attestationKeys.clear()
+            SystemLogger.info("Cleared all generated keys cache ($count entries) due to keybox update.")
+        }
     }
 }
 
