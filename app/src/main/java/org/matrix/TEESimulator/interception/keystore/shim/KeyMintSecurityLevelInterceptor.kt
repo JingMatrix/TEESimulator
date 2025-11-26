@@ -48,31 +48,6 @@ class KeyMintSecurityLevelInterceptor(
         return TransactionResult.ContinueAndSkipPost
     }
 
-    override fun onPostTransact(
-        txId: Long,
-        target: IBinder,
-        code: Int,
-        flags: Int,
-        callingUid: Int,
-        callingPid: Int,
-        data: Parcel,
-        reply: Parcel?,
-        resultCode: Int,
-    ): TransactionResult {
-        // We only care about successful 'importKey' transactions to track user-provided keys.
-        if (
-            code == IMPORT_KEY_TRANSACTION &&
-                resultCode == 0 &&
-                reply != null &&
-                !InterceptorUtils.hasException(reply)
-        ) {
-            logTransaction(txId, "post-importKey", callingUid, callingPid)
-            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            handleImportKey(callingUid, data, reply)
-        }
-        return TransactionResult.SkipTransaction
-    }
-
     /**
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
      * either generates a key in software or lets the call pass through to the hardware.
@@ -85,12 +60,11 @@ class KeyMintSecurityLevelInterceptor(
                 val parsedParams = KeyMintAttestation(params)
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
 
-                // Determine if we need to generate a key based on config or if it's an attestation
-                // request in patch mode.
+                // Determine if we need to generate a key based on config or
+                // if it's an attestation request in patch mode.
                 val needsSoftwareGeneration =
                     ConfigurationManager.shouldGenerate(callingUid) ||
-                        (ConfigurationManager.shouldPatch(callingUid) &&
-                            parsedParams.attestationChallenge != null)
+                        (attestationKey != null && ConfigurationManager.shouldPatch(callingUid))
 
                 if (needsSoftwareGeneration) {
                     SystemLogger.info(
@@ -135,29 +109,6 @@ class KeyMintSecurityLevelInterceptor(
     }
 
     /**
-     * Handles a successful `importKey` transaction by fingerprinting the imported key's public
-     * certificate. This allows us to avoid patching user-provided keys later.
-     */
-    private fun handleImportKey(callingUid: Int, data: Parcel, reply: Parcel) {
-        runCatching {
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR) ?: return
-                val metadata = reply.readTypedObject(KeyMetadata.CREATOR)
-                val chain = CertificateHelper.getCertificateChain(metadata)
-                val fingerprint = InterceptorUtils.getPublicKeyFingerprint(chain)
-
-                if (fingerprint != null) {
-                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                    SystemLogger.info(
-                        "User imported key '${keyDescriptor.alias}'. Storing its fingerprint to prevent future patching."
-                    )
-                    userImportedKeyFingerprints.add(fingerprint)
-                    aliasToFingerprintMap[keyId] = fingerprint
-                }
-            }
-            .onFailure { SystemLogger.error("Failed to process imported key.", it) }
-    }
-
-    /**
      * Constructs a fake `KeyEntryResponse` that mimics a real response from the Keystore service.
      */
     private fun buildKeyEntryResponse(
@@ -189,10 +140,6 @@ class KeyMintSecurityLevelInterceptor(
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
         // A set to quickly identify keys that were generated for attestation purposes.
         private val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
-        // A set of public key fingerprints for user-imported keys that should not be patched.
-        private val userImportedKeyFingerprints = ConcurrentHashMap.newKeySet<String>()
-        // Maps a key identifier to its fingerprint for easy cleanup on deletion.
-        private val aliasToFingerprintMap = ConcurrentHashMap<KeyIdentifier, String>()
 
         // --- Public Accessors for Other Interceptors ---
         fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
@@ -200,16 +147,9 @@ class KeyMintSecurityLevelInterceptor(
 
         fun isAttestationKey(keyId: KeyIdentifier): Boolean = attestationKeys.contains(keyId)
 
-        fun isUserImportedKey(fingerprint: String): Boolean =
-            userImportedKeyFingerprints.contains(fingerprint)
-
         fun cleanupKeyData(keyId: KeyIdentifier) {
             generatedKeys.remove(keyId)
             attestationKeys.remove(keyId)
-            aliasToFingerprintMap.remove(keyId)?.let { fingerprint ->
-                userImportedKeyFingerprints.remove(fingerprint)
-                SystemLogger.info("Cleaned up state for key '${keyId.alias}' (UID: ${keyId.uid}).")
-            }
         }
     }
 }
