@@ -78,7 +78,9 @@ object KeyMintParameterLogger {
                 Tag.CERTIFICATE_SERIAL -> BigInteger(value.blob).toString()
                 Tag.ACTIVE_DATETIME,
                 Tag.CERTIFICATE_NOT_AFTER,
-                Tag.CERTIFICATE_NOT_BEFORE -> Date(value.dateTime).toString()
+                Tag.CERTIFICATE_NOT_BEFORE,
+                Tag.ORIGINATION_EXPIRE_DATETIME,
+                Tag.USAGE_EXPIRE_DATETIME -> Date(value.dateTime).toString()
                 Tag.CERTIFICATE_SUBJECT -> X500Name(X500Principal(value.blob).name).toString()
                 Tag.RSA_PUBLIC_EXPONENT -> value.longInteger.toString()
                 Tag.NO_AUTH_REQUIRED -> "true"

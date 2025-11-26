@@ -44,6 +44,14 @@ class KeyMintSecurityLevelInterceptor(
             logTransaction(txId, "generateKey", callingUid, callingPid)
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
             return handleGenerateKey(callingUid, data)
+        } else {
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "unknown code=$code",
+                callingUid,
+                callingPid,
+                false,
+            )
         }
         return TransactionResult.ContinueAndSkipPost
     }
@@ -56,6 +64,9 @@ class KeyMintSecurityLevelInterceptor(
         return runCatching {
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
                 val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
+                SystemLogger.debug(
+                    "[key, attestationKey]: ${keyDescriptor.alias}, ${attestationKey?.alias}"
+                )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
@@ -135,6 +146,17 @@ class KeyMintSecurityLevelInterceptor(
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
         private val IMPORT_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "importKey")
+
+        private val transactionNames: Map<Int, String> by lazy {
+            IKeystoreSecurityLevel.Stub::class
+                .java
+                .declaredFields
+                .filter {
+                    it.isAccessible = true
+                    it.type == Int::class.java && it.name.startsWith("TRANSACTION_")
+                }
+                .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
+        }
 
         // Stores keys generated entirely in software.
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()

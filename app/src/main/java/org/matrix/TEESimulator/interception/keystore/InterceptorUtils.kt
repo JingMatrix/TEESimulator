@@ -3,9 +3,6 @@ package org.matrix.TEESimulator.interception.keystore
 import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
-import java.security.MessageDigest
-import java.security.cert.Certificate
-import java.util.Base64
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -80,21 +77,5 @@ object InterceptorUtils {
     /** Checks if a reply parcel contains an exception without consuming it. */
     fun hasException(reply: Parcel): Boolean {
         return runCatching { reply.readException() }.exceptionOrNull() != null
-    }
-
-    /**
-     * Generates a URL-safe SHA-256 fingerprint of a certificate's public key. Used to uniquely
-     * identify keys imported by the user.
-     */
-    fun getPublicKeyFingerprint(chain: Array<Certificate>?): String? {
-        if (chain.isNullOrEmpty()) return null
-        return try {
-            val publicKeyBytes = chain[0].publicKey.encoded
-            val hashBytes = MessageDigest.getInstance("SHA-256").digest(publicKeyBytes)
-            Base64.getUrlEncoder().withoutPadding().encodeToString(hashBytes)
-        } catch (e: Exception) {
-            SystemLogger.error("Failed to create public key fingerprint.", e)
-            null
-        }
     }
 }

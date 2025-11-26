@@ -30,6 +30,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private val DELETE_KEY_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
 
+    private val transactionNames: Map<Int, String> by lazy {
+        IKeystoreService.Stub::class
+            .java
+            .declaredFields
+            .filter {
+                it.isAccessible = true
+                it.type == Int::class.java && it.name.startsWith("TRANSACTION_")
+            }
+            .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
+    }
+
     override val serviceName = "android.system.keystore2.IKeystoreService/default"
     override val processName = "keystore2"
     override val injectionCommand = "exec ./inject `pidof keystore2` libTEESimulator.so entry"
@@ -76,20 +87,32 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == GET_KEY_ENTRY_TRANSACTION) {
-            logTransaction(txId, "getKeyEntry", callingUid, callingPid)
+        if (code == GET_KEY_ENTRY_TRANSACTION || code == DELETE_KEY_TRANSACTION) {
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val descriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
+            logTransaction(
+                txId,
+                "${transactionNames[code]} (alias=${descriptor.alias})",
+                callingUid,
+                callingPid,
+            )
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
-            SystemLogger.debug("Checking $keyId")
 
             if (ConfigurationManager.shouldGenerate(callingUid)) {
                 // TODO: Redesign the interaction with KeyMintSecurityLevelInterceptor
             } else if (ConfigurationManager.shouldPatch(callingUid)) {
                 return TransactionResult.Continue
             }
+        } else {
+            logTransaction(
+                txId,
+                transactionNames[code] ?: "unknown code=$code",
+                callingUid,
+                callingPid,
+                false,
+            )
         }
 
         // Let most calls go through to the real service.
@@ -111,7 +134,16 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             return TransactionResult.SkipTransaction
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
-            logTransaction(txId, "post-getKeyEntry", callingUid, callingPid)
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            val keyDescriptor =
+                data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
+            logTransaction(
+                txId,
+                "post-getKeyEntry (alias=${keyDescriptor.alias})",
+                callingUid,
+                callingPid,
+            )
             if (!ConfigurationManager.shouldPatch(callingUid))
                 return TransactionResult.SkipTransaction
 
@@ -144,9 +176,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
                 CertificateHelper.updateCertificateChain(response.metadata, newChain).getOrThrow()
 
-                SystemLogger.info(
-                    "[TX_ID: $txId] Successfully patched certificate chain for alias."
-                )
                 InterceptorUtils.createTypedObjectReply(response)
             } catch (e: Exception) {
                 SystemLogger.error("[TX_ID: $txId] Failed to patch certificate chain.", e)
