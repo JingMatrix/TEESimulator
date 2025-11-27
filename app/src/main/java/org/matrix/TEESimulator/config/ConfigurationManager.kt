@@ -257,7 +257,9 @@ object ConfigurationManager {
                         KeyBoxManager.invalidateCache(path)
                         // Also clear all generated keys cache since they contain certificates
                         // signed with the old keybox
-                        org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor.clearAllGeneratedKeys()
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor.clearAllGeneratedKeys()
+                        }
                     }
             }
         }
