@@ -255,7 +255,7 @@ object ConfigurationManager {
                             "Keybox file $path may have changed. It will be reloaded on next access."
                         )
                         KeyBoxManager.invalidateCache(path)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
                             // Clear cached keys possibly containing old certificates
                             org.matrix.TEESimulator.interception.keystore.shim
                                 .KeyMintSecurityLevelInterceptor
