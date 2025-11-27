@@ -40,11 +40,20 @@ class KeyMintSecurityLevelInterceptor(
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        // This interceptor only handles the 'generateKey' transaction directly.
         if (code == GENERATE_KEY_TRANSACTION) {
-            logTransaction(txId, "generateKey", callingUid, callingPid)
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
             return handleGenerateKey(callingUid, data)
+        } else if (code == IMPORT_KEY_TRANSACTION) {
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
+            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+            val alias =
+                data.readTypedObject(KeyDescriptor.CREATOR)?.alias
+                    ?: return TransactionResult.ContinueAndSkipPost
+            SystemLogger.info("Handling post-${transactionNames[code]} ${alias}")
+            return TransactionResult.Continue
         } else {
             logTransaction(
                 txId,
@@ -57,6 +66,35 @@ class KeyMintSecurityLevelInterceptor(
         return TransactionResult.ContinueAndSkipPost
     }
 
+    override fun onPostTransact(
+        txId: Long,
+        target: IBinder,
+        code: Int,
+        flags: Int,
+        callingUid: Int,
+        callingPid: Int,
+        data: Parcel,
+        reply: Parcel?,
+        resultCode: Int,
+    ): TransactionResult {
+        // We only care about successful 'importKey' transactions to clean cached keys.
+        if (
+            code == IMPORT_KEY_TRANSACTION &&
+                resultCode == 0 &&
+                reply != null &&
+                !InterceptorUtils.hasException(reply)
+        ) {
+            logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
+
+            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+            val keyDescriptor =
+                data.readTypedObject(KeyDescriptor.CREATOR)
+                    ?: return TransactionResult.SkipTransaction
+            cleanupKeyData(KeyIdentifier(callingUid, keyDescriptor.alias))
+        }
+        return TransactionResult.SkipTransaction
+    }
+
     /**
      * Handles the `generateKey` transaction. Based on the configuration for the calling UID, it
      * either generates a key in software or lets the call pass through to the hardware.
@@ -66,7 +104,7 @@ class KeyMintSecurityLevelInterceptor(
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
                 val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
                 SystemLogger.debug(
-                    "[key, attestationKey]: ${keyDescriptor.alias}, ${attestationKey?.alias}"
+                    "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
                 )
                 val params = data.createTypedArray(KeyParameter.CREATOR)!!
                 val parsedParams = KeyMintAttestation(params)
@@ -84,9 +122,7 @@ class KeyMintSecurityLevelInterceptor(
                             isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
 
                 if (needsSoftwareGeneration) {
-                    SystemLogger.info(
-                        "Generating software key for alias '${keyDescriptor.alias}' (UID: $callingUid)."
-                    )
+                    SystemLogger.info("Generating software key for ${keyId}.")
 
                     // Generate the key pair and certificate chain.
                     val keyData =
@@ -116,11 +152,11 @@ class KeyMintSecurityLevelInterceptor(
 
                 // If not generating, clear any stale state for this alias and let the call proceed.
                 cleanupKeyData(keyId)
-                TransactionResult.Continue
+                TransactionResult.ContinueAndSkipPost
             }
             .getOrElse {
                 SystemLogger.error("Error during generateKey handling for UID $callingUid.", it)
-                TransactionResult.Continue // Fallback to original service on error.
+                TransactionResult.ContinueAndSkipPost
             }
     }
 
@@ -175,8 +211,12 @@ class KeyMintSecurityLevelInterceptor(
         fun isAttestationKey(keyId: KeyIdentifier): Boolean = attestationKeys.contains(keyId)
 
         fun cleanupKeyData(keyId: KeyIdentifier) {
-            generatedKeys.remove(keyId)
-            attestationKeys.remove(keyId)
+            if (generatedKeys.remove(keyId) != null) {
+                SystemLogger.debug("Remove generated key ${keyId}")
+            }
+            if (attestationKeys.remove(keyId)) {
+                SystemLogger.debug("Remove cached attestaion key ${keyId}")
+            }
         }
     }
 }

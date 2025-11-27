@@ -89,24 +89,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         if (code == GET_KEY_ENTRY_TRANSACTION || code == DELETE_KEY_TRANSACTION) {
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val descriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
-            logTransaction(
-                txId,
-                "${transactionNames[code]} (alias=${descriptor.alias})",
-                callingUid,
-                callingPid,
-            )
 
-            if (ConfigurationManager.shouldSkipUid(callingUid)) {
-                SystemLogger.debug(
-                    "[TX_ID: $txId] Skip post-transaction hook for UID=${callingUid}"
-                )
+            if (ConfigurationManager.shouldSkipUid(callingUid))
                 return TransactionResult.ContinueAndSkipPost
-            }
 
+            SystemLogger.info("Handling ${transactionNames[code]!!} ${descriptor.alias}")
             val keyId = KeyIdentifier(callingUid, descriptor.alias)
 
             if (code == DELETE_KEY_TRANSACTION) {
@@ -119,7 +112,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                     ?: return TransactionResult.Continue
 
             if (KeyMintSecurityLevelInterceptor.isAttestationKey(keyId))
-                SystemLogger.debug("${descriptor.alias} was an attestation key")
+                SystemLogger.info("${descriptor.alias} was an attestation key")
 
             SystemLogger.info("[TX_ID: $txId] Found generated response for ${descriptor.alias}:")
             response.metadata?.authorizations?.forEach {
@@ -155,20 +148,17 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             return TransactionResult.SkipTransaction
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
+            logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
             val keyDescriptor =
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
-            logTransaction(
-                txId,
-                "post-getKeyEntry (alias=${keyDescriptor.alias})",
-                callingUid,
-                callingPid,
-            )
+
             if (!ConfigurationManager.shouldPatch(callingUid))
                 return TransactionResult.SkipTransaction
 
+            SystemLogger.info("Handling post-${transactionNames[code]!!} ${keyDescriptor.alias}")
             return try {
                 val response =
                     reply.readTypedObject(KeyEntryResponse.CREATOR)
