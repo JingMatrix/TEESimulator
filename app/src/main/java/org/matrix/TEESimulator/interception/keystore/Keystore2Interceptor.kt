@@ -9,12 +9,13 @@ import android.os.Parcel
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
 import android.system.keystore2.KeyEntryResponse
-import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
+import org.matrix.TEESimulator.legacy.CertificateHack
+import org.matrix.TEESimulator.legacy.CertificateUtils
+import org.matrix.TEESimulator.legacy.CertificateUtils.putCertificateChain
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
-import org.matrix.TEESimulator.pki.CertificateHelper
 
 /**
  * Interceptor for the `IKeystoreService` on Android S (API 31) and newer.
@@ -165,7 +166,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         ?: return TransactionResult.SkipTransaction
                 reply.setDataPosition(0) // Reset for potential reuse.
 
-                val originalChain = CertificateHelper.getCertificateChain(response)
+                val originalChain = CertificateUtils.run { response.getCertificateChain() }
                 val authorizations = response.metadata?.authorizations
                 val origin =
                     authorizations
@@ -185,8 +186,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 }
 
                 // Perform the attestation patch.
-                val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-                CertificateHelper.updateCertificateChain(response.metadata, newChain).getOrThrow()
+                val newChain = CertificateHack.hackCertificateChain(originalChain, callingUid)
+                response.putCertificateChain(newChain).getOrThrow()
 
                 InterceptorUtils.createTypedObjectReply(response)
             } catch (e: Exception) {
