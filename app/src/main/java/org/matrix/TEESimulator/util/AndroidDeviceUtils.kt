@@ -70,7 +70,7 @@ object AndroidDeviceUtils {
     }
 
     /**
-     * Sets the `ro.boot.vbmeta.digest` system property.
+     * Sets the `ro.boot.vbmeta.digest` system property using the `resetprop` command.
      *
      * @param bytes The 32-byte digest to set.
      */
@@ -78,9 +78,24 @@ object AndroidDeviceUtils {
         val hex = bytes.toHex()
         try {
             SystemLogger.debug("Setting system property 'ro.boot.vbmeta.digest' to: $hex")
-            SystemProperties.set("ro.boot.vbmeta.digest", hex)
+
+            // Construct the command to be executed
+            val command = arrayOf("resetprop", "ro.boot.vbmeta.digest", hex)
+
+            // Execute the command
+            val process = Runtime.getRuntime().exec(command)
+
+            // Wait for the process to complete and check the exit code for errors
+            val exitCode = process.waitFor()
+
+            if (exitCode != 0) {
+                val errorOutput = process.errorStream.bufferedReader().readText()
+                SystemLogger.error(
+                    "resetprop command failed with exit code $exitCode: $errorOutput"
+                )
+            }
         } catch (e: Exception) {
-            SystemLogger.error("Failed to set vbmeta digest property.", e)
+            SystemLogger.error("Failed to set vbmeta digest property by executing resetprop.", e)
         }
     }
 
