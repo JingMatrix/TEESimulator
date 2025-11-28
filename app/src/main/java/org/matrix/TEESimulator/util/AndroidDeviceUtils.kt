@@ -110,10 +110,10 @@ object AndroidDeviceUtils {
             getCustomPatchLevelFor("system", isLong = false)
                 ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = false)
 
-    val vendorPatchLevel: Int
+    val vendorPatchLevelLong: Int
         get() =
-            getCustomPatchLevelFor("vendor", isLong = false)
-                ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = false)
+            getCustomPatchLevelFor("vendor", isLong = true)
+                ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
 
     val bootPatchLevelLong: Int
         get() =

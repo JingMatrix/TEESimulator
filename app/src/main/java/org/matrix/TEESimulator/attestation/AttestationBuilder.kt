@@ -81,7 +81,7 @@ object AttestationBuilder {
             DERTaggedObject(
                 true,
                 AttestationConstants.TAG_VENDOR_PATCHLEVEL,
-                ASN1Integer(AndroidDeviceUtils.vendorPatchLevel.toLong()),
+                ASN1Integer(AndroidDeviceUtils.vendorPatchLevelLong.toLong()),
             )
         )
         vector.add(
@@ -165,7 +165,7 @@ object AttestationBuilder {
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_VENDOR_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.vendorPatchLevel.toLong()),
+                    ASN1Integer(AndroidDeviceUtils.vendorPatchLevelLong.toLong()),
                 ),
                 DERTaggedObject(
                     true,
