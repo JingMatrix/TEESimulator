@@ -42,6 +42,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.matrix.TEESimulator.attestation.ATTESTATION_OID
+import org.matrix.TEESimulator.attestation.KeyMintAttestation as KeyGenParameters
 import org.matrix.TEESimulator.config.ConfigurationManager as PkgConfig
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor as SecurityLevelInterceptor
@@ -51,7 +52,6 @@ import org.matrix.TEESimulator.pki.KeyBox
 import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.util.AndroidDeviceUtils as AndroidUtils
 import org.matrix.TEESimulator.util.toHex
-// import org.matrix.TEESimulator.attestation.KeyMintAttestation as KeyGenParameters
 
 /** Utility for logging KeyMint parameters in a human-readable format. */
 object KeyMintTagLogger {
@@ -167,117 +167,6 @@ object CertificateGen {
         }
 
         override fun hashCode(): Int = digest.contentHashCode()
-    }
-
-    data class KeyGenParameters(
-        var keySize: Int = 0,
-        var algorithm: Int = 0,
-        var certificateSerial: BigInteger? = null,
-        var certificateNotBefore: Date? = null,
-        var certificateNotAfter: Date? = null,
-        var certificateSubject: X500Name? = null,
-        var rsaPublicExponent: BigInteger? = null,
-        var ecCurve: Int = 0,
-        var ecCurveName: String? = null,
-        var purpose: MutableList<Int> = mutableListOf(),
-        var digest: MutableList<Int> = mutableListOf(),
-        var attestationChallenge: ByteArray? = null,
-        var brand: ByteArray? = null,
-        var device: ByteArray? = null,
-        var product: ByteArray? = null,
-        var manufacturer: ByteArray? = null,
-        var model: ByteArray? = null,
-        var imei1: ByteArray? = null,
-        var imei2: ByteArray? = null,
-        var meid: ByteArray? = null,
-        var serialno: ByteArray? = null,
-    ) {
-
-        constructor(params: Array<KeyParameter>) : this() {
-            params.forEach { param ->
-                // Use the new, clean logger. This one line provides detailed, readable logs.
-                KeyMintTagLogger.logParameter(param)
-
-                val value = param.value
-                when (param.tag) {
-                    Tag.KEY_SIZE -> keySize = value.integer
-                    Tag.ALGORITHM -> algorithm = value.algorithm
-                    Tag.CERTIFICATE_SERIAL -> certificateSerial = BigInteger(value.blob)
-                    Tag.CERTIFICATE_NOT_BEFORE -> certificateNotBefore = Date(value.dateTime)
-                    Tag.CERTIFICATE_NOT_AFTER -> certificateNotAfter = Date(value.dateTime)
-                    Tag.CERTIFICATE_SUBJECT ->
-                        certificateSubject = X500Name(X500Principal(value.blob).name)
-                    Tag.RSA_PUBLIC_EXPONENT -> rsaPublicExponent = value.longInteger.toBigInteger()
-                    Tag.EC_CURVE -> {
-                        ecCurve = value.ecCurve
-                        ecCurveName = getEcCurveName(ecCurve)
-                    }
-                    Tag.PURPOSE -> purpose.add(value.keyPurpose)
-                    Tag.DIGEST -> digest.add(value.digest)
-                    Tag.ATTESTATION_CHALLENGE -> attestationChallenge = value.blob
-                    Tag.ATTESTATION_ID_BRAND -> brand = value.blob
-                    Tag.ATTESTATION_ID_DEVICE -> device = value.blob
-                    Tag.ATTESTATION_ID_PRODUCT -> product = value.blob
-                    Tag.ATTESTATION_ID_MANUFACTURER -> manufacturer = value.blob
-                    Tag.ATTESTATION_ID_MODEL -> model = value.blob
-                    Tag.ATTESTATION_ID_IMEI -> imei1 = value.blob
-                    Tag.ATTESTATION_ID_SECOND_IMEI -> imei2 = value.blob
-                    Tag.ATTESTATION_ID_MEID -> meid = value.blob
-                }
-            }
-            // Fallback: if no EC curve tag but we know key size
-            if (ecCurveName == null && keySize != 0) {
-                ecCurveName = ecCurveMapKeySize(keySize)
-            }
-        }
-
-        private fun ecCurveMapKeySize(curveSize: Int): String =
-            when (curveSize) {
-                224 -> "secp224r1"
-                256 -> "secp256r1"
-                384 -> "secp384r1"
-                521 -> "secp521r1"
-                else -> "secp256r1" // default fallback
-            }
-
-        private fun getEcCurveName(curve: Int): String =
-            when (curve) {
-                EcCurve.CURVE_25519 -> "CURVE_25519"
-                EcCurve.P_224 -> "secp224r1"
-                EcCurve.P_256 -> "secp256r1"
-                EcCurve.P_384 -> "secp384r1"
-                EcCurve.P_521 -> "secp521r1"
-                else -> throw IllegalArgumentException("Unknown EC curve: $curve")
-            }
-
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-
-            other as KeyGenParameters
-
-            return keySize == other.keySize &&
-                algorithm == other.algorithm &&
-                certificateSerial == other.certificateSerial &&
-                certificateNotBefore == other.certificateNotBefore &&
-                certificateNotAfter == other.certificateNotAfter &&
-                certificateSubject == other.certificateSubject &&
-                rsaPublicExponent == other.rsaPublicExponent &&
-                ecCurve == other.ecCurve &&
-                ecCurveName == other.ecCurveName &&
-                purpose == other.purpose &&
-                digest == other.digest &&
-                attestationChallenge.contentEquals(other.attestationChallenge) &&
-                brand.contentEquals(other.brand) &&
-                device.contentEquals(other.device) &&
-                product.contentEquals(other.product) &&
-                manufacturer.contentEquals(other.manufacturer) &&
-                model.contentEquals(other.model) &&
-                imei1.contentEquals(other.imei1) &&
-                imei2.contentEquals(other.imei2) &&
-                meid.contentEquals(other.meid) &&
-                serialno.contentEquals(other.serialno)
-        }
     }
 
     fun generateChain(
@@ -535,10 +424,10 @@ object CertificateGen {
                 teeEnforcedObjects.add(DERTaggedObject(true, 717, DEROctetString(it)))
             }
 
-            params.serialno?.let {
+            params.serial?.let {
                 teeEnforcedObjects.add(DERTaggedObject(true, 713, DEROctetString(it)))
             }
-            params.imei1?.let {
+            params.imei?.let {
                 teeEnforcedObjects.add(DERTaggedObject(true, 714, DEROctetString(it)))
             }
             params.meid?.let {
@@ -546,7 +435,7 @@ object CertificateGen {
             }
 
             if (AndroidUtils.attestVersion >= 300) {
-                params.imei2?.let {
+                params.secondImei?.let {
                     teeEnforcedObjects.add(DERTaggedObject(true, 723, DEROctetString(it)))
                 }
             }

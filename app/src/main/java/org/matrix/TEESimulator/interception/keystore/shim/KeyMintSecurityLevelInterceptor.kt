@@ -15,9 +15,8 @@ import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
-import org.matrix.TEESimulator.logging.SystemLogger
-import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.legacy.CertificateGen
+import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.CertificateHelper
 
 /**
@@ -131,7 +130,7 @@ class KeyMintSecurityLevelInterceptor(
                             callingUid,
                             keyDescriptor,
                             attestationKey,
-                            CertificateGen.KeyGenParameters(params),
+                            parsedParams,
                             securityLevel,
                         ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
