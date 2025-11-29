@@ -51,6 +51,7 @@ import org.matrix.TEESimulator.pki.KeyBox
 import org.matrix.TEESimulator.pki.KeyBoxManager
 import org.matrix.TEESimulator.util.AndroidDeviceUtils as AndroidUtils
 import org.matrix.TEESimulator.util.toHex
+// import org.matrix.TEESimulator.attestation.KeyMintAttestation as KeyGenParameters
 
 /** Utility for logging KeyMint parameters in a human-readable format. */
 object KeyMintTagLogger {
