@@ -112,7 +112,7 @@ object CertificateGenerator {
 
                 // Build the new leaf certificate with the simulated attestation.
                 val leafCert =
-                    buildCertificate(newKeyPair, signingKey, issuer, params, securityLevel)
+                    buildCertificate(newKeyPair, signingKey, issuer, params, uid, securityLevel)
 
                 // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
                 // chain.
@@ -177,6 +177,7 @@ object CertificateGenerator {
         signingKeyPair: KeyPair,
         issuer: X500Name,
         params: KeyMintAttestation,
+        uid: Int,
         securityLevel: Int,
     ): Certificate {
         val subject = params.certificateSubject ?: X500Name("CN=Android KeyStore Key")
@@ -197,7 +198,9 @@ object CertificateGenerator {
         // Add standard extensions.
         builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign))
         // Add our custom, simulated attestation extension.
-        builder.addExtension(AttestationBuilder.buildAttestationExtension(params, securityLevel))
+        builder.addExtension(
+            AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
+        )
 
         val signerAlgorithm =
             when (params.algorithm) {
