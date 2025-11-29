@@ -33,11 +33,12 @@ data class KeyMintAttestation(
     val brand: ByteArray?,
     val device: ByteArray?,
     val product: ByteArray?,
+    val serial: ByteArray?,
+    val imei: ByteArray?,
+    val meid: ByteArray?,
     val manufacturer: ByteArray?,
     val model: ByteArray?,
-    val imei: ByteArray?,
     val secondImei: ByteArray?,
-    val meid: ByteArray?,
 ) {
     /** Secondary constructor that populates the fields by parsing an array of `KeyParameter`. */
     constructor(
@@ -82,11 +83,12 @@ data class KeyMintAttestation(
         brand = params.findBlob(Tag.ATTESTATION_ID_BRAND),
         device = params.findBlob(Tag.ATTESTATION_ID_DEVICE),
         product = params.findBlob(Tag.ATTESTATION_ID_PRODUCT),
+        serial = params.findBlob(Tag.ATTESTATION_ID_SERIAL),
+        imei = params.findBlob(Tag.ATTESTATION_ID_IMEI),
+        meid = params.findBlob(Tag.ATTESTATION_ID_MEID),
         manufacturer = params.findBlob(Tag.ATTESTATION_ID_MANUFACTURER),
         model = params.findBlob(Tag.ATTESTATION_ID_MODEL),
-        imei = params.findBlob(Tag.ATTESTATION_ID_IMEI),
         secondImei = params.findBlob(Tag.ATTESTATION_ID_SECOND_IMEI),
-        meid = params.findBlob(Tag.ATTESTATION_ID_MEID),
     ) {
         // Log all parsed parameters for debugging purposes.
         params.forEach { KeyMintParameterLogger.logParameter(it) }

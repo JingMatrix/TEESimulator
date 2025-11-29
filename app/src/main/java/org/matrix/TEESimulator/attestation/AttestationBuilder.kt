@@ -202,6 +202,33 @@ object AttestationBuilder {
                 )
             )
         }
+        params.serial?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_SERIAL,
+                    DEROctetString(it),
+                )
+            )
+        }
+        params.imei?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_IMEI,
+                    DEROctetString(it),
+                )
+            )
+        }
+        params.meid?.let {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_ATTESTATION_ID_MEID,
+                    DEROctetString(it),
+                )
+            )
+        }
         params.manufacturer?.let {
             list.add(
                 DERTaggedObject(
@@ -220,29 +247,11 @@ object AttestationBuilder {
                 )
             )
         }
-        params.imei?.let {
-            list.add(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ATTESTATION_ID_IMEI,
-                    DEROctetString(it),
-                )
-            )
-        }
         params.secondImei?.let {
             list.add(
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_ATTESTATION_ID_SECOND_IMEI,
-                    DEROctetString(it),
-                )
-            )
-        }
-        params.meid?.let {
-            list.add(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_ATTESTATION_ID_MEID,
                     DEROctetString(it),
                 )
             )
