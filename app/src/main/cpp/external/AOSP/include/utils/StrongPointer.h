@@ -17,6 +17,7 @@
 #ifndef ANDROID_STRONG_POINTER_H
 #define ANDROID_STRONG_POINTER_H
 
+#include "refbase_compat.h"
 #include <functional>
 #include <type_traits>  // for common_type.
 
@@ -212,7 +213,7 @@ sp<T> sp<T>::make(Args&&... args) {
 template <typename T>
 sp<T> sp<T>::fromExisting(T* other) {
     if (other) {
-        other->incStrongRequireStrong(other);
+        incStrongFromExisting(other, other);
         sp<T> result;
         result.m_ptr = other;
         return result;
