@@ -15,8 +15,8 @@ import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
 import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
-import org.matrix.TEESimulator.legacy.CertificateGen
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
 
 /**
@@ -126,10 +126,10 @@ class KeyMintSecurityLevelInterceptor(
 
                     // Generate the key pair and certificate chain.
                     val keyData =
-                        CertificateGen.generateKeyPair(
+                        CertificateGenerator.generateAttestedKeyPair(
                             callingUid,
-                            keyDescriptor,
-                            attestationKey,
+                            keyDescriptor.alias,
+                            attestationKey?.alias,
                             parsedParams,
                             securityLevel,
                         ) ?: throw Exception("CertificateGenerator failed to create key pair.")
