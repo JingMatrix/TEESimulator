@@ -306,68 +306,76 @@ object AttestationBuilder {
         return DERSequence(list)
     }
 
+    /**
+     * A wrapper for a byte array that provides content-based equality.
+     * This is necessary for using signature digests in a Set.
+     */
     private data class Digest(val digest: ByteArray) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (javaClass != other?.javaClass) return false
-            other as Digest
-            return digest.contentEquals(other.digest)
+            return digest.contentEquals((other as Digest).digest)
         }
 
         override fun hashCode(): Int = digest.contentHashCode()
     }
 
+    /**
+     * Creates the AttestationApplicationId structure.
+     * This structure contains information about the package(s) and their signing certificates.
+     *
+     * @param uid The UID of the application.
+     * @return A DER-encoded octet string containing the application ID information.
+     * @throws IllegalStateException If the PackageManager or package information cannot be retrieved.
+     */
     @Throws(Throwable::class)
     private fun createApplicationId(uid: Int): DEROctetString {
-        val pm =
-            ConfigurationManager.getPackageManager()
-                ?: throw IllegalStateException("PackageManager not found!")
-        val packages =
-            pm.getPackagesForUid(uid) ?: throw IllegalStateException("No packages for UID $uid")
+        val pm = ConfigurationManager.getPackageManager()
+            ?: throw IllegalStateException("PackageManager not found!")
+        val packages = pm.getPackagesForUid(uid)
+            ?: throw IllegalStateException("No packages for UID $uid")
 
-        val messageDigest = MessageDigest.getInstance("SHA-256")
-        val signatures = mutableSetOf<Digest>()
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val packageInfoList = mutableListOf<DERSequence>()
+        val signatureDigests = mutableSetOf<Digest>()
 
-        val packageInfos =
-            packages.map { packageName ->
-                val info =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        pm.getPackageInfo(
-                            packageName,
-                            PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
-                            uid / 100000,
-                        )
-                    } else {
-                        pm.getPackageInfo(
-                            packageName,
-                            PackageManager.GET_SIGNING_CERTIFICATES,
-                            uid / 100000,
-                        )
-                    }
-
-                info.signingInfo?.signingCertificateHistory?.forEach { signature ->
-                    signatures.add(Digest(messageDigest.digest(signature.toByteArray())))
-                }
-
-                info
+        // Process all packages associated with the UID in a single loop.
+        packages.forEach { packageName ->
+            val userId = uid / 100000
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES.toLong(), userId)
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES, userId)
             }
 
-        val packageInfoArray =
-            packageInfos
-                .map { info ->
-                    DERSequence(
-                        arrayOf(
-                            DEROctetString(info.packageName.toByteArray(StandardCharsets.UTF_8)),
-                            ASN1Integer(info.longVersionCode),
-                        )
+            // Add package information (name and version code) to our list.
+            packageInfoList.add(
+                DERSequence(
+                    arrayOf(
+                        DEROctetString(packageInfo.packageName.toByteArray(StandardCharsets.UTF_8)),
+                        ASN1Integer(packageInfo.longVersionCode)
                     )
-                }
-                .toTypedArray()
+                )
+            )
 
-        val signaturesArray = signatures.map { DEROctetString(it.digest) }.toTypedArray()
+            // Collect unique signature digests from the signing history.
+            packageInfo.signingInfo?.signingCertificateHistory?.forEach { signature ->
+                val digest = sha256.digest(signature.toByteArray())
+                signatureDigests.add(Digest(digest))
+            }
+        }
 
-        val applicationIdArray = arrayOf(DERSet(packageInfoArray), DERSet(signaturesArray))
+        // The application ID is a sequence of two sets:
+        // 1. A set of package information (name and version).
+        // 2. A set of SHA-256 digests of the signing certificates.
+        val applicationIdSequence = DERSequence(
+            arrayOf(
+                DERSet(packageInfoList.toTypedArray()),
+                DERSet(signatureDigests.map { DEROctetString(it.digest) }.toTypedArray())
+            )
+        )
 
-        return DEROctetString(DERSequence(applicationIdArray).encoded)
+        return DEROctetString(applicationIdSequence.encoded)
     }
 }
