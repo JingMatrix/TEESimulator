@@ -226,6 +226,9 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
                 val attestationArgs = KeymasterArguments()
                 if (data.readInt() == 1) {
                     attestationArgs.readFromParcel(data)
+                    val challenge = attestationArgs.getBytes(KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE, ByteArray(0))
+    params.attestationChallenge = challenge
+                    params.attestationChallenge = challenge
                 }
 
                 val certificateChain =
