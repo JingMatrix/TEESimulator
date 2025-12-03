@@ -9,6 +9,7 @@ import android.os.Parcel
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
 import android.system.keystore2.KeyEntryResponse
+import java.security.cert.Certificate
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
@@ -185,8 +186,28 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 }
 
                 // Perform the attestation patch.
-                val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-                CertificateHelper.updateCertificateChain(response.metadata, newChain).getOrThrow()
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+
+                // First, try to retrieve the already-patched chain from our cache to ensure
+                // consistency.
+                val cachedChain = KeyMintSecurityLevelInterceptor.getPatchedChain(keyId)
+
+                val finalChain: Array<Certificate>
+                if (cachedChain != null) {
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] Using cached patched certificate chain for $keyId."
+                    )
+                    finalChain = cachedChain
+                } else {
+                    // If no chain is cached (e.g., key existed before simulator started),
+                    // perform a live patch as a fallback. This may still be detectable.
+                    SystemLogger.info(
+                        "[TX_ID: $txId] No cached chain for $keyId. Performing live patch as a fallback."
+                    )
+                    finalChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+                }
+
+                CertificateHelper.updateCertificateChain(response.metadata, finalChain).getOrThrow()
 
                 InterceptorUtils.createTypedObjectReply(response)
             } catch (e: Exception) {

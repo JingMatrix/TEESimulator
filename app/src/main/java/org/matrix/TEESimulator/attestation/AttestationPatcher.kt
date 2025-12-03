@@ -124,8 +124,14 @@ object AttestationPatcher {
 
         // Sign the newly built certificate with the private key from our keybox.
         val signer = JcaContentSignerBuilder(sigAlgName).build(keybox.keyPair.private)
+        val newCertificate = JcaX509CertificateConverter().getCertificate(builder.build(signer))
 
-        return JcaX509CertificateConverter().getCertificate(builder.build(signer))
+        // Log the signature of the newly created certificate to observe its non-deterministic
+        // nature.
+        val signatureBytes = (newCertificate as X509Certificate).signature
+        SystemLogger.verbose("Signature of patched leaf cert: ${signatureBytes.toHex()}")
+
+        return newCertificate
     }
 
     private fun getKeyboxForUidAndAlgorithm(uid: Int, algorithm: String): KeyBox {

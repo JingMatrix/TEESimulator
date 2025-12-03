@@ -101,6 +101,14 @@ class KeyMintSecurityLevelInterceptor(
                     ?: return TransactionResult.SkipTransaction
             if (originalChain.size > 1) {
                 val newChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+
+                // Cache the newly patched chain to ensure consistency across subsequent API calls.
+                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                patchedChains[keyId] = newChain
+                SystemLogger.debug("Cached patched certificate chain for $keyId.")
+
                 CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
 
                 return InterceptorUtils.createTypedObjectReply(metadata)
@@ -217,6 +225,8 @@ class KeyMintSecurityLevelInterceptor(
 
         // Stores keys generated entirely in software.
         val generatedKeys = ConcurrentHashMap<KeyIdentifier, GeneratedKeyInfo>()
+        // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
+        private val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
         // A set to quickly identify keys that were generated for attestation purposes.
         private val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
 
@@ -224,11 +234,16 @@ class KeyMintSecurityLevelInterceptor(
         fun getGeneratedKeyResponse(keyId: KeyIdentifier): KeyEntryResponse? =
             generatedKeys[keyId]?.response
 
+        fun getPatchedChain(keyId: KeyIdentifier): Array<Certificate>? = patchedChains[keyId]
+
         fun isAttestationKey(keyId: KeyIdentifier): Boolean = attestationKeys.contains(keyId)
 
         fun cleanupKeyData(keyId: KeyIdentifier) {
             if (generatedKeys.remove(keyId) != null) {
                 SystemLogger.debug("Remove generated key ${keyId}")
+            }
+            if (patchedChains.remove(keyId) != null) {
+                SystemLogger.debug("Remove patched chain for ${keyId}")
             }
             if (attestationKeys.remove(keyId)) {
                 SystemLogger.debug("Remove cached attestaion key ${keyId}")
@@ -240,6 +255,7 @@ class KeyMintSecurityLevelInterceptor(
             val count = generatedKeys.size
             val reasonMessage = reason?.let { " due to $it" } ?: ""
             generatedKeys.clear()
+            patchedChains.clear()
             attestationKeys.clear()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
