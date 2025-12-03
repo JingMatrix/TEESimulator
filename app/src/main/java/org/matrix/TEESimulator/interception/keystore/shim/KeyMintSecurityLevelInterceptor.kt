@@ -46,14 +46,14 @@ class KeyMintSecurityLevelInterceptor(
 
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
             return handleGenerateKey(callingUid, data)
-        } else if (code == IMPORT_KEY_TRANSACTION) {
+        } else if (code == IMPORT_KEY_TRANSACTION || code == CREATE_OPERATION_TRANSACTION) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
             data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            val alias =
-                data.readTypedObject(KeyDescriptor.CREATOR)?.alias
-                    ?: return TransactionResult.ContinueAndSkipPost
-            SystemLogger.info("Handling post-${transactionNames[code]} ${alias}")
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            SystemLogger.info(
+                "[TX_ID: $txId] Forward to post-${transactionNames[code]} hook for ${keyDescriptor.alias}"
+            )
             return TransactionResult.Continue
         } else {
             logTransaction(
@@ -90,6 +90,23 @@ class KeyMintSecurityLevelInterceptor(
                 data.readTypedObject(KeyDescriptor.CREATOR)
                     ?: return TransactionResult.SkipTransaction
             cleanupKeyData(KeyIdentifier(callingUid, keyDescriptor.alias))
+        } else if (code == CREATE_OPERATION_TRANSACTION) {
+            logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
+
+            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val parsedParams = KeyMintAttestation(params)
+            val forced = data.readBoolean()
+            if (forced)
+                SystemLogger.debug(
+                    "[TX_ID: $txId] Current operation has a very high pruning power."
+                )
+            val response: CreateOperationResponse =
+                reply.readTypedObject(CreateOperationResponse.CREATOR)!!
+            SystemLogger.debug(
+                "[TX_ID: $txId] CreateOperationResponse: ${response.iOperation} ${response.operationChallenge}"
+            )
         } else if (code == GENERATE_KEY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
@@ -203,6 +220,11 @@ class KeyMintSecurityLevelInterceptor(
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
         private val IMPORT_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "importKey")
+        private val CREATE_OPERATION_TRANSACTION =
+            InterceptorUtils.getTransactCode(
+                IKeystoreSecurityLevel.Stub::class.java,
+                "createOperation",
+            )
 
         private val transactionNames: Map<Int, String> by lazy {
             IKeystoreSecurityLevel.Stub::class
