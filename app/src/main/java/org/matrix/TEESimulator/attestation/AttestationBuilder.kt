@@ -18,6 +18,7 @@ import org.bouncycastle.asn1.x509.Extension
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
+import org.matrix.TEESimulator.util.AndroidDeviceUtils.DO_NOT_REPORT
 
 /**
  * A builder object responsible for constructing the ASN.1 DER-encoded Android Key Attestation
@@ -67,34 +68,62 @@ object AttestationBuilder {
         return DERSequence(rootOfTrustElements)
     }
 
-    /** Assembles a map of simulated hardware-enforced properties. */
-    fun getSimulatedHardwareProperties(): Map<Int, DERTaggedObject> {
-        return mapOf(
-            AttestationConstants.TAG_OS_VERSION to
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_OS_VERSION,
-                    ASN1Integer(AndroidDeviceUtils.osVersion.toLong()),
-                ),
-            AttestationConstants.TAG_OS_PATCHLEVEL to
+    /**
+     * Assembles a map representing the desired state of simulated hardware-enforced properties. A
+     * null value for a given tag indicates that it should be removed from the attestation.
+     *
+     * @param uid The UID of the calling application.
+     * @return A map where keys are attestation tag numbers and values are the desired
+     *   [DERTaggedObject] or null to signify removal.
+     */
+    fun getSimulatedHardwareProperties(uid: Int): Map<Int, DERTaggedObject?> {
+        val properties = mutableMapOf<Int, DERTaggedObject?>()
+
+        // OS Version is always present.
+        properties[AttestationConstants.TAG_OS_VERSION] =
+            DERTaggedObject(
+                true,
+                AttestationConstants.TAG_OS_VERSION,
+                ASN1Integer(AndroidDeviceUtils.osVersion.toLong()),
+            )
+
+        val osPatch = AndroidDeviceUtils.getPatchLevel(uid)
+        properties[AttestationConstants.TAG_OS_PATCHLEVEL] =
+            if (osPatch != DO_NOT_REPORT) {
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_OS_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.patchLevel.toLong()),
-                ),
-            AttestationConstants.TAG_VENDOR_PATCHLEVEL to
+                    ASN1Integer(osPatch.toLong()),
+                )
+            } else {
+                null // Signal for removal
+            }
+
+        val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(uid)
+        properties[AttestationConstants.TAG_VENDOR_PATCHLEVEL] =
+            if (vendorPatch != DO_NOT_REPORT) {
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_VENDOR_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.vendorPatchLevelLong.toLong()),
-                ),
-            AttestationConstants.TAG_BOOT_PATCHLEVEL to
+                    ASN1Integer(vendorPatch.toLong()),
+                )
+            } else {
+                null // Signal for removal
+            }
+
+        val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(uid)
+        properties[AttestationConstants.TAG_BOOT_PATCHLEVEL] =
+            if (bootPatch != DO_NOT_REPORT) {
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_BOOT_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.bootPatchLevelLong.toLong()),
-                ),
-        )
+                    ASN1Integer(bootPatch.toLong()),
+                )
+            } else {
+                null // Signal for removal
+            }
+
+        return properties
     }
 
     /** Constructs the main `KeyDescription` sequence, which is the core of the attestation. */
@@ -103,7 +132,7 @@ object AttestationBuilder {
         uid: Int,
         securityLevel: Int,
     ): ASN1Sequence {
-        val teeEnforced = buildTeeEnforcedList(params, securityLevel)
+        val teeEnforced = buildTeeEnforcedList(params, uid, securityLevel)
         val softwareEnforced = buildSoftwareEnforcedList(uid, securityLevel)
 
         val fields =
@@ -125,7 +154,11 @@ object AttestationBuilder {
     }
 
     /** Builds the `TeeEnforced` authorization list. These are properties the TEE "guarantees". */
-    private fun buildTeeEnforcedList(params: KeyMintAttestation, securityLevel: Int): DERSequence {
+    private fun buildTeeEnforcedList(
+        params: KeyMintAttestation,
+        uid: Int,
+        securityLevel: Int,
+    ): DERSequence {
         val list =
             mutableListOf<ASN1Encodable>(
                 DERTaggedObject(
@@ -164,27 +197,11 @@ object AttestationBuilder {
                     AttestationConstants.TAG_ROOT_OF_TRUST,
                     buildRootOfTrust(null),
                 ),
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_OS_VERSION,
-                    ASN1Integer(AndroidDeviceUtils.osVersion.toLong()),
-                ),
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_OS_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.patchLevel.toLong()),
-                ),
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_VENDOR_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.vendorPatchLevelLong.toLong()),
-                ),
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_BOOT_PATCHLEVEL,
-                    ASN1Integer(AndroidDeviceUtils.bootPatchLevelLong.toLong()),
-                ),
             )
+
+        // Use the same logic as getSimulatedHardwareProperties to conditionally add patch levels.
+        val simulatedProperties = getSimulatedHardwareProperties(uid)
+        simulatedProperties.values.filterNotNull().forEach { list.add(it) }
 
         // Add optional device identifiers if they were provided.
         params.brand?.let {

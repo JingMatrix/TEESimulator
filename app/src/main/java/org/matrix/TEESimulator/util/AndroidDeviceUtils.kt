@@ -21,6 +21,11 @@ import org.matrix.TEESimulator.logging.SystemLogger
  */
 object AndroidDeviceUtils {
 
+    /**
+     * Internal constant to signify that a patch level should not be included in the attestation.
+     */
+    internal const val DO_NOT_REPORT = -1
+
     // --- Boot Key and Verified Boot Hash ---
 
     /**
@@ -157,30 +162,33 @@ object AndroidDeviceUtils {
 
     // --- Patch Level Properties ---
 
-    val patchLevel: Int
-        get() =
-            getCustomPatchLevelFor("system", isLong = false)
-                ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = false)
+    fun getPatchLevel(uid: Int): Int {
+        val custom = getCustomPatchLevelFor(uid, "system", isLong = false)
+        // If custom is null, it means 'device_default' was used, so we fall back.
+        // Otherwise, we use the returned value, which is either the parsed date or DO_NOT_REPORT.
+        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = false)
+    }
 
-    val vendorPatchLevelLong: Int
-        get() =
-            getCustomPatchLevelFor("vendor", isLong = true)
-                ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+    fun getVendorPatchLevelLong(uid: Int): Int {
+        val custom = getCustomPatchLevelFor(uid, "vendor", isLong = true)
+        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+    }
 
-    val bootPatchLevelLong: Int
-        get() =
-            getCustomPatchLevelFor("boot", isLong = true)
-                ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+    fun getBootPatchLevelLong(uid: Int): Int {
+        val custom = getCustomPatchLevelFor(uid, "boot", isLong = true)
+        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+    }
 
     /**
-     * Retrieves a custom patch level from the configuration if available.
+     * Retrieves a custom patch level from the configuration if available for a specific UID.
      *
+     * @param uid The UID of the calling application.
      * @param component The component to get the patch level for ("system", "vendor", "boot").
      * @param isLong Whether to return the patch level in `YYYYMMDD` or `YYYYMM` format.
      * @return The custom patch level, or null if not configured.
      */
-    private fun getCustomPatchLevelFor(component: String, isLong: Boolean): Int? {
-        val config = ConfigurationManager.customPatchLevelOverride ?: return null
+    private fun getCustomPatchLevelFor(uid: Int, component: String, isLong: Boolean): Int? {
+        val config = ConfigurationManager.getPatchLevelForUid(uid) ?: return null
         val value =
             when (component) {
                 "system" -> config.system ?: config.all
@@ -189,11 +197,14 @@ object AndroidDeviceUtils {
                 else -> config.all
             } ?: return null
 
-        // "prop" or "no" indicates falling back to the system default.
-        if (value.equals("no", ignoreCase = true) || value.equals("prop", ignoreCase = true)) {
-            return null
+        return when {
+            // "device_default" indicates falling back to the system property.
+            value.equals("device_default", ignoreCase = true) -> null
+            // "no" indicates this value should not be reported.
+            value.equals("no", ignoreCase = true) -> DO_NOT_REPORT
+            // Otherwise, parse the date string.
+            else -> parsePatchLevelValue(value, isLong)
         }
-        return parsePatchLevelValue(value, isLong)
     }
 
     /** Parses a patch level string (e.g., "2025-11-01") into an integer format. */

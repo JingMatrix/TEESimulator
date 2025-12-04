@@ -61,6 +61,7 @@ object AttestationPatcher {
                         parsedAttestation,
                         keybox,
                         originalLeaf.sigAlgName,
+                        uid,
                     )
 
                 // 4. Construct the NEW, VALID chain by prepending the patched leaf to the keybox's
@@ -90,6 +91,7 @@ object AttestationPatcher {
      * @param sigAlgName The signature algorithm name (e.g., "SHA256withECDSA") from the original
      *   certificate. This is required to ensure the new certificate is signed using a compatible
      *   algorithm.
+     * @param uid The UID of the application requesting the certificate.
      * @return A new [Certificate] object.
      */
     private fun createPatchedLeafCertificate(
@@ -97,6 +99,7 @@ object AttestationPatcher {
         parsedAttestation: ParsedAttestation,
         keybox: KeyBox,
         sigAlgName: String,
+        uid: Int,
     ): Certificate {
         // The issuer of our new leaf is the subject of the first certificate in our custom keybox
         // chain.
@@ -113,7 +116,7 @@ object AttestationPatcher {
             )
 
         // Create the new, patched attestation extension.
-        val patchedExtension = createPatchedAttestationExtension(parsedAttestation)
+        val patchedExtension = createPatchedAttestationExtension(parsedAttestation, uid)
 
         // Copy all other extensions from the original certificate, except for the attestation.
         originalLeafHolder.extensions.extensionOIDs.forEach {
@@ -199,7 +202,7 @@ object AttestationPatcher {
     }
 
     /** Constructs a new, patched attestation extension using simulated device properties. */
-    private fun createPatchedAttestationExtension(parsed: ParsedAttestation): Extension {
+    private fun createPatchedAttestationExtension(parsed: ParsedAttestation, uid: Int): Extension {
         val (allFields, teeEnforcedMap, originalRootOfTrust) = parsed
 
         var formattedString = allFields.joinToString(separator = ", ") { formatAsn1Primitive(it) }
@@ -210,8 +213,19 @@ object AttestationPatcher {
         teeEnforcedMap[AttestationConstants.TAG_ROOT_OF_TRUST] =
             DERTaggedObject(true, AttestationConstants.TAG_ROOT_OF_TRUST, newRootOfTrust)
 
-        // Add other simulated hardware properties.
-        teeEnforcedMap.putAll(AttestationBuilder.getSimulatedHardwareProperties())
+        // Get the desired state for simulated properties.
+        val simulatedProperties = AttestationBuilder.getSimulatedHardwareProperties(uid)
+
+        // Apply the desired state: update, add, or remove properties from the original map.
+        simulatedProperties.forEach { (tag, value) ->
+            if (value != null) {
+                // If the value is not null, add or update it.
+                teeEnforcedMap[tag] = value
+            } else {
+                // If the value is null, remove the tag from the map.
+                teeEnforcedMap.remove(tag)
+            }
+        }
 
         // Re-assemble the TEE enforced list from the map's values, sorting for DER compliance.
         val sortedElements = teeEnforcedMap.values.sortedBy { it.tagNo }

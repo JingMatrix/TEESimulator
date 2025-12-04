@@ -40,7 +40,8 @@ object ConfigurationManager {
     @Volatile private var packageModes = mapOf<String, Mode>()
     @Volatile private var packageKeyboxes = mapOf<String, String>()
     @Volatile private var isTeeBroken: Boolean? = null
-    @Volatile var customPatchLevelOverride: CustomPatchLevel? = null
+    @Volatile private var globalCustomPatchLevel: CustomPatchLevel? = null
+    @Volatile private var packagePatchLevels = mapOf<String, CustomPatchLevel>()
 
     // Cache for UID to package name resolution.
     private val uidToPackagesCache = ConcurrentHashMap<Int, Array<String>>()
@@ -105,6 +106,21 @@ object ConfigurationManager {
     }
 
     /**
+     * Retrieves the custom patch level configuration for a given UID. It first checks for a
+     * package-specific override and falls back to the global configuration.
+     *
+     * @param uid The UID of the calling application.
+     * @return The applicable [CustomPatchLevel], or null if no custom configuration exists.
+     */
+    fun getPatchLevelForUid(uid: Int): CustomPatchLevel? {
+        val packages = getPackagesForUid(uid)
+        // Find the first package-specific configuration for this UID.
+        val packageSpecificPatchLevel =
+            packages.firstNotNullOfOrNull { pkg -> packagePatchLevels[pkg] }
+        return packageSpecificPatchLevel ?: globalCustomPatchLevel
+    }
+
+    /**
      * Loads and parses the `target.txt` file, which defines the processing mode and keybox file for
      * each package.
      */
@@ -162,26 +178,48 @@ object ConfigurationManager {
         }
     }
 
-    /** Loads the security patch level override configuration from `security_patch.txt`. */
+    /**
+     * Loads and parses the `security_patch.txt` file, which can define both global and per-package
+     * security patch levels.
+     */
     private fun loadPatchLevelConfig(file: File) {
-        if (file.exists()) {
-            try {
-                val lines =
-                    file.readLines().mapNotNull { line ->
-                        val trimmed = line.trim()
-                        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) trimmed else null
-                    }
+        if (!file.exists()) {
+            globalCustomPatchLevel = null
+            packagePatchLevels = emptyMap()
+            return
+        }
 
-                if (lines.isEmpty()) {
-                    customPatchLevelOverride = null
-                    return
-                }
+        try {
+            val newPackageLevels = mutableMapOf<String, CustomPatchLevel>()
+            var currentContext = "" // Empty string for global context
+            val contextLines = mutableMapOf<String, MutableList<String>>()
+            val contextRegex = Regex("^\\[([a-zA-Z0-9_.-]+)]$")
+
+            // First pass: group lines by context (global or package-specific).
+            file.readLines().forEach { line ->
+                val trimmedLine = line.trim()
+                if (trimmedLine.isEmpty() || trimmedLine.startsWith("#")) return@forEach
+
+                contextRegex.find(trimmedLine)?.let { currentContext = it.groupValues[1] }
+                    ?: run {
+                        contextLines
+                            .computeIfAbsent(currentContext) { mutableListOf() }
+                            .add(trimmedLine)
+                    }
+            }
+
+            // Helper function to parse a set of lines into a CustomPatchLevel object.
+            fun parseLines(lines: List<String>?): CustomPatchLevel? {
+                if (lines.isNullOrEmpty()) return null
 
                 // Handle simple case: one line sets the patch level for all components.
                 if (lines.size == 1 && '=' !in lines[0]) {
-                    customPatchLevelOverride =
-                        CustomPatchLevel(system = null, vendor = null, boot = null, all = lines[0])
-                    return
+                    return CustomPatchLevel(
+                        system = null,
+                        vendor = null,
+                        boot = null,
+                        all = lines[0],
+                    )
                 }
 
                 // Handle key-value pair configuration.
@@ -195,19 +233,32 @@ object ConfigurationManager {
                         .toMap()
 
                 val all = map["all"]
-                customPatchLevelOverride =
-                    CustomPatchLevel(
-                        system = map["system"] ?: all,
-                        vendor = map["vendor"] ?: all,
-                        boot = map["boot"] ?: all,
-                        all = all,
-                    )
-                SystemLogger.info("Loaded custom security patch levels.")
-            } catch (e: Exception) {
-                SystemLogger.error("Failed to load or parse ${file.name}", e)
+                return CustomPatchLevel(
+                    system = map["system"] ?: all,
+                    vendor = map["vendor"] ?: all,
+                    boot = map["boot"] ?: all,
+                    all = all,
+                )
             }
-        } else {
-            customPatchLevelOverride = null
+
+            // Parse global and per-package configurations.
+            val newGlobalLevel = parseLines(contextLines[""])
+            contextLines.remove("") // Remove global context to iterate over packages next
+
+            for ((pkg, lines) in contextLines) {
+                parseLines(lines)?.let { newPackageLevels[pkg] = it }
+            }
+
+            // Atomically update the configuration state.
+            globalCustomPatchLevel = newGlobalLevel
+            packagePatchLevels = newPackageLevels
+
+            SystemLogger.info(
+                "Loaded custom security patch levels: global config exists=${newGlobalLevel != null}, " +
+                    "${newPackageLevels.size} package-specific configs."
+            )
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to load or parse ${file.name}", e)
         }
     }
 
