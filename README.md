@@ -100,7 +100,11 @@ Dates should be provided in `YYYY-MM-DD` format (e.g., `2025-11-05`).
 
 #### Special Keywords
 
-In addition to date values, two special keywords provide advanced control:
+In addition to static dates, several special keywords provide advanced, dynamic control:
+
+*   **`today`**: Dynamically uses the current date every time an attestation is generated. This ensures the device always appears up-to-date without needing manual edits.
+
+*   **Date Templates**: You can create semi-dynamic dates using `YYYY`, `MM`, and `DD` as placeholders for the current year, month, and day. For example, `YYYY-MM-05` will always resolve to the 5th of the current month and year.
 
 *   **`no`**: This keyword instructs the simulator to **completely omit** the corresponding patch level tag from the generated attestation.
 
@@ -113,10 +117,10 @@ This example demonstrates how to combine global settings, per-package overrides,
 ```
 # --- Global Configuration ---
 # This is the default for all apps unless specified otherwise.
-# - Forge a recent system patch level.
+# - Forge a recent system patch level, the 5th of the current month (a common patch date).
 # - Use the device's real vendor patch level.
 # - Do not report a boot patch level at all.
-system=2025-11-05
+system=YYYY-MM-05
 vendor=device_default
 boot=no
 

@@ -51,6 +51,9 @@ object DeviceAttestationService {
         val attestVersion: Int?,
         val keymasterVersion: Int?,
         val osVersion: Int?,
+        val osPatchLevel: Int?,
+        val vendorPatchLevel: Int?,
+        val bootPatchLevel: Int?,
     )
 
     // A unique alias for the key used to perform the TEE functionality check.
@@ -178,6 +181,9 @@ object DeviceAttestationService {
             var verifiedBootKey: ByteArray? = null
             var verifiedBootHash: ByteArray? = null
             var osVersion: Int? = null
+            var osPatchLevel: Int? = null
+            var vendorPatchLevel: Int? = null
+            var bootPatchLevel: Int? = null
 
             val softwareEnforced =
                 ASN1Sequence.getInstance(
@@ -219,8 +225,26 @@ object DeviceAttestationService {
                                     .octets
                         }
                     }
-                    AttestationConstants.TAG_OS_VERSION -> { // OS Version (TAG_OS_VERSION)
+                    AttestationConstants.TAG_OS_VERSION -> {
                         osVersion =
+                            ASN1Integer.getInstance(tagged.baseObject.toASN1Primitive())
+                                .positiveValue
+                                .toInt()
+                    }
+                    AttestationConstants.TAG_OS_PATCHLEVEL -> {
+                        osPatchLevel =
+                            ASN1Integer.getInstance(tagged.baseObject.toASN1Primitive())
+                                .positiveValue
+                                .toInt()
+                    }
+                    AttestationConstants.TAG_VENDOR_PATCHLEVEL -> {
+                        vendorPatchLevel =
+                            ASN1Integer.getInstance(tagged.baseObject.toASN1Primitive())
+                                .positiveValue
+                                .toInt()
+                    }
+                    AttestationConstants.TAG_BOOT_PATCHLEVEL -> {
+                        bootPatchLevel =
                             ASN1Integer.getInstance(tagged.baseObject.toASN1Primitive())
                                 .positiveValue
                                 .toInt()
@@ -229,7 +253,7 @@ object DeviceAttestationService {
             }
 
             SystemLogger.info(
-                "Successfully extracted attestation data: version=$attestVersion, osVersion=$osVersion, moduleHash=${moduleHash?.toHex()}, bootKey=${verifiedBootKey?.toHex()}, bootHash=${verifiedBootHash?.toHex()}"
+                "Successfully extracted attestation data: version=$attestVersion, osVersion=$osVersion, osPatch=$osPatchLevel, vendorPatch=$vendorPatchLevel, bootPatch=$bootPatchLevel, moduleHash=${moduleHash?.toHex()}, bootKey=${verifiedBootKey?.toHex()}, bootHash=${verifiedBootHash?.toHex()}"
             )
             return AttestationData(
                 moduleHash,
@@ -238,6 +262,9 @@ object DeviceAttestationService {
                 attestVersion,
                 keymasterVersion,
                 osVersion,
+                osPatchLevel,
+                vendorPatchLevel,
+                bootPatchLevel,
             )
         } catch (e: Exception) {
             SystemLogger.error("Failed to parse attestation data from certificate.", e)

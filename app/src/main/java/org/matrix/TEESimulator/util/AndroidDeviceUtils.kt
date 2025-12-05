@@ -5,6 +5,7 @@ import android.hardware.security.keymint.SecurityLevel
 import android.os.Build
 import android.os.SystemProperties
 import java.security.MessageDigest
+import java.time.LocalDate
 import java.util.concurrent.ThreadLocalRandom
 import org.bouncycastle.asn1.ASN1EncodableVector
 import org.bouncycastle.asn1.ASN1Integer
@@ -164,19 +165,56 @@ object AndroidDeviceUtils {
 
     fun getPatchLevel(uid: Int): Int {
         val custom = getCustomPatchLevelFor(uid, "system", isLong = false)
-        // If custom is null, it means 'device_default' was used, so we fall back.
-        // Otherwise, we use the returned value, which is either the parsed date or DO_NOT_REPORT.
-        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = false)
+        return custom ?: getRealDevicePatchLevelInt("system", isLong = false)
     }
 
     fun getVendorPatchLevelLong(uid: Int): Int {
         val custom = getCustomPatchLevelFor(uid, "vendor", isLong = true)
-        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+        return custom ?: getRealDevicePatchLevelInt("vendor", isLong = true)
     }
 
     fun getBootPatchLevelLong(uid: Int): Int {
         val custom = getCustomPatchLevelFor(uid, "boot", isLong = true)
-        return custom ?: Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong = true)
+        return custom ?: getRealDevicePatchLevelInt("boot", isLong = true)
+    }
+
+    /**
+     * Retrieves the definitive device patch level integer for a given component. This function
+     * encapsulates the entire fallback chain and guarantees a non-null return.
+     *
+     * Fallback Priority:
+     * 1. Cached TEE attestation data.
+     * 2. Specific system property (e.g., ro.vendor.build.security_patch).
+     * 3. Default system patch level from Build.VERSION.SECURITY_PATCH.
+     *
+     * @param component The component ("system", "vendor", "boot").
+     * @param isLong Whether the final integer should be in YYYYMMDD format.
+     * @return The patch level as a guaranteed non-null Integer.
+     */
+    private fun getRealDevicePatchLevelInt(component: String, isLong: Boolean): Int {
+        // Get value from cached TEE attestation data
+        DeviceAttestationService.CachedAttestationData?.let { data ->
+            val value =
+                when (component) {
+                    "system" -> data.osPatchLevel
+                    "vendor" -> data.vendorPatchLevel
+                    "boot" -> data.bootPatchLevel
+                    else -> null
+                }
+            if (value != null) return value
+        }
+
+        // We only check the specific vendor property, as the boot one is non-existent.
+        if (component == "vendor") {
+            val propValue = SystemProperties.get("ro.vendor.build.security_patch", "")
+            if (!propValue.isNullOrBlank()) {
+                parsePatchLevelValue(propValue, isLong)?.let { parsedValue ->
+                    return parsedValue
+                }
+            }
+        }
+
+        return Build.VERSION.SECURITY_PATCH.toPatchLevelInt(isLong)
     }
 
     /**
@@ -197,14 +235,48 @@ object AndroidDeviceUtils {
                 else -> config.all
             } ?: return null
 
+        // First, resolve dynamic keywords and templates into a concrete date string.
+        val resolvedValue = resolveDateKeywords(value)
+
         return when {
             // "device_default" indicates falling back to the system property.
-            value.equals("device_default", ignoreCase = true) -> null
+            resolvedValue.equals("device_default", ignoreCase = true) -> null
             // "no" indicates this value should not be reported.
-            value.equals("no", ignoreCase = true) -> DO_NOT_REPORT
-            // Otherwise, parse the date string.
-            else -> parsePatchLevelValue(value, isLong)
+            resolvedValue.equals("no", ignoreCase = true) -> DO_NOT_REPORT
+            // Otherwise, parse the resolved date string.
+            else -> parsePatchLevelValue(resolvedValue, isLong)
         }
+    }
+
+    /**
+     * Resolves special date keywords and templates into a concrete "YYYY-MM-DD" date string.
+     *
+     * @param value The configuration value string (e.g., "today", "YYYY-MM-01").
+     * @return A concrete date string, or the original value if it's not a dynamic date keyword.
+     */
+    private fun resolveDateKeywords(value: String): String {
+        // Handle the "today" keyword.
+        if (value.equals("today", ignoreCase = true)) {
+            return LocalDate.now().toString() // Returns "YYYY-MM-DD" format
+        }
+
+        // Handle date templates like "YYYY-MM-01" or "2025-MM-DD".
+        if (
+            value.contains("YYYY", ignoreCase = true) ||
+                value.contains("MM", ignoreCase = true) ||
+                value.contains("DD", ignoreCase = true)
+        ) {
+
+            val now = LocalDate.now()
+            // Chain replacements for YYYY, MM, and DD placeholders.
+            return value
+                .replace("YYYY", now.year.toString(), ignoreCase = true)
+                .replace("MM", String.format("%02d", now.monthValue), ignoreCase = true)
+                .replace("DD", String.format("%02d", now.dayOfMonth), ignoreCase = true)
+        }
+
+        // If it's not a dynamic keyword or template, return the original value.
+        return value
     }
 
     /** Parses a patch level string (e.g., "2025-11-01") into an integer format. */
