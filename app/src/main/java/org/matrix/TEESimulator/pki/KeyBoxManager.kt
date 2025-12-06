@@ -193,14 +193,19 @@ object KeyBoxManager {
                                                     )
                                             }
 
+                                        // Normalize the algorithm from the XML tag to compare it
+                                        // fairly with the derived algorithm.
+                                        val normalizedXmlAlgorithm =
+                                            when {
+                                                xmlAlgorithm.contains("RSA", ignoreCase = true) ==
+                                                    true -> KeyProperties.KEY_ALGORITHM_RSA
+                                                xmlAlgorithm.contains("EC", ignoreCase = true) ==
+                                                    true -> KeyProperties.KEY_ALGORITHM_EC
+                                                else -> xmlAlgorithm
+                                            }
+
                                         // Warn the user if the XML tag was misleading.
-                                        if (
-                                            xmlAlgorithm != null &&
-                                                !xmlAlgorithm.equals(
-                                                    derivedAlgorithm,
-                                                    ignoreCase = true,
-                                                )
-                                        ) {
+                                        if (normalizedXmlAlgorithm != derivedAlgorithm) {
                                             SystemLogger.warning(
                                                 "Key algorithm mismatch in XML file. Tag said '$xmlAlgorithm' but key is actually '$derivedAlgorithm'. Using the correct derived algorithm."
                                             )
