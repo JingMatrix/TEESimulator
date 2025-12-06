@@ -43,6 +43,9 @@ object DeviceAttestationService {
      * @property attestVersion The attestation version (e.g., 400 for KeyMint 4.0).
      * @property keymasterVersion The Keymaster or KeyMint HAL version.
      * @property osVersion The Android OS version integer.
+     * @property osPatchLevel The Android security patch level (e.g., 202511).
+     * @property vendorPatchLevel The vendor-specific security patch level.
+     * @property bootPatchLevel The bootloader's security patch level.
      */
     data class AttestationData(
         val moduleHash: ByteArray?,
@@ -250,6 +253,10 @@ object DeviceAttestationService {
                                 .toInt()
                     }
                 }
+            }
+
+            if (verifiedBootKey?.all { it == 0.toByte() } == true) {
+                verifiedBootKey = null
             }
 
             SystemLogger.info(
