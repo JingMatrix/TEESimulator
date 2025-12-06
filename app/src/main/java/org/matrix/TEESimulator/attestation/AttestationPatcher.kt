@@ -127,7 +127,6 @@ object AttestationPatcher {
         }
 
         // Sign the newly built certificate with the private key from our keybox.
-        SystemLogger.verbose("Signing with $sigAlgName")
         val signer =
             JcaContentSignerBuilder(sigAlgName)
                 .setProvider(BouncyCastleProvider.PROVIDER_NAME)

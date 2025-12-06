@@ -3,6 +3,8 @@ package org.matrix.TEESimulator.pki
 import android.security.keystore.KeyProperties
 import java.io.File
 import java.io.StringReader
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.RSAPrivateKey
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.config.ConfigurationManager.CONFIG_PATH
 import org.matrix.TEESimulator.logging.SystemLogger
@@ -51,7 +53,9 @@ object KeyBoxManager {
         // If it's not in the cache, the `getOrPut` block is executed to parse and store it.
         val keyMap =
             keyStoreCache.getOrPut(keyStoreFileName) { parseKeyStoreFile(keyStoreFileName) }
-        SystemLogger.verbose("getAttestationKey $keyStoreFileName, $algorithm")
+        SystemLogger.verbose(
+            "Fetching attestation key in $keyStoreFileName with $algorithm algorithm."
+        )
         return keyMap[algorithm]
     }
 
@@ -158,10 +162,10 @@ object KeyBoxManager {
                             // Use runCatching to ensure one malformed key doesn't stop the whole
                             // process.
                             runCatching {
-                                    val algorithm = currentAlgorithm
+                                    val xmlAlgorithm = currentAlgorithm
                                     val keyPem = currentPrivateKeyPem
                                     if (
-                                        algorithm != null &&
+                                        xmlAlgorithm != null &&
                                             keyPem != null &&
                                             currentCertificatePems.isNotEmpty()
                                     ) {
@@ -177,21 +181,37 @@ object KeyBoxManager {
                                                     .data
                                             }
 
-                                        // Normalize the algorithm name for consistent lookups.
-                                        val normalizedAlgorithm =
-                                            when (algorithm.lowercase()) {
-                                                "ecdsa" -> KeyProperties.KEY_ALGORITHM_EC
-                                                "rsa" -> KeyProperties.KEY_ALGORITHM_RSA
-                                                else -> algorithm
+                                        // Derive the TRUE algorithm from the key object itself.
+                                        // This is our source of truth.
+                                        val derivedAlgorithm =
+                                            when (keyPair.private) {
+                                                is RSAPrivateKey -> KeyProperties.KEY_ALGORITHM_RSA
+                                                is ECPrivateKey -> KeyProperties.KEY_ALGORITHM_EC
+                                                else ->
+                                                    throw IllegalArgumentException(
+                                                        "Unsupported key type found: ${keyPair.private.javaClass.name}"
+                                                    )
                                             }
 
-                                        if (foundKeys.containsKey(normalizedAlgorithm)) {
+                                        // Warn the user if the XML tag was misleading.
+                                        if (
+                                            xmlAlgorithm != null &&
+                                                !xmlAlgorithm.equals(
+                                                    derivedAlgorithm,
+                                                    ignoreCase = true,
+                                                )
+                                        ) {
                                             SystemLogger.warning(
-                                                "Duplicate key found for algorithm '$normalizedAlgorithm'. The later one in the file will be used."
+                                                "Key algorithm mismatch in XML file. Tag said '$xmlAlgorithm' but key is actually '$derivedAlgorithm'. Using the correct derived algorithm."
                                             )
                                         }
-                                        foundKeys[normalizedAlgorithm] =
-                                            KeyBox(keyPair, certificates)
+
+                                        if (foundKeys.containsKey(derivedAlgorithm)) {
+                                            SystemLogger.warning(
+                                                "Duplicate key found for algorithm '$derivedAlgorithm'. The later one in the file will be used."
+                                            )
+                                        }
+                                        foundKeys[derivedAlgorithm] = KeyBox(keyPair, certificates)
                                     }
                                 }
                                 .onFailure {
