@@ -1,5 +1,6 @@
 package org.matrix.TEESimulator.attestation
 
+import android.security.keystore.KeyProperties
 import java.nio.charset.StandardCharsets
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
@@ -8,6 +9,7 @@ import org.bouncycastle.asn1.x509.Extension
 import org.bouncycastle.cert.X509CertificateHolder
 import org.bouncycastle.cert.X509v3CertificateBuilder
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.logging.SystemLogger
@@ -51,8 +53,7 @@ object AttestationPatcher {
 
                 // 2. Get the appropriate keybox for the given algorithm to sign the new
                 // certificate.
-                val algorithm = originalLeaf.publicKey.algorithm
-                val keybox = getKeyboxForUidAndAlgorithm(uid, algorithm)
+                val keybox = getKeyboxForUidAndAlgorithm(uid, originalLeaf.sigAlgName)
 
                 // 3. Create the new, patched leaf certificate.
                 val patchedLeaf =
@@ -126,7 +127,11 @@ object AttestationPatcher {
         }
 
         // Sign the newly built certificate with the private key from our keybox.
-        val signer = JcaContentSignerBuilder(sigAlgName).build(keybox.keyPair.private)
+        SystemLogger.verbose("Signing with $sigAlgName")
+        val signer =
+            JcaContentSignerBuilder(sigAlgName)
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .build(keybox.keyPair.private)
         val newCertificate = JcaX509CertificateConverter().getCertificate(builder.build(signer))
 
         // Log the signature of the newly created certificate to observe its non-deterministic
@@ -137,11 +142,34 @@ object AttestationPatcher {
         return newCertificate
     }
 
+    /**
+     * Retrieves the appropriate signing KeyBox (KeyPair and certificate chain) for a given UID
+     * based on a specified algorithm identifier.
+     *
+     * @param uid The UID of the application for which the signing is being performed.
+     * @param algorithm A string representing the desired algorithm. This can be either:
+     *     1. A simple key type like "RSA" or "EC".
+     *     2. A full JCA signature algorithm name like "SHA256withRSA".
+     *
+     * @return The [KeyBox] containing the appropriate key pair for signing.
+     * @throws IllegalArgumentException if no matching KeyBox can be found for the derived key type.
+     */
     private fun getKeyboxForUidAndAlgorithm(uid: Int, algorithm: String): KeyBox {
         val keyboxFile = ConfigurationManager.getKeyboxFileForUid(uid)
-        return KeyBoxManager.getAttestationKey(keyboxFile, algorithm)
+
+        // Normalize the algorithm name. The input might be a full signature algorithm
+        // (e.g., "SHA256withRSA") or just the key type (e.g., "RSA").
+        val keyType =
+            when {
+                algorithm.contains("RSA", ignoreCase = true) -> KeyProperties.KEY_ALGORITHM_RSA
+                algorithm.contains("EC", ignoreCase = true) ->
+                    KeyProperties.KEY_ALGORITHM_EC // This also covers "ECDSA"
+                else -> algorithm // If no match, assume it's already a simple key type string.
+            }
+
+        return KeyBoxManager.getAttestationKey(keyboxFile, keyType)
             ?: throw IllegalArgumentException(
-                "No keybox found for UID $uid and algorithm $algorithm in file $keyboxFile"
+                "No keybox found for UID $uid and algorithm '$keyType' (derived from input '$algorithm') in file $keyboxFile"
             )
     }
 

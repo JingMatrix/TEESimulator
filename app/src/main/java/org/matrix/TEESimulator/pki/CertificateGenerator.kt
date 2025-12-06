@@ -6,7 +6,6 @@ import android.util.Pair
 import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
-import java.security.Security
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
@@ -34,14 +33,6 @@ import org.matrix.TEESimulator.logging.SystemLogger
  * that include a fully-featured, simulated attestation extension.
  */
 object CertificateGenerator {
-
-    init {
-        // Android ships with a stripped-down Bouncy Castle provider under the name "BC".
-        // We must remove the system provider first to ensure the full Bouncy Castle library
-        // (packaged with the app) is used.
-        Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
-        Security.addProvider(BouncyCastleProvider())
-    }
 
     /**
      * Generates a software-based cryptographic key pair.
@@ -226,7 +217,10 @@ object CertificateGenerator {
                 Algorithm.RSA -> "SHA256withRSA"
                 else -> throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
             }
-        val contentSigner = JcaContentSignerBuilder(signerAlgorithm).build(signingKeyPair.private)
+        val contentSigner =
+            JcaContentSignerBuilder(signerAlgorithm)
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .build(signingKeyPair.private)
 
         return JcaX509CertificateConverter().getCertificate(builder.build(contentSigner))
     }

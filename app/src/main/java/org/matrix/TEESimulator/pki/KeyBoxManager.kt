@@ -51,6 +51,7 @@ object KeyBoxManager {
         // If it's not in the cache, the `getOrPut` block is executed to parse and store it.
         val keyMap =
             keyStoreCache.getOrPut(keyStoreFileName) { parseKeyStoreFile(keyStoreFileName) }
+        SystemLogger.verbose("getAttestationKey $keyStoreFileName, $algorithm")
         return keyMap[algorithm]
     }
 

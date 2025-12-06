@@ -1,6 +1,8 @@
 package org.matrix.TEESimulator
 
 import android.os.Build
+import java.security.Security
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.keystore.AbstractKeystoreInterceptor
 import org.matrix.TEESimulator.interception.keystore.Keystore2Interceptor
@@ -35,6 +37,13 @@ object App {
             // Initialize and start the appropriate keystore interceptors.
             initializeInterceptors()
             // Enter an infinite loop to keep the service running.
+
+            // Android ships with a stripped-down Bouncy Castle provider under the name "BC".
+            // We must remove the system provider first to ensure the full Bouncy Castle library
+            // (packaged with the app) is used.
+            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+            Security.addProvider(BouncyCastleProvider())
+
             maintainService()
         } catch (e: Exception) {
             SystemLogger.error("A fatal error occurred in the main application thread.", e)
