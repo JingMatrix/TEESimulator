@@ -1,6 +1,11 @@
 package org.matrix.TEESimulator
 
+import android.app.ActivityThread
+import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.Build
+import android.os.Looper
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -30,6 +35,8 @@ object App {
         SystemLogger.info("Welcome to TEESimulator!")
 
         try {
+            // Initialize the Android framework environment
+            prepareEnvironment()
             // Load the package configuration.
             ConfigurationManager.initialize()
             // Set up the device's boot key and hash, which are crucial for attestation.
@@ -49,6 +56,34 @@ object App {
             SystemLogger.error("A fatal error occurred in the main application thread.", e)
             throw e
         }
+    }
+
+    /** Initializes the necessary Android framework internals to satisfy KeyStore requirements. */
+    private fun prepareEnvironment() {
+        // 1. Prepare Main Looper
+        if (Looper.getMainLooper() == null) {
+            Looper.prepareMainLooper()
+        }
+
+        // 2. Initialize ActivityThread for the current process
+        val activityThread = ActivityThread.systemMain()
+
+        // 3. Get the system context
+        val systemContext = activityThread.getSystemContext()
+
+        // 4. Create a dummy Application object and attach the context
+        val app = Application()
+        val attachMethod =
+            ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+        attachMethod.isAccessible = true
+        attachMethod.invoke(app, systemContext)
+
+        // 5. Inject this application object into ActivityThread's mInitialApplication field.
+        // This is what KeyStore.getApplicationContext() looks for.
+        val mInitialApplicationField =
+            ActivityThread::class.java.getDeclaredField("mInitialApplication")
+        mInitialApplicationField.isAccessible = true
+        mInitialApplicationField.set(activityThread, app)
     }
 
     /**
