@@ -33,6 +33,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
     private val UPDATE_SUBCOMPONENT_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "updateSubcomponent")
+    private val LIST_ENTRIES_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntries")
+    private val LIST_ENTRIES_BATCHED_TRANSACTION =
+        InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntriesBatched")
 
     private val transactionNames: Map<Int, String> by lazy {
         IKeystoreService.Stub::class
@@ -53,6 +57,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
      * This method is called once the main service is hooked. It proceeds to find and hook the
      * security level sub-services (e.g., TEE, StrongBox).
      */
+    private fun isListEntries(code: Int) =
+        code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION
+
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
         val keystoreInterface = IKeystoreService.Stub.asInterface(service)
         setupSecurityLevelInterceptors(keystoreInterface, backdoor)
@@ -91,6 +98,16 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
+        if (isListEntries(code)) {
+            return ListEntriesHandler.handlePreTransact(
+                txId,
+                code,
+                callingUid,
+                data,
+                LIST_ENTRIES_BATCHED_TRANSACTION,
+            )
+        }
+
         if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
@@ -162,6 +179,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     ): TransactionResult {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
+
+        if (isListEntries(code)) {
+            return ListEntriesHandler.handlePostTransact(txId, callingUid, reply)
+        }
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
