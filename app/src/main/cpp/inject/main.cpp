@@ -310,9 +310,12 @@ static std::optional<int> transfer_fd_to_remote(int pid, const char *lib_path, s
     std::vector<uintptr_t> args = {AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0};
     int remote_fd = static_cast<int>(
         remote_call(pid, regs, reinterpret_cast<uintptr_t>(funcs.socket_addr), libc_return_addr, args));
-    if (remote_fd == -1) {
+    if (remote_fd <= 0) {
+        // remote_call returns 0 on failure.
+        // socket() returning 0 is technically possible (if stdin closed),
+        // but highly unlikely for a daemon. We treat 0 as failure here to catch the injection error.
         errno = get_remote_errno(); // Set local errno for PLOGE.
-        PLOGE("Failed to create remote socket.");
+        PLOGE("Failed to create remote socket (returned %d).", remote_fd);
         return std::nullopt;
     }
     LOGD("Successfully created remote socket with FD: %d", remote_fd);
@@ -741,6 +744,11 @@ bool inject_library(int pid, const char *lib_path, const char *entry_name) {
     }
     backup_regs = current_regs; // Store a copy for restoration.
     LOGD("Process %d registers backed up.", pid);
+
+    // Skip the Red Zone (128 bytes) on x86_64 to prevent stack corruption
+    #if defined(__x86_64__)
+    current_regs.rsp -= 128;
+    #endif
 
     // Create a scope to ensure RAII objects are destroyed BEFORE register restoration
     {
