@@ -27,6 +27,39 @@ object ListEntriesHandler {
     private val pendingParams = ConcurrentHashMap<Long, ListEntriesParams>()
 
     /**
+     * Estimates the serialized size of a KeyDescriptor array for Binder transmission. Based on
+     * AOSP's estimate_safe_amount_to_return implementation in security/keystore2/src/utils.rs
+     */
+    private fun estimateSafeAmountToReturn(
+        keyDescriptors: Array<KeyDescriptor>,
+        responseSizeLimit: Int,
+    ): Int {
+        var itemsToReturn = 0
+        var returnedBytes = 0
+
+        for (kd in keyDescriptors) {
+            returnedBytes += 4 + 8
+
+            kd.alias?.let { returnedBytes += 4 + it.toByteArray(Charsets.UTF_8).size }
+
+            kd.blob?.let { returnedBytes += 4 + it.size }
+
+            if (returnedBytes > responseSizeLimit) {
+                SystemLogger.warning(
+                    "Key descriptors list (${keyDescriptors.size} items) may exceed binder " +
+                        "size, returning $itemsToReturn items est $returnedBytes bytes."
+                )
+                break
+            }
+            itemsToReturn++
+        }
+
+        return itemsToReturn
+    }
+
+    private const val RESPONSE_SIZE_LIMIT = 358400
+
+    /**
      * Handles pre-transaction interception for listEntries calls. Parses and stores parameters for
      * later use in post-transaction processing.
      */
@@ -97,11 +130,26 @@ object ListEntriesHandler {
                 val mergedArray =
                     InterceptorUtils.mergeKeyDescriptors(originalList, filteredSoftwareKeys)
 
+                // Limit response size to avoid binder buffer overflow (matching AOSP behavior)
+                val safeAmountToReturn =
+                    estimateSafeAmountToReturn(mergedArray, RESPONSE_SIZE_LIMIT)
+                val limitedArray =
+                    if (safeAmountToReturn < mergedArray.size) {
+                        SystemLogger.info(
+                            "[TX_ID: $txId] listEntries: Limiting response from ${mergedArray.size} to " +
+                                "$safeAmountToReturn entries to avoid binder overflow"
+                        )
+                        mergedArray.copyOfRange(0, safeAmountToReturn)
+                    } else {
+                        mergedArray
+                    }
+
                 SystemLogger.info(
-                    "[TX_ID: $txId] listEntries: Merged ${originalList.size} hardware + ${filteredSoftwareKeys.size} software keys."
+                    "[TX_ID: $txId] listEntries: Merged ${originalList.size} hardware + " +
+                        "${filteredSoftwareKeys.size} software keys, returning ${limitedArray.size} entries."
                 )
 
-                InterceptorUtils.createTypedArrayReply(mergedArray)
+                InterceptorUtils.createTypedArrayReply(limitedArray)
             }
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed to inject listEntries reply", it)
