@@ -649,7 +649,7 @@ static bool remote_call_entry(int pid, struct user_regs_struct &regs, uintptr_t 
 
 /**
  * @brief RAII wrapper to ensure a temporary file is deleted (unlinked)
- *        when the object goes out of scope.
+ * when the object goes out of scope.
  *
  * This is crucial for stealth: we want the library to exist on the filesystem
  * for the shortest time possible.
@@ -744,7 +744,6 @@ static std::optional<uintptr_t> inject_via_staging(int pid, struct user_regs_str
     }
 
     // 4. Set SELinux Context
-    // Essential for injecting into system processes (like keystore2).
     if (setfilecon(staged_path.c_str(), constants::kSystemFileContext) != 0) {
         LOGW("Failed to set SELinux context on staged file. Injection might fail if target is enforcing.");
     }
@@ -854,7 +853,7 @@ private:
  *
  * This is the main orchestration function for the library injection.
  * It handles attachment, remote memory/register manipulation, FD transfer,
- * remote dlopen/dlsym, and remote entry point execution.
+ * staging fallback, remote dlopen/dlsym, and remote entry point execution.
  *
  * @param pid The target process ID.
  * @param lib_path The absolute path to the shared library to inject.
