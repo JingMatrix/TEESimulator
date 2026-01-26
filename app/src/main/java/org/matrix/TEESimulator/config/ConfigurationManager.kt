@@ -354,7 +354,7 @@ object ConfigurationManager {
 
     /** Waits for a system service to become available, with retries. */
     private fun waitForSystemService(name: String): IBinder? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             return ServiceManager.waitForService(name)
         }
         // Fallback for older Android versions.
