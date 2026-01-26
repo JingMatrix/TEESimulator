@@ -386,6 +386,15 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
     }
 
     if (hijack) {
+        // The kernel driver fills sender_euid. libbinder trusts this value
+        // to populate IPCThreadState. By changing it here, we fool the
+        // entire process (including the TEE implementation) into thinking
+        // the call came from system (1000).
+        if (txn_data->sender_euid == 0) {
+            LOGV("[Hook] Spoofing UID for transaction: 0 -> 1000");
+            txn_data->sender_euid = 1000;
+        }
+
         uint64_t tx_id = ++g_transaction_id_counter;
         info.transaction_id = tx_id;
 
