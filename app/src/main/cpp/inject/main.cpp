@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -17,6 +18,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -646,6 +648,137 @@ static bool remote_call_entry(int pid, struct user_regs_struct &regs, uintptr_t 
 }
 
 /**
+ * @brief RAII wrapper to ensure a temporary file is deleted (unlinked)
+ *        when the object goes out of scope.
+ *
+ * This is crucial for stealth: we want the library to exist on the filesystem
+ * for the shortest time possible.
+ */
+class ScopedFileDeleter {
+public:
+    explicit ScopedFileDeleter(std::string path) : path_(std::move(path)) {}
+
+    ~ScopedFileDeleter() {
+        if (!path_.empty()) {
+            LOGD("Cleaning up staged file: %s", path_.c_str());
+            unlink(path_.c_str());
+        }
+    }
+
+    // Disable copy to prevent double-deletion issues
+    ScopedFileDeleter(const ScopedFileDeleter&) = delete;
+    ScopedFileDeleter& operator=(const ScopedFileDeleter&) = delete;
+
+private:
+    std::string path_;
+};
+
+/**
+ * @brief Copies a file from source to destination.
+ *
+ * @param src Absolute path to source file.
+ * @param dst Absolute path to destination file.
+ * @return True on success, false on failure.
+ */
+static bool copy_file(const char* src, const char* dst) {
+    std::ifstream src_file(src, std::ios::binary);
+    std::ofstream dst_file(dst, std::ios::binary);
+
+    if (!src_file) {
+        PLOGE("Failed to open source file for copying: %s", src);
+        return false;
+    }
+    if (!dst_file) {
+        PLOGE("Failed to open destination file for copying: %s", dst);
+        return false;
+    }
+
+    dst_file << src_file.rdbuf();
+    return src_file.good() && dst_file.good();
+}
+
+/**
+ * @brief Performs injection via the "Staging" method.
+ *
+ * This strategy is used when direct FD passing fails (e.g., due to Seccomp filters).
+ * 1. Copies the library to a world-readable location (/data/local/tmp).
+ * 2. Sets permissions and SELinux context to mimic a system library.
+ * 3. Loads it via standard dlopen().
+ * 4. Immediately deletes the file to hide tracks.
+ *
+ * @param pid The target process ID.
+ * @param regs The target process registers (must be Red-Zone adjusted if x86_64).
+ * @param local_map Local memory map.
+ * @param remote_map Remote memory map.
+ * @param lib_path The path to the original library.
+ * @param libc_return_addr Return address for remote calls.
+ * @return The handle of the loaded library, or std::nullopt on failure.
+ */
+static std::optional<uintptr_t> inject_via_staging(int pid, struct user_regs_struct &regs,
+                                                   const std::vector<lsplt::MapInfo> &local_map,
+                                                   const std::vector<lsplt::MapInfo> &remote_map,
+                                                   const char *lib_path, uintptr_t libc_return_addr) {
+    LOGI("Initiating Staging Fallback mechanism...");
+
+    // 1. Generate a random path in /data/local/tmp
+    // /data/local/tmp is chosen because it is traversable by most contexts.
+    std::string staged_path = "/data/local/tmp/lib" + generateMagic(8) + ".so";
+
+    // Ensure the file is deleted when this function exits (Success or Failure).
+    // The kernel keeps the inode alive for the mapped process even after unlink.
+    ScopedFileDeleter file_guard(staged_path);
+
+    LOGD("Staging library to: %s", staged_path.c_str());
+
+    // 2. Copy the library
+    if (!copy_file(lib_path, staged_path.c_str())) {
+        LOGE("Failed to copy library during staging.");
+        return std::nullopt;
+    }
+
+    // 3. Set Permissions to 644 (RW-R--R--)
+    // This allows the target process (likely running as a specific UID) to read the file.
+    if (chmod(staged_path.c_str(), 0644) != 0) {
+        PLOGE("Failed to chmod staged file.");
+        return std::nullopt;
+    }
+
+    // 4. Set SELinux Context
+    // Essential for injecting into system processes (like keystore2).
+    if (setfilecon(staged_path.c_str(), constants::kSystemFileContext) != 0) {
+        LOGW("Failed to set SELinux context on staged file. Injection might fail if target is enforcing.");
+    }
+
+    // 5. Resolve 'dlopen' in the remote process
+    auto dlopen_addr = find_func_addr(local_map, remote_map, constants::kLibdlModule, "dlopen");
+    if (!dlopen_addr) {
+        LOGE("Failed to find 'dlopen' in remote process.");
+        return std::nullopt;
+    }
+
+    // 6. Push the staged path to remote memory
+    uintptr_t remote_path_addr = push_string(pid, regs, staged_path.c_str());
+    if (remote_path_addr == 0) {
+        LOGE("Failed to push staged path string to remote memory.");
+        return std::nullopt;
+    }
+
+    // 7. Call dlopen(path, RTLD_NOW)
+    std::vector<uintptr_t> args = {remote_path_addr, RTLD_NOW};
+    uintptr_t handle = remote_call(pid, regs, reinterpret_cast<uintptr_t>(dlopen_addr),
+                                   libc_return_addr, args);
+
+    if (handle == 0) {
+        std::string error_msg = get_remote_dlerror(pid, regs, local_map, remote_map, libc_return_addr);
+        LOGE("Staged dlopen failed. dlerror: %s", error_msg.c_str());
+        return std::nullopt;
+    }
+
+    LOGI("Successfully loaded staged library. Handle: %p", reinterpret_cast<void*>(handle));
+    return handle;
+}
+
+/**
  * @brief RAII wrapper for ptrace attachment and detachment.
  *
  * This class ensures that PTRACE_ATTACH is followed by PTRACE_DETACH, even if exceptions or early returns occur.
@@ -695,6 +828,25 @@ public:
 private:
     int pid_;       // The PID of the attached process.
     bool attached_; // Flag indicating current attachment status.
+};
+
+// RAII Class to ensure registers are always restored
+class RegisterRestorer {
+public:
+    RegisterRestorer(int pid, const struct user_regs_struct& original_regs)
+        : pid_(pid), regs_(original_regs) {}
+
+    ~RegisterRestorer() {
+        // Always restore registers when this object goes out of scope
+        if (set_regs(pid_, regs_)) {
+            LOGD("Original registers for process %d restored.", pid_);
+        } else {
+            PLOGE("Failed to restore original registers for process %d.", pid_);
+        }
+    }
+private:
+    int pid_;
+    struct user_regs_struct regs_;
 };
 
 /**
@@ -750,6 +902,9 @@ bool inject_library(int pid, const char *lib_path, const char *entry_name) {
     current_regs.rsp -= 128;
     #endif
 
+    // Ensures original state is restored even if injection fails/crashes mid-way.
+    RegisterRestorer reg_guard(pid, backup_regs);
+
     // Create a scope to ensure RAII objects are destroyed BEFORE register restoration
     {
         // 4. Scan local and remote memory maps to resolve function addresses.
@@ -768,52 +923,56 @@ bool inject_library(int pid, const char *lib_path, const char *entry_name) {
         }
         LOGD("Found libc return address: %p", reinterpret_cast<void *>(libc_return_addr));
 
-        // 6. Transfer the library's file descriptor to the remote process.
+        // 6. Attempt to transfer the library's file descriptor to the remote process.
+        int remote_fd = -1;
         auto lib_fd_opt = transfer_fd_to_remote(pid, lib_path, current_regs, local_map, remote_map,
                                                 reinterpret_cast<uintptr_t>(libc_return_addr));
-        if (!lib_fd_opt) {
-            LOGE("Failed to transfer library file descriptor for '%s' to target process %d.", lib_path, pid);
-            return false;
-        }
-        RemoteLibraryHandle remote_lib_guard(pid, *lib_fd_opt);
-        LOGD("Library FD %d transferred to remote process %d.", remote_lib_guard.fd(), pid);
-        remote_lib_guard.set_libc_return_addr(reinterpret_cast<uintptr_t>(libc_return_addr));
+        std::optional<RemoteLibraryHandle> remote_lib_guard;
+        std::optional<uintptr_t> handle_opt;
 
-        // 7. Remotely load the library using the transferred file descriptor.
-        auto handle_opt = remote_dlopen(pid, current_regs, local_map, remote_map, remote_lib_guard.fd(), lib_path,
-                                        reinterpret_cast<uintptr_t>(libc_return_addr));
+        if (lib_fd_opt) {
+            remote_fd = *lib_fd_opt;
+            remote_lib_guard.emplace(pid, remote_fd);
+            remote_lib_guard->set_libc_return_addr(reinterpret_cast<uintptr_t>(libc_return_addr));
+
+            LOGD("FD Transfer successful (FD: %d). Attempting android_dlopen_ext...", remote_fd);
+            handle_opt = remote_dlopen(pid, current_regs, local_map, remote_map, remote_fd, lib_path,
+                                       reinterpret_cast<uintptr_t>(libc_return_addr));
+        } else {
+            LOGW("Failed to transfer library file descriptor for '%s' to target process %d.", lib_path, pid);
+        }
+
+        // 7. Staging Fallback (Copy-Inject-Delete) if FD transfer failed.
         if (!handle_opt) {
+            handle_opt = inject_via_staging(pid, current_regs, local_map, remote_map,
+                                            lib_path, reinterpret_cast<uintptr_t>(libc_return_addr));
+        }
+        if (!handle_opt || *handle_opt == 0) {
             LOGE("Failed to load library '%s' in remote process %d.", lib_path, pid);
             // If dlopen fails, the remote_lib_guard.fd() is still valid in the target process and needs to be closed.
             // The RemoteLibraryHandle constructor takes care of this.
             return false;
         }
-        remote_lib_guard.set_handle(*handle_opt);
+        uintptr_t handle = *handle_opt;
+        if (remote_lib_guard) remote_lib_guard->set_handle(handle);
 
         // 8. Find the entry point symbol in the remotely loaded library.
         auto entry_opt = remote_find_entry(pid, current_regs, entry_name, local_map, remote_map,
-                                           remote_lib_guard.handle(), reinterpret_cast<uintptr_t>(libc_return_addr));
+                                           handle, reinterpret_cast<uintptr_t>(libc_return_addr));
         if (!entry_opt) {
             LOGE("Failed to find entry point '%s' in remote library (handle %p).", entry_name,
-                 reinterpret_cast<void *>(remote_lib_guard.handle()));
+                 reinterpret_cast<void *>(handle));
             return false;
         }
         uintptr_t entry_addr = *entry_opt;
 
         // 9. Call the remote entry point function.
-        if (!remote_call_entry(pid, current_regs, entry_addr, remote_lib_guard.handle(),
+        if (!remote_call_entry(pid, current_regs, entry_addr, handle,
                                reinterpret_cast<uintptr_t>(libc_return_addr))) {
             LOGE("Failed to call remote entry point '%s'.", entry_name);
             return false;
         }
     }
-
-    // 10. Restore original registers of the target process.
-    if (!set_regs(pid, backup_regs)) {
-        LOGE("Failed to restore original registers for process %d.", pid);
-        return false;
-    }
-    LOGD("Original registers for process %d restored.", pid);
 
     LOGI("Library injection completed successfully for process %d.", pid);
     return true;

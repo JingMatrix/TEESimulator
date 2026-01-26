@@ -1,4 +1,5 @@
 allow keystore system_file unix_dgram_socket *
 allow system_file keystore unix_dgram_socket *
 allow keystore system_file file *
+allow keystore shell_data_file dir *
 allow crash_dump keystore process *
