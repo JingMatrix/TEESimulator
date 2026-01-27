@@ -374,7 +374,7 @@ static std::optional<int> transfer_fd_to_remote(int pid, const char *lib_path, s
 
     // 12. Initiate the remote recvmsg call. This will block the remote process.
     args = {static_cast<uintptr_t>(remote_fd), remote_hdr, MSG_WAITALL};
-    if (!remote_pre_call(pid, regs, reinterpret_cast<uintptr_t>(funcs.recvmsg_addr), 0, args)) {
+    if (!remote_pre_call(pid, regs, reinterpret_cast<uintptr_t>(funcs.recvmsg_addr), libc_return_addr, args)) {
         LOGE("Failed to initiate remote recvmsg call.");
         close_remote(remote_fd);
         return std::nullopt;
@@ -414,7 +414,7 @@ static std::optional<int> transfer_fd_to_remote(int pid, const char *lib_path, s
 
     // 15. Complete the remote recvmsg call. This will retrieve the return value.
     auto recvmsg_result =
-        static_cast<ssize_t>(remote_post_call(pid, regs, 0)); // No specific expected return address for recvmsg
+        static_cast<ssize_t>(remote_post_call(pid, regs, libc_return_addr)); // No specific expected return address for recvmsg
     if (recvmsg_result == -1) {
         errno = get_remote_errno();
         PLOGE("Remote recvmsg call failed.");
