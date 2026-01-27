@@ -77,11 +77,14 @@ object ListEntriesHandler {
                 InterceptorUtils.resetParcelForReading(data, IKeystoreService.DESCRIPTOR)
                 val domain = data.readInt()
                 val namespace = data.readLong()
-                val startPastAlias = if (code == listEntriesBatchedCode) data.readString() else null
+
+                val isListEntriesBatched =
+                    listEntriesBatchedCode != -1 && code == listEntriesBatchedCode
+                val startPastAlias = if (isListEntriesBatched) data.readString() else null
 
                 if (domain == Domain.APP) {
                     val methodName =
-                        if (code == listEntriesBatchedCode) "listEntriesBatched" else "listEntries"
+                        if (isListEntriesBatched) "listEntriesBatched" else "listEntries"
                     SystemLogger.debug("[TX_ID: $txId] Intercepting $methodName for APP domain.")
                     pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
                 }
@@ -90,8 +93,9 @@ object ListEntriesHandler {
                 TransactionResult.Continue
             }
             .getOrElse {
-                val methodName =
-                    if (code == listEntriesBatchedCode) "listEntriesBatched" else "listEntries"
+                val isListEntriesBatched =
+                    listEntriesBatchedCode != -1 && code == listEntriesBatchedCode
+                val methodName = if (isListEntriesBatched) "listEntriesBatched" else "listEntries"
                 SystemLogger.error("[TX_ID: $txId] Failed to parse $methodName params", it)
                 TransactionResult.ContinueAndSkipPost
             }
