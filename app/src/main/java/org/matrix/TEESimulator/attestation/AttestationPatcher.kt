@@ -84,6 +84,16 @@ object AttestationPatcher {
     }
 
     /**
+     * Helper to normalize algorithm names for Bouncy Castle. Old Android versions might reports
+     * "SHA256WITHECDSA", but Bouncy Castle expects "SHA256withECDSA".
+     */
+    private fun normalizeSignatureAlgorithm(algoName: String): String {
+        // 1. Force uppercase to handle "sha256withecdsa"
+        // 2. Replace "WITH" with "with" to satisfy Bouncy Castle's naming convention
+        return algoName.uppercase().replace("WITH", "with")
+    }
+
+    /**
      * Creates a new leaf certificate with a modified attestation extension.
      *
      * @param originalLeafHolder A Bouncy Castle holder for the original leaf certificate.
@@ -128,7 +138,7 @@ object AttestationPatcher {
 
         // Sign the newly built certificate with the private key from our keybox.
         val signer =
-            JcaContentSignerBuilder(sigAlgName)
+            JcaContentSignerBuilder(normalizeSignatureAlgorithm(sigAlgName))
                 .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .build(keybox.keyPair.private)
         val newCertificate = JcaX509CertificateConverter().getCertificate(builder.build(signer))

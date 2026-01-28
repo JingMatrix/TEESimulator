@@ -116,6 +116,7 @@ object App {
                 SystemLogger.info(
                     "Using KeystoreInterceptor for Android Q/R (SDK ${Build.VERSION.SDK_INT})"
                 )
+                android.security.keystore.AndroidKeyStoreProvider.install()
                 KeystoreInterceptor
             }
             // For Android S (12) and newer, use the Keystore2Interceptor.
@@ -123,6 +124,7 @@ object App {
                 SystemLogger.info(
                     "Using Keystore2Interceptor for Android S and later (SDK ${Build.VERSION.SDK_INT})"
                 )
+                android.security.keystore2.AndroidKeyStoreProvider.install()
                 Keystore2Interceptor
             }
         }

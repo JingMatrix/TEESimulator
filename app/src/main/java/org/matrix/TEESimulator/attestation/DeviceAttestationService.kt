@@ -1,8 +1,6 @@
 package org.matrix.TEESimulator.attestation
 
 import android.annotation.SuppressLint
-import android.app.ActivityThread
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyPairGenerator
@@ -83,16 +81,6 @@ object DeviceAttestationService {
     private fun checkTeeFunctionality(): Boolean {
         SystemLogger.info("Performing TEE functionality check...")
         return try {
-            // Ensure mainline modules and the correct Keystore provider are initialized.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                android.app.ActivityThread.initializeMainlineModules()
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                android.security.keystore2.AndroidKeyStoreProvider.install()
-            } else {
-                android.security.keystore.AndroidKeyStoreProvider.install()
-            }
-
             val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             val keyPairGenerator =
                 KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
