@@ -96,4 +96,43 @@ object InterceptorUtils {
     fun hasException(reply: Parcel): Boolean {
         return runCatching { reply.readException() }.exceptionOrNull() != null
     }
+
+    /** Creates an `OverrideReply` parcel containing a typed array. */
+    fun <T : Parcelable> createTypedArrayReply(
+        array: Array<T>,
+        flags: Int = 0,
+    ): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel =
+            Parcel.obtain().apply {
+                writeNoException()
+                writeTypedArray(array, flags)
+            }
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
+
+    /**
+     * Merges hardware and software key descriptors into a single sorted array. Uses TreeMap to
+     * ensure alphabetical ordering and avoid duplicates.
+     */
+    fun mergeKeyDescriptors(
+        hardwareKeys: Array<android.system.keystore2.KeyDescriptor>,
+        softwareKeys: List<android.system.keystore2.KeyDescriptor>,
+    ): Array<android.system.keystore2.KeyDescriptor> {
+        val combinedMap = java.util.TreeMap<String, android.system.keystore2.KeyDescriptor>()
+
+        hardwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
+
+        softwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
+
+        return combinedMap.values.toTypedArray()
+    }
+
+    /**
+     * Resets a Parcel to the beginning and enforces the interface descriptor. This is a common
+     * pattern when reading transaction parameters.
+     */
+    fun resetParcelForReading(parcel: Parcel, descriptor: String) {
+        parcel.setDataPosition(0)
+        parcel.enforceInterface(descriptor)
+    }
 }

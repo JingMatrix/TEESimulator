@@ -334,6 +334,42 @@ object AttestationBuilder {
         override fun hashCode(): Int = digest.contentHashCode()
     }
 
+    // System UIDs that get special handling
+    private const val AID_ROOT = 0
+    private const val AID_SYSTEM = 1000
+
+    private fun isSystemUid(uid: Int): Boolean {
+        return uid == AID_ROOT || uid == AID_SYSTEM
+    }
+
+    private fun createSystemApplicationId(uid: Int): DEROctetString {
+        SystemLogger.debug("Creating system application ID for UID $uid")
+
+        val sha256 = MessageDigest.getInstance("SHA-256")
+        val systemPackageName = if (uid == AID_ROOT) "android.uid.root" else "android.uid.system"
+        val systemSignature = sha256.digest(systemPackageName.toByteArray(StandardCharsets.UTF_8))
+
+        val packageInfoList =
+            listOf(
+                DERSequence(
+                    arrayOf(
+                        DEROctetString(systemPackageName.toByteArray(StandardCharsets.UTF_8)),
+                        ASN1Integer(1L),
+                    )
+                )
+            )
+
+        val applicationIdSequence =
+            DERSequence(
+                arrayOf(
+                    DERSet(packageInfoList.toTypedArray()),
+                    DERSet(arrayOf(DEROctetString(systemSignature))),
+                )
+            )
+
+        return DEROctetString(applicationIdSequence.encoded)
+    }
+
     /**
      * Creates the AttestationApplicationId structure. This structure contains information about the
      * package(s) and their signing certificates.
@@ -345,6 +381,10 @@ object AttestationBuilder {
      */
     @Throws(Throwable::class)
     private fun createApplicationId(uid: Int): DEROctetString {
+        if (isSystemUid(uid)) {
+            return createSystemApplicationId(uid)
+        }
+
         val pm =
             ConfigurationManager.getPackageManager()
                 ?: throw IllegalStateException("PackageManager not found!")
@@ -385,6 +425,11 @@ object AttestationBuilder {
                 val digest = sha256.digest(signature.toByteArray())
                 signatureDigests.add(Digest(digest))
             }
+        }
+
+        // If we couldn't get any package info, throw an exception
+        if (packageInfoList.isEmpty()) {
+            throw IllegalStateException("No package info retrieved for UID $uid")
         }
 
         // The application ID is a sequence of two sets:
