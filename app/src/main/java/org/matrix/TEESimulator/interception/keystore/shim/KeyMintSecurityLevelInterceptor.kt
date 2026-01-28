@@ -157,12 +157,14 @@ class KeyMintSecurityLevelInterceptor(
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
                 val key = metadata.key!!
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+
+                // We must clean up cached generated keys before storing the patched chain
+                cleanupKeyData(keyId)
                 patchedChains[keyId] = newChain
                 SystemLogger.debug(
                     "Cached patched certificate chain for $keyId. (${key.alias} [${key.domain}, ${key.nspace}])"
                 )
-
-                CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
 
                 return InterceptorUtils.createTypedObjectReply(metadata)
             }
@@ -258,10 +260,11 @@ class KeyMintSecurityLevelInterceptor(
                             securityLevel,
                         ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
+                    // It is unnecessary but a good practice to clean up possible caches
+                    cleanupKeyData(keyId)
                     // Store the generated key data.
                     val response =
                         buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
-
                     generatedKeys[keyId] =
                         GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
