@@ -303,7 +303,14 @@ bool set_regs(int pid, struct user_regs_struct &regs) {
     struct iovec reg_iov = {.iov_base = &regs, .iov_len = sizeof(struct user_regs_struct)};
     if (ptrace(PTRACE_SETREGSET, pid, NT_PRSTATUS, &reg_iov) == -1) {
         PLOGE("Failed to set register set for PID %d.", pid);
+#if defined(__arm__)
+        if (ptrace(PTRACE_SETREGS, pid, 0, &regs) == -1) {
+            PLOGE("Fallback to PTRACE_SETREGS failed.");
+            return false;
+        }
+#else
         return false;
+#endif
     }
 #else
 #    error "Unsupported architecture for register access in set_regs."
