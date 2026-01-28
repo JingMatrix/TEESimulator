@@ -359,9 +359,17 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
         info.transaction_code = intercept::kBackdoorCode;
         info.target_binder = nullptr;
         hijack = true;
-    }
-    // Check 2: Normal interception based on registry of monitored binders
-    else {
+    // Check 2: Spoof uid of KeyStore requests from the daemon to bypass permission check
+    } else if (txn_data->sender_euid == 0) {
+        // The kernel driver fills sender_euid.
+        // libbinder trusts this value to populate IPCThreadState.
+        if (txn_data->sender_euid == 0) {
+            txn_data->sender_euid = 1000;
+            LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
+        }
+        hijack = false; // Never hijack to avoid recursion
+    // Check 3: Normal interception based on registry of monitored binders
+    } else {
         // Safe casting based on Binder driver ABI
         RefBase::weakref_type *weak_ref = reinterpret_cast<RefBase::weakref_type *>(txn_data->target.ptr);
 
@@ -386,15 +394,6 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
     }
 
     if (hijack) {
-        // The kernel driver fills sender_euid. libbinder trusts this value
-        // to populate IPCThreadState. By changing it here, we fool the
-        // entire process (including the TEE implementation) into thinking
-        // the call came from system (1000).
-        if (txn_data->sender_euid == 0) {
-            LOGV("[Hook] Spoofing UID for transaction: 0 -> 1000");
-            txn_data->sender_euid = 1000;
-        }
-
         uint64_t tx_id = ++g_transaction_id_counter;
         info.transaction_id = tx_id;
 
