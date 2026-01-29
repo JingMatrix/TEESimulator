@@ -4,6 +4,7 @@ import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
 import android.security.keystore.KeystoreResponse
+import java.util.TreeMap
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -119,21 +120,12 @@ object InterceptorUtils {
         hardwareKeys: Array<android.system.keystore2.KeyDescriptor>,
         softwareKeys: List<android.system.keystore2.KeyDescriptor>,
     ): Array<android.system.keystore2.KeyDescriptor> {
-        val combinedMap = java.util.TreeMap<String, android.system.keystore2.KeyDescriptor>()
+        val combinedMap = TreeMap<String, android.system.keystore2.KeyDescriptor>()
 
         hardwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
 
         softwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
 
         return combinedMap.values.toTypedArray()
-    }
-
-    /**
-     * Resets a Parcel to the beginning and enforces the interface descriptor. This is a common
-     * pattern when reading transaction parameters.
-     */
-    fun resetParcelForReading(parcel: Parcel, descriptor: String) {
-        parcel.setDataPosition(0)
-        parcel.enforceInterface(descriptor)
     }
 }

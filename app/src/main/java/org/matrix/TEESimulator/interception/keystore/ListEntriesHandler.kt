@@ -38,6 +38,8 @@ object ListEntriesHandler {
         var returnedBytes = 0
 
         for (kd in keyDescriptors) {
+            // 4 bytes for Domain, 8 bytes for nspace (see AOSP utils.rs)
+            // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=555
             returnedBytes += 4 + 8
 
             kd.alias?.let { returnedBytes += 4 + it.toByteArray(Charsets.UTF_8).size }
@@ -57,6 +59,8 @@ object ListEntriesHandler {
         return itemsToReturn
     }
 
+    // Limit from AOSP utils.rs
+    // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/utils.rs;l=581
     private const val RESPONSE_SIZE_LIMIT = 358400
 
     /**
@@ -70,11 +74,14 @@ object ListEntriesHandler {
         data: Parcel,
         listEntriesBatchedCode: Int,
     ): TransactionResult {
+        // Explicitly check UID here because the global check in Keystore2Interceptor was removed
+        // to facilitate logging.
         if (ConfigurationManager.shouldSkipUid(callingUid))
             return TransactionResult.ContinueAndSkipPost
 
         return runCatching {
-                InterceptorUtils.resetParcelForReading(data, IKeystoreService.DESCRIPTOR)
+                data.setDataPosition(0)
+                data.enforceInterface(IKeystoreService.DESCRIPTOR)
                 val domain = data.readInt()
                 val namespace = data.readLong()
 
@@ -82,6 +89,9 @@ object ListEntriesHandler {
                     listEntriesBatchedCode != -1 && code == listEntriesBatchedCode
                 val startPastAlias = if (isListEntriesBatched) data.readString() else null
 
+                // List entries is only supported for Domain::APP and Domain::SELINUX per AOSP
+                // service.rs
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=283
                 if (domain == Domain.APP) {
                     val methodName =
                         if (isListEntriesBatched) "listEntriesBatched" else "listEntries"
@@ -109,6 +119,9 @@ object ListEntriesHandler {
         val params = pendingParams.remove(txId) ?: return TransactionResult.SkipTransaction
 
         return runCatching {
+                // Per AOSP's get_key_descriptor_for_lookup, -1 resolves to caller's UID for
+                // Domain.APP
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/service.rs;l=299
                 val effectiveNamespace =
                     if (params.namespace == -1L) callingUid.toLong() else params.namespace
                 if (effectiveNamespace != callingUid.toLong())

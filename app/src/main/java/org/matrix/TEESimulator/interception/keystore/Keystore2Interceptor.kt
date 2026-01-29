@@ -60,7 +60,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
      */
     private fun isListEntries(code: Int): Boolean {
         return code == LIST_ENTRIES_TRANSACTION ||
-            (LIST_ENTRIES_BATCHED_TRANSACTION != -1 && code == LIST_ENTRIES_BATCHED_TRANSACTION)
+            (code != -1 && code == LIST_ENTRIES_BATCHED_TRANSACTION)
     }
 
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
@@ -101,7 +101,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (isListEntries(code)) {
+
+        if (isListEntries(code))
             return ListEntriesHandler.handlePreTransact(
                 txId,
                 code,
@@ -109,7 +110,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 data,
                 LIST_ENTRIES_BATCHED_TRANSACTION,
             )
-        }
 
         if (
             code == GET_KEY_ENTRY_TRANSACTION ||
@@ -183,9 +183,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
-        if (isListEntries(code)) {
+        if (isListEntries(code))
             return ListEntriesHandler.handlePostTransact(txId, callingUid, reply)
-        }
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
