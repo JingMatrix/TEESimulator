@@ -55,6 +55,28 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "attestKey")
     }
 
+    private val transactionNames: Map<Int, String> by lazy {
+        IKeystoreService.Stub::class
+            .java
+            .declaredFields
+            .filter {
+                it.isAccessible = true
+                it.type == Int::class.java && it.name.startsWith("TRANSACTION_")
+            }
+            .associate { field -> (field.get(null) as Int) to field.name.split("_")[1] }
+    }
+
+    // A map to dispatch transaction handling for software key generation.
+    private val generateKeyHandlers:
+        Map<Int, (Long, Int, Int, Parcel) -> TransactionResult> by lazy {
+        mapOf(
+            GENERATE_KEY_TRANSACTION to ::handleGenerateKey,
+            GET_KEY_CHARACTERISTICS_TRANSACTION to ::handleGetKeyCharacteristics,
+            EXPORT_KEY_TRANSACTION to ::handleExportKey,
+            ATTEST_KEY_TRANSACTION to ::handleAttestKey,
+        )
+    }
+
     override val serviceName = "android.security.keystore"
     override val processName = "keystore"
     override val injectionCommand = "exec ./inject `pidof keystore` libTEESimulator.so entry"
@@ -76,26 +98,33 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         // This interceptor only needs to act on pre-transaction for software key generation.
+        // Handle 'generate' mode interceptions using the handler map.
         if (ConfigurationManager.shouldGenerate(callingUid)) {
-            return when (code) {
-                GENERATE_KEY_TRANSACTION -> handleGenerateKey(txId, callingUid, callingPid, data)
-                GET_KEY_CHARACTERISTICS_TRANSACTION ->
-                    handleGetKeyCharacteristics(txId, callingUid, callingPid, data)
-                EXPORT_KEY_TRANSACTION -> handleExportKey(txId, callingUid, callingPid, data)
-                ATTEST_KEY_TRANSACTION -> handleAttestKey(txId, callingUid, callingPid, data)
-                else -> TransactionResult.ContinueAndSkipPost
+            generateKeyHandlers[code]?.let { handler ->
+                logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+                return handler(txId, callingUid, callingPid, data)
             }
-        } else if (ConfigurationManager.shouldPatch(callingUid)) {
-            // In patch mode, we only care about the 'get' transaction in onPostTransact.
-            if (code == GET_TRANSACTION) return TransactionResult.Continue
         }
 
+        // Handle 'patch' mode interceptions for the 'get' transaction.
+        if (ConfigurationManager.shouldPatch(callingUid) && code == GET_TRANSACTION) {
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
+            return TransactionResult.Continue
+        }
+
+        // Default behavior for all other transactions.
+        logTransaction(
+            txId,
+            transactionNames[code] ?: "unknown code=$code",
+            callingUid,
+            callingPid,
+            true,
+        )
         return TransactionResult.ContinueAndSkipPost
     }
 
     private fun handleGenerateKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                logTransaction(txId, "generateKey", uid, pid)
                 data.enforceInterface(IKeystoreService.DESCRIPTOR)
                 val callback =
                     IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
@@ -133,7 +162,6 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         return runCatching {
-                logTransaction(txId, "getKeyCharacteristics", uid, pid)
                 data.enforceInterface(IKeystoreService.DESCRIPTOR)
                 val callback =
                     IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
@@ -168,7 +196,6 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 
     private fun handleExportKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                logTransaction(txId, "exportKey", uid, pid)
                 data.enforceInterface(IKeystoreService.DESCRIPTOR)
                 val callback = IKeystoreExportKeyCallback.Stub.asInterface(data.readStrongBinder())
                 val alias = InterceptorUtils.extractAlias(data.readString()!!)
@@ -206,7 +233,6 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 
     private fun handleAttestKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                logTransaction(txId, "attestKey", uid, pid)
                 data.enforceInterface(IKeystoreService.DESCRIPTOR)
                 val callback =
                     IKeystoreCertificateChainCallback.Stub.asInterface(data.readStrongBinder())
@@ -270,6 +296,9 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
                 reply == null ||
                 InterceptorUtils.hasException(reply)
         ) {
+            SystemLogger.debug(
+                "[TX_ID: $txId] Skip parsing post-transaction for [target, code, reply]: [$target, $code, $reply]"
+            )
             return TransactionResult.SkipTransaction
         }
 
@@ -280,6 +309,9 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
             val alias = data.readString() ?: ""
             val extractedAlias = InterceptorUtils.extractAlias(alias)
             val keyId = KeyIdentifier(callingUid, extractedAlias)
+            SystemLogger.debug(
+                "[TX_ID: $txId] Pasred keyId=$keyId during post-transaction of ${transactionNames[code]}"
+            )
 
             when {
                 // Case 1: The app is requesting the leaf certificate.
