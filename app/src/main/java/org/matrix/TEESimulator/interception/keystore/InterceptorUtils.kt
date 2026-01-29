@@ -79,15 +79,16 @@ object InterceptorUtils {
     }
 
     /**
-     * Extracts the true key alias from the keystore-prefixed string (e.g., "user_cert_my-alias" ->
-     * "my-alias").
+     * Extracts the base alias from a potentially prefixed alias string. For example, it converts
+     * "USRCERT_my_key" to "my_key".
      */
     fun extractAlias(prefixedAlias: String): String {
         val underscoreIndex = prefixedAlias.indexOf('_')
-        val secondUnderscoreIndex = prefixedAlias.indexOf('_', underscoreIndex + 1)
-        return if (secondUnderscoreIndex != -1) {
-            prefixedAlias.substring(secondUnderscoreIndex + 1)
+        return if (underscoreIndex != -1) {
+            // Return the part of the string after the first underscore.
+            prefixedAlias.substring(underscoreIndex + 1)
         } else {
+            // If there's no underscore, return the original string.
             prefixedAlias
         }
     }
