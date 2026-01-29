@@ -362,11 +362,11 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
     // Check 2: Spoof uid of KeyStore requests from the daemon to bypass permission check
     } else if (txn_data->sender_euid == 0) {
         // The kernel driver fills sender_euid.
-        // libbinder trusts this value to populate IPCThreadState.
-        if (txn_data->sender_euid == 0) {
-            txn_data->sender_euid = 1000;
-            LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
-        }
+
+        // libbinder.so trusts this value to populate IPCThreadState.
+        txn_data->sender_euid = 1000;
+        LOGV("[Hook] Spoofing UID for transaction: 0 -> %d", txn_data->sender_euid);
+
         hijack = false; // Never hijack to avoid recursion
     // Check 3: Normal interception based on registry of monitored binders
     } else {
