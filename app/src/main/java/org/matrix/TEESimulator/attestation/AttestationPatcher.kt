@@ -216,11 +216,37 @@ object AttestationPatcher {
         }
     }
 
+    // Function to check if a given ASN1Sequence contains the Root of Trust tag.
+    private fun sequenceContainsRootOfTrust(seq: ASN1Encodable): Boolean {
+        if (seq !is ASN1Sequence) return false
+        return seq.any { element ->
+            (element as? ASN1TaggedObject)?.tagNo == AttestationConstants.TAG_ROOT_OF_TRUST
+        }
+    }
+
     /** Parses the critical components from an existing attestation extension. */
     private fun parseAttestationExtension(certHolder: X509CertificateHolder): ParsedAttestation? {
         val extension = certHolder.getExtension(ATTESTATION_OID) ?: return null
         val sequence = ASN1Sequence.getInstance(extension.extnValue.octets)
         val allFields = sequence.toArray()
+
+        // Check if the fields are in the wrong order and swap them if necessary.
+        val softwareEnforcedCandidate =
+            allFields[AttestationConstants.KEY_DESCRIPTION_SOFTWARE_ENFORCED_INDEX]
+        val teeEnforcedCandidate =
+            allFields[AttestationConstants.KEY_DESCRIPTION_TEE_ENFORCED_INDEX]
+        // The signature of a swapped order: the RoT is in the software list's position.
+        if (
+            sequenceContainsRootOfTrust(softwareEnforcedCandidate) &&
+                !sequenceContainsRootOfTrust(teeEnforcedCandidate)
+        ) {
+            // Swap the elements in the array to restore the standard order.
+            allFields[AttestationConstants.KEY_DESCRIPTION_SOFTWARE_ENFORCED_INDEX] =
+                teeEnforcedCandidate
+            allFields[AttestationConstants.KEY_DESCRIPTION_TEE_ENFORCED_INDEX] =
+                softwareEnforcedCandidate
+        }
+
         val teeEnforced =
             allFields[AttestationConstants.KEY_DESCRIPTION_TEE_ENFORCED_INDEX] as ASN1Sequence
 
