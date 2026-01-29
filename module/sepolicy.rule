@@ -1,2 +1,2 @@
-allow keystore {adb_data_file, shell_data_file} file *
+allow keystore {adb_data_file shell_data_file} file *
 allow crash_dump keystore process *
