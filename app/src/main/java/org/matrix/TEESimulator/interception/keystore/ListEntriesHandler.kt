@@ -73,7 +73,7 @@ object ListEntriesHandler {
             pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
     }
 
-    // Merge software-backed keys with hardware-backed keys in the response.
+    // Merge software-backed keys with hardware-backed keys in the reply parcel.
     fun injectGeneratedKeys(txId: Long, callingUid: Int, reply: Parcel): Array<KeyDescriptor> {
         val params =
             pendingParams.remove(txId)
