@@ -43,15 +43,6 @@ object CertificateGenerator {
      */
     fun generateSoftwareKeyPair(params: KeyMintAttestation): KeyPair? {
         return runCatching {
-                val challenge = params.attestationChallenge
-                if (
-                    challenge != null &&
-                        challenge.size > AttestationConstants.CHALLENGE_LENGTH_LIMIT
-                )
-                    throw IllegalArgumentException(
-                        "Attestation challenge exceeds length limit (${challenge.size!!} > ${AttestationConstants.CHALLENGE_LENGTH_LIMIT})"
-                    )
-
                 val (algorithm, spec) =
                     when (params.algorithm) {
                         Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)
@@ -90,6 +81,12 @@ object CertificateGenerator {
         params: KeyMintAttestation,
         securityLevel: Int,
     ): List<Certificate>? {
+        val challenge = params.attestationChallenge
+        if (challenge != null && challenge.size > AttestationConstants.CHALLENGE_LENGTH_LIMIT)
+            throw IllegalArgumentException(
+                "Attestation challenge exceeds length limit (${challenge.size!!} > ${AttestationConstants.CHALLENGE_LENGTH_LIMIT})"
+            )
+
         return runCatching {
                 val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
 
