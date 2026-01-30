@@ -97,16 +97,25 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION)
-            return ListEntriesHandler.handlePreTransact(
-                txId,
-                code,
-                callingUid,
-                data,
-                LIST_ENTRIES_BATCHED_TRANSACTION,
-            )
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-        if (
+            if (ConfigurationManager.shouldSkipUid(callingUid))
+                return TransactionResult.ContinueAndSkipPost
+
+            return runCatching {
+                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
+                    ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
+                    TransactionResult.Continue
+                }
+                .getOrElse {
+                    SystemLogger.error(
+                        "[TX_ID: $txId] Failed to parse parameters for ${transactionNames[code]!!}",
+                        it,
+                    )
+                    TransactionResult.ContinueAndSkipPost
+                }
+        } else if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
                 code == UPDATE_SUBCOMPONENT_TRANSACTION
@@ -178,10 +187,19 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
-        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION)
-            return ListEntriesHandler.handlePostTransact(txId, callingUid, reply)
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
+            logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
-        if (code == GET_KEY_ENTRY_TRANSACTION) {
+            return runCatching {
+                    val updatedKeyDescriptors =
+                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, reply)
+                    InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
+                }
+                .getOrElse {
+                    SystemLogger.error("[TX_ID: $txId] Failed to inject listEntries reply", it)
+                    TransactionResult.SkipTransaction
+                }
+        } else if (code == GET_KEY_ENTRY_TRANSACTION) {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             data.enforceInterface(IKeystoreService.DESCRIPTOR)
