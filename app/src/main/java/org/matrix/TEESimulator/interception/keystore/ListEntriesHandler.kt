@@ -69,8 +69,10 @@ object ListEntriesHandler {
 
         // List entries is only supported for Domain::APP and Domain::SELINUX.
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
-        if (domain == Domain.APP)
+        if (domain == Domain.APP) {
             pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
+            SystemLogger.debug("[TX_ID: $txId] Cached ${pendingParams[txId]}.")
+        }
     }
 
     // Merge software-backed keys with hardware-backed keys in the reply parcel.
@@ -92,11 +94,14 @@ object ListEntriesHandler {
         val safeAmountToReturn = estimateSafeAmountToReturn(mergedArray, RESPONSE_SIZE_LIMIT)
 
         return if (safeAmountToReturn < mergedArray.size) {
-            SystemLogger.info(
-                "Listing entries are truncated [${mergedArray.size} -> $safeAmountToReturn] to avoid transaction overflow."
+            SystemLogger.debug(
+                "[TX_ID: $txId] Listing entries are truncated [${mergedArray.size} -> $safeAmountToReturn] to avoid transaction overflow."
             )
             mergedArray.copyOfRange(0, safeAmountToReturn)
         } else {
+            SystemLogger.debug(
+                "[TX_ID: $txId] Listing entries returns ${mergedArray.size} [injected: ${keysToInject.size}] keys."
+            )
             mergedArray
         }
     }

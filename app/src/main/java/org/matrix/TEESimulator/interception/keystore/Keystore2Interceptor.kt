@@ -196,7 +196,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                     InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
                 }
                 .getOrElse {
-                    SystemLogger.error("[TX_ID: $txId] Failed to update the result of ${transactionNames[code]!!}.", it)
+                    SystemLogger.error(
+                        "[TX_ID: $txId] Failed to update the result of ${transactionNames[code]!!}.",
+                        it,
+                    )
                     TransactionResult.SkipTransaction
                 }
         } else if (code == GET_KEY_ENTRY_TRANSACTION) {
