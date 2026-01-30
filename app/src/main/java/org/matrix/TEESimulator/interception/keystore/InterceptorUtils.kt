@@ -65,6 +65,19 @@ object InterceptorUtils {
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }
 
+    /** Creates an `OverrideReply` parcel containing a typed array. */
+    fun <T : Parcelable> createTypedArrayReply(
+        array: Array<T>,
+        flags: Int = 0,
+    ): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel =
+            Parcel.obtain().apply {
+                writeNoException()
+                writeTypedArray(array, flags)
+            }
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
+
     /** Creates an `OverrideReply` parcel containing a Parcelable object. */
     fun <T : Parcelable?> createTypedObjectReply(
         obj: T,
@@ -96,18 +109,5 @@ object InterceptorUtils {
     /** Checks if a reply parcel contains an exception without consuming it. */
     fun hasException(reply: Parcel): Boolean {
         return runCatching { reply.readException() }.exceptionOrNull() != null
-    }
-
-    /** Creates an `OverrideReply` parcel containing a typed array. */
-    fun <T : Parcelable> createTypedArrayReply(
-        array: Array<T>,
-        flags: Int = 0,
-    ): BinderInterceptor.TransactionResult.OverrideReply {
-        val parcel =
-            Parcel.obtain().apply {
-                writeNoException()
-                writeTypedArray(array, flags)
-            }
-        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }
 }
