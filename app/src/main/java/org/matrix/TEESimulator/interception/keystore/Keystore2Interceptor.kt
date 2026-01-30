@@ -38,7 +38,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntries")
     private val LIST_ENTRIES_BATCHED_TRANSACTION =
         InterceptorUtils.getTransactCode(IKeystoreService.Stub::class.java, "listEntriesBatched")
-            .takeIf { Build.VERSION.SDK_INT >= 34 } ?: -1
+            .takeIf { Build.VERSION.SDK_INT >= 34 }
+
     private val transactionNames: Map<Int, String> by lazy {
         IKeystoreService.Stub::class
             .java
@@ -58,11 +59,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
      * This method is called once the main service is hooked. It proceeds to find and hook the
      * security level sub-services (e.g., TEE, StrongBox).
      */
-    private fun isListEntries(code: Int): Boolean {
-        return code == LIST_ENTRIES_TRANSACTION ||
-            (code != -1 && code == LIST_ENTRIES_BATCHED_TRANSACTION)
-    }
-
     override fun onInterceptorReady(service: IBinder, backdoor: IBinder) {
         val keystoreInterface = IKeystoreService.Stub.asInterface(service)
         setupSecurityLevelInterceptors(keystoreInterface, backdoor)
@@ -101,8 +97,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): TransactionResult {
-
-        if (isListEntries(code))
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION)
             return ListEntriesHandler.handlePreTransact(
                 txId,
                 code,
@@ -183,7 +178,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (target != keystoreService || reply == null || InterceptorUtils.hasException(reply))
             return TransactionResult.SkipTransaction
 
-        if (isListEntries(code))
+        if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION)
             return ListEntriesHandler.handlePostTransact(txId, callingUid, reply)
 
         if (code == GET_KEY_ENTRY_TRANSACTION) {
