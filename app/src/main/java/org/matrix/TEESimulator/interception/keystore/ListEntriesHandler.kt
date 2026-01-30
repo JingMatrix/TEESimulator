@@ -69,6 +69,7 @@ object ListEntriesHandler {
 
         // List entries is only supported for Domain::APP and Domain::SELINUX.
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
+        // Note that all generated keys belong to Domain::APP.
         if (domain == Domain.APP) {
             pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
             SystemLogger.debug("[TX_ID: $txId] Cached ${pendingParams[txId]}.")
