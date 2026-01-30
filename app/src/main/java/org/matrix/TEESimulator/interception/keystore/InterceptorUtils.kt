@@ -4,7 +4,6 @@ import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
 import android.security.keystore.KeystoreResponse
-import java.util.TreeMap
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -110,22 +109,5 @@ object InterceptorUtils {
                 writeTypedArray(array, flags)
             }
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
-    }
-
-    /**
-     * Merges hardware and software key descriptors into a single sorted array. Uses TreeMap to
-     * ensure alphabetical ordering and avoid duplicates.
-     */
-    fun mergeKeyDescriptors(
-        hardwareKeys: Array<android.system.keystore2.KeyDescriptor>,
-        softwareKeys: List<android.system.keystore2.KeyDescriptor>,
-    ): Array<android.system.keystore2.KeyDescriptor> {
-        val combinedMap = TreeMap<String, android.system.keystore2.KeyDescriptor>()
-
-        hardwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
-
-        softwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
-
-        return combinedMap.values.toTypedArray()
     }
 }

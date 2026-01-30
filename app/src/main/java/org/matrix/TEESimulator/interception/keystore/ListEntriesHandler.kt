@@ -4,6 +4,7 @@ import android.os.Parcel
 import android.system.keystore2.Domain
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
+import java.util.TreeMap
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.config.ConfigurationManager
 import org.matrix.TEESimulator.interception.core.BinderInterceptor.TransactionResult
@@ -127,11 +128,7 @@ object ListEntriesHandler {
                 if (effectiveNamespace != callingUid.toLong())
                     return TransactionResult.SkipTransaction
 
-                val softwareKeys =
-                    KeyMintSecurityLevelInterceptor.getSoftwareKeyDescriptors(
-                        callingUid,
-                        effectiveNamespace,
-                    )
+                val softwareKeys = getSoftwareKeyDescriptors(callingUid, effectiveNamespace)
 
                 val filteredSoftwareKeys =
                     params.startPastAlias?.let { startAlias ->
@@ -144,8 +141,7 @@ object ListEntriesHandler {
                 reply.readException()
                 val originalList = reply.createTypedArray(KeyDescriptor.CREATOR) ?: emptyArray()
 
-                val mergedArray =
-                    InterceptorUtils.mergeKeyDescriptors(originalList, filteredSoftwareKeys)
+                val mergedArray = mergeKeyDescriptors(originalList, filteredSoftwareKeys)
 
                 // Limit response size to avoid binder buffer overflow (matching AOSP behavior)
                 val safeAmountToReturn =
@@ -171,6 +167,37 @@ object ListEntriesHandler {
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed to inject listEntries reply", it)
                 TransactionResult.SkipTransaction
+            }
+    }
+
+    /**
+     * Merges hardware and software key descriptors into a single sorted array. Uses TreeMap to
+     * ensure alphabetical ordering and avoid duplicates.
+     */
+    private fun mergeKeyDescriptors(
+        hardwareKeys: Array<KeyDescriptor>,
+        softwareKeys: List<KeyDescriptor>,
+    ): Array<android.system.keystore2.KeyDescriptor> {
+        val combinedMap = TreeMap<String, KeyDescriptor>()
+        hardwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
+        softwareKeys.forEach { key -> key.alias?.let { combinedMap[it] = key } }
+        return combinedMap.values.toTypedArray()
+    }
+
+    /**
+     * Returns a list of software-backed key descriptors for the given UID. These are returned as
+     * our local Stub KeyDescriptor objects.
+     */
+    private fun getSoftwareKeyDescriptors(uid: Int, nspace: Long): List<KeyDescriptor> {
+        return KeyMintSecurityLevelInterceptor.generatedKeys.entries
+            .filter { it.key.uid == uid }
+            .map { (keyId, _) ->
+                KeyDescriptor().apply {
+                    this.domain = Domain.APP
+                    this.nspace = nspace
+                    this.alias = keyId.alias
+                    this.blob = null
+                }
             }
     }
 }

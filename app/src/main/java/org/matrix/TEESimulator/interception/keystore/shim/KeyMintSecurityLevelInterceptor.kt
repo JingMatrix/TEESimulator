@@ -345,23 +345,6 @@ class KeyMintSecurityLevelInterceptor(
             generatedKeys[keyId]?.response
 
         /**
-         * Returns a list of software-backed key descriptors for the given UID. These are returned
-         * as our local Stub KeyDescriptor objects.
-         */
-        fun getSoftwareKeyDescriptors(uid: Int, nspace: Long): List<KeyDescriptor> {
-            return generatedKeys.entries
-                .filter { it.key.uid == uid }
-                .map { (keyId, _) ->
-                    KeyDescriptor().apply {
-                        this.domain = Domain.APP
-                        this.nspace = nspace
-                        this.alias = keyId.alias
-                        this.blob = null
-                    }
-                }
-        }
-
-        /**
          * Finds a software-generated key by first filtering all known keys by the caller's UID, and
          * then matching the specific nspace.
          *
