@@ -105,8 +105,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
 
             return runCatching {
                     val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
-                    ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
-                    TransactionResult.Continue
+                    if (ListEntriesHandler.cacheParameters(txId, data, isBatchMode)) {
+                        TransactionResult.Continue
+                    } else {
+                        TransactionResult.ContinueAndSkipPost
+                    }
                 }
                 .getOrElse {
                     SystemLogger.error(

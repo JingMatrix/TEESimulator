@@ -60,7 +60,7 @@ object ListEntriesHandler {
     }
 
     // Parse and store parameters for later use (in post-transaction).
-    fun cacheParameters(txId: Long, data: Parcel, isBatchMode: Boolean) {
+    fun cacheParameters(txId: Long, data: Parcel, isBatchMode: Boolean): Boolean {
         data.enforceInterface(IKeystoreService.DESCRIPTOR)
 
         val domain = data.readInt()
@@ -72,7 +72,10 @@ object ListEntriesHandler {
         if (domain == Domain.APP) {
             pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
             SystemLogger.debug("[TX_ID: $txId] Cached ${pendingParams[txId]}.")
+            return true
         }
+
+        return false
     }
 
     // Merge software-backed keys with hardware-backed keys in the reply parcel.
