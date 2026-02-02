@@ -587,9 +587,16 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     Parcel pre_req, pre_resp;
     writeTransactionData(pre_req, tx_id, target, code, flags, request);
 
-    if (callback->transact(intercept::kPreTransact, pre_req, &pre_resp) != OK) {
-        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed. Forwarding original call.", tx_id);
-        return false; // Callback failed, proceed as if not intercepted
+    status_t pre_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
+    if (pre_status != OK) {
+        // Block when interceptor is dead to prevent privacy leak to third-party apps
+        if (callback->pingBinder() != OK) {
+            LOGE("[TX_ID: %" PRIu64 "] Interceptor DEAD. Blocking to prevent attestation leak.", tx_id);
+            result = DEAD_OBJECT;
+            return true;
+        }
+        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed (not dead). Forwarding.", tx_id);
+        return false;
     }
 
     int32_t action = pre_resp.readInt32();
@@ -642,7 +649,8 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
         VALIDATE_STATUS(tx_id, post_req.appendFrom(reply, 0, reply_size));
     }
 
-    if (callback->transact(intercept::kPostTransact, post_req, &post_resp) == OK) {
+    status_t post_status = callback->transact(intercept::kPostTransact, post_req, &post_resp);
+    if (post_status == OK) {
         int32_t post_action = post_resp.readInt32();
         if (post_action == intercept::kActionOverrideReply && reply) {
             result = post_resp.readInt32(); // Read new status
