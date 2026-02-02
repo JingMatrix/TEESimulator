@@ -14,6 +14,7 @@ import org.matrix.TEESimulator.interception.keystore.Keystore2Interceptor
 import org.matrix.TEESimulator.interception.keystore.KeystoreInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.util.AndroidDeviceUtils
+import kotlin.system.exitProcess
 
 /**
  * Main application object for TEESimulator. This object manages the application's lifecycle,
@@ -32,6 +33,11 @@ object App {
      */
     @JvmStatic
     fun main(args: Array<String>) {
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            SystemLogger.error("Uncaught exception on thread '${thread.name}'. Exiting for restart.", throwable)
+            exitProcess(0)
+        }
+
         SystemLogger.info("Welcome to TEESimulator!")
 
         try {
