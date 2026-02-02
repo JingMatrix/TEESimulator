@@ -204,7 +204,7 @@ object CertificateGenerator {
         val builder =
             JcaX509v3CertificateBuilder(
                 issuer,
-                params.certificateSerial ?: BigInteger.ONE,
+                params.certificateSerial ?: BigInteger(160, java.security.SecureRandom()),
                 params.certificateNotBefore ?: Date(),
                 params.certificateNotAfter ?: leafNotAfter,
                 subject,
@@ -212,7 +212,7 @@ object CertificateGenerator {
             )
 
         // Add standard extensions.
-        builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign))
+        builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.digitalSignature))
         // Add our custom, simulated attestation extension.
         builder.addExtension(
             AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
