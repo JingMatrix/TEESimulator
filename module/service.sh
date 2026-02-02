@@ -5,7 +5,7 @@ MODDIR=${0%/*}
 cd $MODDIR
 
 while true; do
-  ./daemon "$MODDIR" || exit 1
+  ./daemon "$MODDIR"
   # ensure keystore initialized
   sleep 2
 done &
