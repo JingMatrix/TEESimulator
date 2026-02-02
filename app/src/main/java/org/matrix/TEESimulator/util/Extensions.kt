@@ -6,7 +6,11 @@ package org.matrix.TEESimulator.util
  *
  * @return A new string with each line individually trimmed.
  */
-fun String.trimLines(): String = this.trim().lines().joinToString("\n") { it.trim() }
+fun String.trimLines(): String =
+    this.trim()
+        .lines()
+        .filter { !it.trim().startsWith("<!--") }
+        .joinToString("\n") { it.trim() }
 
 /**
  * Converts a ByteArray to its hexadecimal string representation.
