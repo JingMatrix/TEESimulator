@@ -1,5 +1,6 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.KeyPurpose
@@ -7,9 +8,13 @@ import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
 import android.system.keystore2.*
+import java.io.ByteArrayInputStream
+import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.SecureRandom
 import java.security.cert.Certificate
+import java.security.cert.CertificateFactory
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
@@ -269,6 +274,13 @@ class KeyMintSecurityLevelInterceptor(
                         GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
 
+                    GeneratedKeyPersistence.save(
+                        keyId, keyData.first, keyDescriptor.nspace, securityLevel,
+                        keyData.second, parsedParams.algorithm, parsedParams.keySize,
+                        parsedParams.ecCurve, parsedParams.purpose, parsedParams.digest,
+                        isAttestKeyRequest,
+                    )
+
                     // Return the metadata of our generated key, skipping the real hardware call.
                     return InterceptorUtils.createTypedObjectReply(response.metadata)
                 } else if (parsedParams.attestationChallenge != null) {
@@ -304,6 +316,87 @@ class KeyMintSecurityLevelInterceptor(
             this.metadata = metadata
             iSecurityLevel = original
         }
+    }
+
+    fun loadPersistedKeys() {
+        val entries = GeneratedKeyPersistence.loadAll(securityLevel)
+        if (entries.isEmpty()) {
+            SystemLogger.debug("No persisted keys to restore for security level $securityLevel")
+            return
+        }
+
+        SystemLogger.info("Restoring ${entries.size} persisted keys for security level $securityLevel")
+
+        for (data in entries) {
+            runCatching {
+                val keyId = KeyIdentifier(data.uid, data.alias)
+                if (generatedKeys.containsKey(keyId)) {
+                    SystemLogger.debug("Skipping already-loaded key: $keyId")
+                    return@runCatching
+                }
+
+                val algorithmName = when (data.algorithm) {
+                    Algorithm.EC -> "EC"
+                    Algorithm.RSA -> "RSA"
+                    else -> throw IllegalArgumentException("Unknown algorithm: ${data.algorithm}")
+                }
+
+                val keyFactory = KeyFactory.getInstance(algorithmName)
+                val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(data.privateKeyBytes))
+
+                val certFactory = CertificateFactory.getInstance("X.509")
+                val certChain = data.certChainBytes.map { bytes ->
+                    certFactory.generateCertificate(ByteArrayInputStream(bytes))
+                }
+                require(certChain.isNotEmpty()) { "Persisted key has empty certificate chain" }
+
+                val publicKey = certChain[0].publicKey
+                val keyPair = KeyPair(publicKey, privateKey)
+
+                val descriptor = KeyDescriptor().apply {
+                    domain = Domain.APP
+                    nspace = data.nspace
+                    alias = data.alias
+                    blob = null
+                }
+
+                val attestation = KeyMintAttestation(
+                    keySize = data.keySize,
+                    algorithm = data.algorithm,
+                    ecCurve = data.ecCurve,
+                    ecCurveName = "",
+                    blockMode = emptyList(),
+                    padding = emptyList(),
+                    purpose = data.purposes,
+                    digest = data.digests,
+                    rsaPublicExponent = null,
+                    certificateSerial = null,
+                    certificateSubject = null,
+                    certificateNotBefore = null,
+                    certificateNotAfter = null,
+                    attestationChallenge = null,
+                    brand = null,
+                    device = null,
+                    product = null,
+                    serial = null,
+                    imei = null,
+                    meid = null,
+                    manufacturer = null,
+                    model = null,
+                    secondImei = null,
+                )
+
+                val response = buildKeyEntryResponse(certChain, attestation, descriptor)
+                generatedKeys[keyId] = GeneratedKeyInfo(keyPair, data.nspace, response)
+                if (data.isAttestationKey) attestationKeys.add(keyId)
+
+                SystemLogger.debug("Restored persisted key: $keyId")
+            }.onFailure {
+                SystemLogger.error("Failed to restore key: uid=${data.uid} alias=${data.alias}", it)
+            }
+        }
+
+        SystemLogger.info("Key restoration complete. Total in memory: ${generatedKeys.size}")
     }
 
     companion object {
@@ -369,6 +462,7 @@ class KeyMintSecurityLevelInterceptor(
         fun cleanupKeyData(keyId: KeyIdentifier) {
             if (generatedKeys.remove(keyId) != null) {
                 SystemLogger.debug("Remove generated key ${keyId}")
+                GeneratedKeyPersistence.delete(keyId)
             }
             if (patchedChains.remove(keyId) != null) {
                 SystemLogger.debug("Remove patched chain for ${keyId}")
@@ -387,13 +481,21 @@ class KeyMintSecurityLevelInterceptor(
             }
         }
 
-        // Clears all cached keys.
+        fun invalidatePatchedChains(reason: String? = null) {
+            val count = patchedChains.size
+            if (count == 0) return
+            val reasonMessage = reason?.let { " due to $it" } ?: ""
+            patchedChains.clear()
+            SystemLogger.info("Invalidated $count patched cert chains$reasonMessage.")
+        }
+
         fun clearAllGeneratedKeys(reason: String? = null) {
             val count = generatedKeys.size
             val reasonMessage = reason?.let { " due to $it" } ?: ""
             generatedKeys.clear()
             patchedChains.clear()
             attestationKeys.clear()
+            GeneratedKeyPersistence.deleteAll()
             SystemLogger.info("Cleared all cached keys ($count entries)$reasonMessage.")
         }
     }

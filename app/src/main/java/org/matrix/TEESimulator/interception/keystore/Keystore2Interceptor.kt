@@ -13,6 +13,7 @@ import android.system.keystore2.KeyEntryResponse
 import java.security.cert.Certificate
 import org.matrix.TEESimulator.attestation.AttestationPatcher
 import org.matrix.TEESimulator.config.ConfigurationManager
+import org.matrix.TEESimulator.interception.keystore.shim.GeneratedKeyPersistence
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
@@ -73,6 +74,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                     val interceptor =
                         KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
                     register(backdoor, tee.asBinder(), interceptor)
+                    interceptor.loadPersistedKeys()
                 }
             }
             .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
@@ -84,6 +86,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                     val interceptor =
                         KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
                     register(backdoor, strongbox.asBinder(), interceptor)
+                    interceptor.loadPersistedKeys()
                 }
             }
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
@@ -290,6 +293,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
 
         metadata.certificate = publicCert
         metadata.certificateChain = certificateChain
+
+        GeneratedKeyPersistence.rePersistIfNeeded(callingUid, generatedKeyInfo)
+
         SystemLogger.verbose(
             "Key updated with sizes: [publicCert, certificateChain] = [${publicCert?.size}, ${certificateChain?.size}]"
         )
