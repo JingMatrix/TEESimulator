@@ -276,6 +276,12 @@ static sp<BinderInterceptor> g_interceptor_instance = nullptr;
 // =============================================================================================
 
 class BinderStub : public BBinder {
+public:
+    const String16& getInterfaceDescriptor() const override {
+        static const String16 kDescriptor("org.matrix.TEESimulator.BinderStub");
+        return kDescriptor;
+    }
+
 protected:
     status_t onTransact(uint32_t code, const Parcel &data, Parcel *reply, uint32_t flags) override {
         if (code != intercept::kBackdoorCode) {
