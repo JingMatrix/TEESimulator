@@ -320,10 +320,10 @@ object ConfigurationManager {
                         )
                         KeyBoxManager.invalidateCache(path)
                         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
-                            // Clear cached keys possibly containing old certificates
+                            // Patched chains are stale; generated keys survive rotation
                             org.matrix.TEESimulator.interception.keystore.shim
                                 .KeyMintSecurityLevelInterceptor
-                                .clearAllGeneratedKeys("updating $file")
+                                .invalidatePatchedChains("keybox change: $path")
                         }
                     }
             }
