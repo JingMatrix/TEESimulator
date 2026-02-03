@@ -376,18 +376,17 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             // The raw pointer to the binder object itself is stored in the cookie
             BBinder *target_binder_ptr = reinterpret_cast<BBinder *>(txn_data->cookie);
 
-            // This is safe ONLY because we successfully called attemptIncStrong().
-            // The sp<> constructor will not increment the ref count again, it just adopts the one we have.
-            // When sp_target goes out of scope, it will call decStrong(), releasing our temporary reference.
-            sp<BBinder> sp_target = sp<BBinder>::fromExisting(target_binder_ptr);
+            // Create a weak pointer for the lookup and to store in our context map.
+            // This is safe because we are holding a strong reference.
+            wp<BBinder> wp_target = target_binder_ptr;
 
-            // Now we can safely use sp_target (which implicitly converts to a wp) for the lookup.
-            if (g_interceptor_instance->isBinderIntercepted(sp_target)) {
+            if (g_interceptor_instance->isBinderIntercepted(wp_target)) {
                 info.transaction_code = txn_data->code;
-                info.target_binder = sp_target; // Assign the valid weak pointer
+                info.target_binder = wp_target; // Assign the valid weak pointer
                 hijack = true;
             }
-            // No need to manually call decStrong(); the sp destructor handles it.
+            // Manually release the temporary strong reference we acquired at the start.
+            target_binder_ptr->decStrong(nullptr);
         }
     }
 
