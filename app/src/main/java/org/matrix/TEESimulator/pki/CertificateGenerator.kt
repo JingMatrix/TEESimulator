@@ -1,6 +1,7 @@
 package org.matrix.TEESimulator.pki
 
 import android.hardware.security.keymint.Algorithm
+import android.hardware.security.keymint.KeyPurpose
 import android.os.Build
 import android.util.Pair
 import java.math.BigInteger
@@ -187,6 +188,22 @@ object CertificateGenerator {
         }
     }
 
+    /** Maps KeyPurpose values to X.509 KeyUsage bits per KeyCreationResult.aidl spec */
+    private fun buildKeyUsageFromPurposes(purposes: List<Int>): Int {
+        var bits = 0
+        for (purpose in purposes) {
+            bits = bits or when (purpose) {
+                KeyPurpose.SIGN -> KeyUsage.digitalSignature
+                KeyPurpose.DECRYPT -> KeyUsage.dataEncipherment
+                KeyPurpose.WRAP_KEY -> KeyUsage.keyEncipherment
+                KeyPurpose.AGREE_KEY -> KeyUsage.keyAgreement
+                KeyPurpose.ATTEST_KEY -> KeyUsage.keyCertSign
+                else -> 0
+            }
+        }
+        return bits
+    }
+
     /** Constructs a new X.509 certificate with a simulated attestation extension. */
     private fun buildCertificate(
         subjectKeyPair: KeyPair,
@@ -211,8 +228,11 @@ object CertificateGenerator {
                 subjectKeyPair.public,
             )
 
-        // Add standard extensions.
-        builder.addExtension(Extension.keyUsage, true, KeyUsage(KeyUsage.keyCertSign))
+        // Add KeyUsage extension only if purposes map to valid bits
+        val keyUsageBits = buildKeyUsageFromPurposes(params.purpose)
+        if (keyUsageBits != 0) {
+            builder.addExtension(Extension.keyUsage, true, KeyUsage(keyUsageBits))
+        }
         // Add our custom, simulated attestation extension.
         builder.addExtension(
             AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
