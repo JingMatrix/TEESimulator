@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <AndroidAttestation>
-    <NumberOfKeyboxes>2</NumberOfKeyboxes>
+    <NumberOfKeyboxes>1</NumberOfKeyboxes>
     <Keybox DeviceID="dev1">
         <Key algorithm="ecdsa">
             <PrivateKey format="pem">
@@ -50,8 +50,6 @@
                 </Certificate>
             </CertificateChain>
         </Key>
-    </Keybox>
-    <Keybox DeviceID="dev1">
         <Key algorithm="rsa">
             <PrivateKey format="pem">
                 -----BEGIN RSA PRIVATE KEY-----
