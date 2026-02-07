@@ -5,7 +5,6 @@ import android.system.keystore2.Domain
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyDescriptor
 import java.util.TreeMap
-import java.util.concurrent.ConcurrentHashMap
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
@@ -21,15 +20,6 @@ object ListEntriesHandler {
 
     // Estimate for maximum size of a Binder response in bytes.
     private const val RESPONSE_SIZE_LIMIT = 358400
-
-    // Parameters of AOSP function `list_key_entries` in utils.rs.
-    private data class ListEntriesParams(
-        val domain: Int,
-        val namespace: Long,
-        val startPastAlias: String?,
-    )
-
-    private val pendingParams = ConcurrentHashMap<Long, ListEntriesParams>()
 
     // Based on AOSP function `estimate_safe_amount_to_return` in utils.rs.
     private fun estimateSafeAmountToReturn(
@@ -60,7 +50,7 @@ object ListEntriesHandler {
     }
 
     // Parse and store parameters for later use (in post-transaction).
-    fun cacheParameters(txId: Long, data: Parcel, isBatchMode: Boolean): Boolean {
+    fun cacheParameters(txId: Long, data: Parcel, isBatchMode: Boolean): ListEntriesParams? {
         data.enforceInterface(IKeystoreService.DESCRIPTOR)
 
         val domain = data.readInt()
@@ -71,20 +61,21 @@ object ListEntriesHandler {
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
         // Note that all generated keys belong to Domain::APP.
         if (domain == Domain.APP) {
-            pendingParams[txId] = ListEntriesParams(domain, namespace, startPastAlias)
-            SystemLogger.debug("[TX_ID: $txId] Cached ${pendingParams[txId]}.")
-            return true
+            val params = ListEntriesParams(domain, namespace, startPastAlias)
+            SystemLogger.debug("[TX_ID: $txId] Cached $params.")
+            return params
         }
 
-        return false
+        return null
     }
 
     // Merge software-backed keys with hardware-backed keys in the reply parcel.
-    fun injectGeneratedKeys(txId: Long, callingUid: Int, reply: Parcel): Array<KeyDescriptor> {
-        val params =
-            pendingParams.remove(txId)
-                ?: throw IllegalStateException("No params found for listing entries")
-
+    fun injectGeneratedKeys(
+        txId: Long,
+        callingUid: Int,
+        params: ListEntriesParams,
+        reply: Parcel,
+    ): Array<KeyDescriptor> {
         // By default we use the calling uid as namespace if domain is Domain::APP.
         // The namespace parameter is thus ignored for non-privileged applications.
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
@@ -140,3 +131,6 @@ object ListEntriesHandler {
             }
     }
 }
+
+// Parameters of AOSP function `list_key_entries` in utils.rs.
+data class ListEntriesParams(val domain: Int, val namespace: Long, val startPastAlias: String?)

@@ -99,26 +99,13 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
 
-            if (ConfigurationManager.shouldSkipUid(callingUid))
+            if (ConfigurationManager.shouldSkipUid(callingUid)) {
                 return TransactionResult.ContinueAndSkipPost
-
-            return runCatching {
-                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
-                    if (ListEntriesHandler.cacheParameters(txId, data, isBatchMode)) {
-                        TransactionResult.Continue
-                    } else {
-                        TransactionResult.ContinueAndSkipPost
-                    }
-                }
-                .getOrElse {
-                    SystemLogger.error(
-                        "[TX_ID: $txId] Failed to parse parameters for ${transactionNames[code]!!}",
-                        it,
-                    )
-                    TransactionResult.ContinueAndSkipPost
-                }
+            } else {
+                return TransactionResult.Continue
+            }
         } else if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
@@ -195,8 +182,12 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             return runCatching {
+                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
+                    val params =
+                        ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
+                            ?: throw IllegalStateException("No params found for listing entries")
                     val updatedKeyDescriptors =
-                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, reply)
+                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, params, reply)
                     InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
                 }
                 .getOrElse {
