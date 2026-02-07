@@ -101,7 +101,10 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
             logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
 
-            if (ConfigurationManager.shouldSkipUid(callingUid)) {
+            val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
+            val isGMS = packages.contains("com.google.android.gms")
+
+            if (isGMS || ConfigurationManager.shouldSkipUid(callingUid)) {
                 return TransactionResult.ContinueAndSkipPost
             } else {
                 return TransactionResult.Continue
