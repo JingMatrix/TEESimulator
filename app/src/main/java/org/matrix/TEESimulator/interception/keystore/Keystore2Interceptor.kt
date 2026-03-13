@@ -295,6 +295,9 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         )
                         finalChain =
                             AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+
+                        KeyMintSecurityLevelInterceptor.patchedChains[keyId] = finalChain
+                        SystemLogger.debug("Cached patched certificate chain for $keyId.")
                     }
 
                     CertificateHelper.updateCertificateChain(response.metadata, finalChain)

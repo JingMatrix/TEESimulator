@@ -334,7 +334,7 @@ class KeyMintSecurityLevelInterceptor(
         // A set to quickly identify keys that were generated for attestation purposes.
         val attestationKeys = ConcurrentHashMap.newKeySet<KeyIdentifier>()
         // Caches patched certificate chains to prevent re-generation and signature inconsistencies.
-        private val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
+        val patchedChains = ConcurrentHashMap<KeyIdentifier, Array<Certificate>>()
         // Stores interceptors for active cryptographic operations.
         private val interceptedOperations = ConcurrentHashMap<IBinder, OperationInterceptor>()
 
