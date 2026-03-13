@@ -120,7 +120,7 @@ object ListEntriesHandler {
         startPastAlias: String?,
     ): List<KeyDescriptor> {
         return KeyMintSecurityLevelInterceptor.generatedKeys.keys
-            .filter { it.uid == uid && (startPastAlias == null || it.alias < startPastAlias) }
+            .filter { it.uid == uid && (startPastAlias == null || it.alias > startPastAlias) }
             .map { keyId ->
                 KeyDescriptor().apply {
                     this.domain = Domain.APP
