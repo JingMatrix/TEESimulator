@@ -17,10 +17,11 @@ import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/key_parameter.rs
 data class KeyMintAttestation(
     val algorithm: Int,
-    val ecCurve: Int,
+    val ecCurve: Int?,
     val ecCurveName: String,
     val keySize: Int,
     val origin: Int?,
+    val noAuthRequired: Boolean?,
     val blockMode: List<Int>,
     val padding: List<Int>,
     val purpose: List<Int>,
@@ -52,11 +53,14 @@ data class KeyMintAttestation(
         keySize = params.findInteger(Tag.KEY_SIZE) ?: 0,
 
         // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)]
-        ecCurve = params.findEcCurve(Tag.EC_CURVE) ?: 0,
+        ecCurve = params.findEcCurve(Tag.EC_CURVE),
         ecCurveName = params.deriveEcCurveName(),
 
         // AOSP: [key_param(tag = ORIGIN, field = Origin)]
         origin = params.findOrigin(Tag.ORIGIN),
+
+        // AOSP: [key_param(tag = NO_AUTH_REQUIRED, field = BoolValue)]
+        noAuthRequired = params.findBoolean(Tag.NO_AUTH_REQUIRED),
 
         // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)]
         blockMode = params.findAllBlockMode(Tag.BLOCK_MODE),
@@ -114,6 +118,10 @@ data class KeyMintAttestation(
 }
 
 // --- Private helper extension functions for parsing KeyParameter arrays ---
+
+/** Maps to AOSP field = Integer */
+private fun Array<KeyParameter>.findBoolean(tag: Int): Boolean? =
+    this.find { it.tag == tag }?.value?.boolValue
 
 /** Maps to AOSP field = Integer */
 private fun Array<KeyParameter>.findInteger(tag: Int): Int? =

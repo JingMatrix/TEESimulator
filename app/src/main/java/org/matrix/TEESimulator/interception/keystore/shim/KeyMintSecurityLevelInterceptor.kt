@@ -1,8 +1,8 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
-import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
@@ -20,6 +20,7 @@ import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.logging.SystemLogger
 import org.matrix.TEESimulator.pki.CertificateGenerator
 import org.matrix.TEESimulator.pki.CertificateHelper
+import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 /**
  * Intercepts calls to an `IKeystoreSecurityLevel` service (e.g., TEE or StrongBox). This is where
@@ -265,7 +266,12 @@ class KeyMintSecurityLevelInterceptor(
                     cleanupKeyData(keyId)
                     // Store the generated key data.
                     val response =
-                        buildKeyEntryResponse(keyData.second, parsedParams, keyDescriptor)
+                        buildKeyEntryResponse(
+                            callingUid,
+                            keyData.second,
+                            parsedParams,
+                            keyDescriptor,
+                        )
                     generatedKeys[keyId] =
                         GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
                     if (isAttestKeyRequest) attestationKeys.add(keyId)
@@ -288,6 +294,7 @@ class KeyMintSecurityLevelInterceptor(
      * Constructs a fake `KeyEntryResponse` that mimics a real response from the Keystore service.
      */
     private fun buildKeyEntryResponse(
+        callingUid: Int,
         chain: List<Certificate>,
         params: KeyMintAttestation,
         descriptor: KeyDescriptor,
@@ -304,7 +311,7 @@ class KeyMintSecurityLevelInterceptor(
                 keySecurityLevel = securityLevel
                 key = normalizedKeyDescriptor
                 CertificateHelper.updateCertificateChain(this, chain.toTypedArray()).getOrThrow()
-                authorizations = params.toAuthorizations(securityLevel)
+                authorizations = params.toAuthorizations(callingUid, securityLevel)
                 modificationTimeMs = System.currentTimeMillis()
             }
         return KeyEntryResponse().apply {
@@ -410,7 +417,10 @@ class KeyMintSecurityLevelInterceptor(
  * Extension function to convert parsed `KeyMintAttestation` parameters back into an array of
  * `Authorization` objects for the fake `KeyMetadata`.
  */
-private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Authorization> {
+private fun KeyMintAttestation.toAuthorizations(
+    callingUid: Int,
+    securityLevel: Int,
+): Array<Authorization> {
     val authList = mutableListOf<Authorization>()
 
     /**
@@ -432,20 +442,61 @@ private fun KeyMintAttestation.toAuthorizations(securityLevel: Int): Array<Autho
         }
     }
 
-    // Use the helper to add each authorization entry cleanly.
+    authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
+
+    if (this.ecCurve != null) {
+        authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
+    } else if (this.rsaPublicExponent != null) {
+        authList.add(
+            createAuth(
+                Tag.RSA_PUBLIC_EXPONENT,
+                KeyParameterValue.longInteger(this.rsaPublicExponent.toLong()),
+            )
+        )
+    } else {
+        SystemLogger.warning("No algorithm specifics found.")
+    }
+
     this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
     this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
 
-    authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
     authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
-    authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
-    authList.add(
-        createAuth(
-            Tag.ORIGIN,
-            KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED),
+
+    if (this.noAuthRequired != null) {
+        authList.add(
+            createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(this.noAuthRequired))
         )
+    }
+
+    authList.add(
+        createAuth(Tag.ORIGIN, KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED))
     )
-    authList.add(createAuth(Tag.NO_AUTH_REQUIRED, KeyParameterValue.boolValue(true)))
+
+    authList.add(
+        createAuth(Tag.OS_VERSION, KeyParameterValue.integer(AndroidDeviceUtils.osVersion))
+    )
+
+    val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
+    if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
+        authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
+    }
+
+    val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
+    if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
+        authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
+    }
+
+    val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
+    if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
+        authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
+    }
+
+    authList.add(
+        createAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis()))
+    )
+
+    // AOSP class android.os.UserHandle: PER_USER_RANGE = 100000;
+    authList.add(createAuth(Tag.USER_ID, KeyParameterValue.integer(callingUid / 100000)))
 
     return authList.toTypedArray()
 }

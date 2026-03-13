@@ -410,6 +410,7 @@ private data class LegacyKeygenParameters(
             ecCurveName = this.ecCurveName ?: "",
             keySize = this.keySize,
             origin = null, // Not needed to build attestaion
+            noAuthRequired = null,
             blockMode = listOf<Int>(),
             padding = listOf<Int>(),
             purpose = this.purpose,

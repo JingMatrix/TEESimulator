@@ -181,11 +181,20 @@ object AttestationBuilder {
                     AttestationConstants.TAG_DIGEST,
                     DERSet(params.digest.map { ASN1Integer(it.toLong()) }.toTypedArray()),
                 ),
+            )
+
+        if (params.ecCurve != null) {
+            list.add(
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_EC_CURVE,
                     ASN1Integer(params.ecCurve.toLong()),
-                ),
+                )
+            )
+        }
+
+        list.addAll(
+            listOf(
                 DERTaggedObject(true, AttestationConstants.TAG_NO_AUTH_REQUIRED, DERNull.INSTANCE),
                 DERTaggedObject(
                     true,
@@ -198,6 +207,7 @@ object AttestationBuilder {
                     buildRootOfTrust(null),
                 ),
             )
+        )
 
         // Use the same logic as getSimulatedHardwareProperties to conditionally add patch levels.
         val simulatedProperties = getSimulatedHardwareProperties(uid)
