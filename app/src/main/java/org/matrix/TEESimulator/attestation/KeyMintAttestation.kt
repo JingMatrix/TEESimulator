@@ -155,7 +155,7 @@ private fun Array<KeyParameter>.findBlob(tag: Int): ByteArray? =
 private fun Array<KeyParameter>.findAllBlockMode(tag: Int): List<Int> =
     this.filter { it.tag == tag }.map { it.value.blockMode }
 
-/** Maps to AOSP field = BlockMode (Repeated) */
+/** Maps to AOSP field = PaddingMode (Repeated) */
 private fun Array<KeyParameter>.findAllPaddingMode(tag: Int): List<Int> =
     this.filter { it.tag == tag }.map { it.value.paddingMode }
 

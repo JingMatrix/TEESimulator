@@ -446,21 +446,24 @@ private fun KeyMintAttestation.toAuthorizations(
 
     if (this.ecCurve != null) {
         authList.add(createAuth(Tag.EC_CURVE, KeyParameterValue.ecCurve(this.ecCurve)))
-    } else if (this.rsaPublicExponent != null) {
+    }
+
+    this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
+    this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
+    this.padding.forEach {
+        authList.add(createAuth(Tag.PADDING, KeyParameterValue.paddingMode(it)))
+    }
+
+    authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
+
+    if (this.rsaPublicExponent != null) {
         authList.add(
             createAuth(
                 Tag.RSA_PUBLIC_EXPONENT,
                 KeyParameterValue.longInteger(this.rsaPublicExponent.toLong()),
             )
         )
-    } else {
-        SystemLogger.warning("No algorithm specifics found.")
     }
-
-    this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
-    this.digest.forEach { authList.add(createAuth(Tag.DIGEST, KeyParameterValue.digest(it))) }
-
-    authList.add(createAuth(Tag.KEY_SIZE, KeyParameterValue.integer(this.keySize)))
 
     if (this.noAuthRequired != null) {
         authList.add(
