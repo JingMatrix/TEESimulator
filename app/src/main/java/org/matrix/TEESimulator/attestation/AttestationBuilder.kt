@@ -193,6 +193,22 @@ object AttestationBuilder {
             )
         }
 
+        params.padding.forEach {
+            list.add(
+                DERTaggedObject(true, AttestationConstants.TAG_PADDING, ASN1Integer(it.toLong()))
+            )
+        }
+
+        if (params.rsaPublicExponent != null) {
+            list.add(
+                DERTaggedObject(
+                    true,
+                    AttestationConstants.TAG_RSA_PUBLIC_EXPONENT,
+                    ASN1Integer(params.rsaPublicExponent.toLong()),
+                )
+            )
+        }
+
         list.addAll(
             listOf(
                 DERTaggedObject(true, AttestationConstants.TAG_NO_AUTH_REQUIRED, DERNull.INSTANCE),
