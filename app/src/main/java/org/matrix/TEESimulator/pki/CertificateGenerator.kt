@@ -217,7 +217,7 @@ object CertificateGenerator {
         uid: Int,
         securityLevel: Int,
     ): Certificate {
-        val subject = params.certificateSubject ?: X500Name("CN=Android KeyStore Key")
+        val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
         val leafNotAfter =
             (signingKeyPair.public as? X509Certificate)?.notAfter
                 ?: Date(System.currentTimeMillis() + 31536000000L)
