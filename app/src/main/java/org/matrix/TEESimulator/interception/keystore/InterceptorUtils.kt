@@ -1,11 +1,16 @@
 package org.matrix.TEESimulator.interception.keystore
 
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.Tag
 import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
 import android.security.keystore.KeystoreResponse
+import android.system.keystore2.Authorization
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 data class KeyIdentifier(val uid: Int, val alias: String)
 
@@ -28,7 +33,6 @@ object InterceptorUtils {
         }
     }
 
-    /** Creates an `KeystoreResponse` parcel that indicates success with no data. */
     fun createSuccessKeystoreResponse(): KeystoreResponse {
         val parcel = Parcel.obtain()
         try {
@@ -39,6 +43,40 @@ object InterceptorUtils {
         } finally {
             parcel.recycle()
         }
+    }
+
+    fun patchAuthorizations(
+        authorizations: Array<Authorization>?,
+        callingUid: Int,
+    ): Array<Authorization>? {
+        if (authorizations == null) return null
+        val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
+        val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
+        val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
+
+        return authorizations
+            .mapNotNull { auth ->
+                val replacement =
+                    when (auth.keyParameter.tag) {
+                        Tag.OS_PATCHLEVEL -> osPatch
+                        Tag.VENDOR_PATCHLEVEL -> vendorPatch
+                        Tag.BOOT_PATCHLEVEL -> bootPatch
+                        else -> return@mapNotNull auth
+                    }
+                if (replacement == AndroidDeviceUtils.DO_NOT_REPORT) {
+                    null
+                } else {
+                    Authorization().apply {
+                        securityLevel = auth.securityLevel
+                        keyParameter =
+                            KeyParameter().apply {
+                                tag = auth.keyParameter.tag
+                                value = KeyParameterValue.integer(replacement)
+                            }
+                    }
+                }
+            }
+            .toTypedArray()
     }
 
     /** Creates an `OverrideReply` parcel that indicates success with no data. */

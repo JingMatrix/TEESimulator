@@ -17,6 +17,8 @@ import org.matrix.TEESimulator.logging.SystemLogger
 
 // A sealed interface to represent the different cryptographic operations we can perform.
 private sealed interface CryptoPrimitive {
+    fun updateAad(data: ByteArray?)
+
     fun update(data: ByteArray?): ByteArray?
 
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray?
@@ -82,6 +84,8 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
             initSign(keyPair.private)
         }
 
+    override fun updateAad(data: ByteArray?) {}
+
     override fun update(data: ByteArray?): ByteArray? {
         if (data != null) signature.update(data)
         return null
@@ -101,6 +105,8 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
             initVerify(keyPair.public)
         }
+
+    override fun updateAad(data: ByteArray?) {}
 
     override fun update(data: ByteArray?): ByteArray? {
         if (data != null) signature.update(data)
@@ -132,6 +138,10 @@ private class CipherPrimitive(
             val key = if (opMode == Cipher.ENCRYPT_MODE) keyPair.public else keyPair.private
             init(opMode, key)
         }
+
+    override fun updateAad(data: ByteArray?) {
+        if (data != null) cipher.updateAAD(data)
+    }
 
     override fun update(data: ByteArray?): ByteArray? =
         if (data != null) cipher.update(data) else null
@@ -168,6 +178,15 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
             }
     }
 
+    fun updateAad(data: ByteArray?) {
+        try {
+            primitive.updateAad(data)
+        } catch (e: Exception) {
+            SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to updateAad.", e)
+            throw e
+        }
+    }
+
     fun update(data: ByteArray?): ByteArray? {
         try {
             return primitive.update(data)
@@ -198,6 +217,11 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
 /** The Binder interface for our [SoftwareOperation]. */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
+
+    @Throws(RemoteException::class)
+    override fun updateAad(aadInput: ByteArray?) {
+        operation.updateAad(aadInput)
+    }
 
     @Throws(RemoteException::class)
     override fun update(input: ByteArray?): ByteArray? {

@@ -93,11 +93,11 @@ object CertificateHelper {
      */
     fun certificatesToByteArray(certificates: Collection<Certificate>): ByteArray? {
         return runCatching {
-            ByteArrayOutputStream().use { stream ->
-                certificates.forEach { cert -> stream.write(cert.encoded) }
-                stream.toByteArray()
+                ByteArrayOutputStream().use { stream ->
+                    certificates.forEach { cert -> stream.write(cert.encoded) }
+                    stream.toByteArray()
+                }
             }
-        }
             .onFailure {
                 SystemLogger.warning(
                     "Failed to serialize certificate collection to byte array.",
@@ -194,6 +194,10 @@ object CertificateHelper {
      * @param chain The new certificate chain to set. The leaf must be at index 0.
      * @return A [Result] indicating success or failure.
      */
+    fun updateCertificateChain(metadata: KeyMetadata, chain: Array<Certificate>): Result<Unit> {
+        return updateCertificateChain(0, metadata, chain)
+    }
+
     fun updateCertificateChain(
         callingUid: Int,
         metadata: KeyMetadata,
