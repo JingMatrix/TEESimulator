@@ -1,5 +1,6 @@
 package org.matrix.TEESimulator.interception.keystore.shim
 
+import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
@@ -210,22 +211,30 @@ class KeyMintSecurityLevelInterceptor(
         data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
         val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
 
-        // An operation must use the KEY_ID domain.
-        if (keyDescriptor.domain != Domain.KEY_ID) {
-            return TransactionResult.ContinueAndSkipPost
+        // AOSP createOperation accepts Domain::APP (alias), Domain::KEY_ID (nspace),
+        // Domain::SELINUX, and Domain::BLOB. Resolve to our generated key by trying
+        // both alias-based and nspace-based lookups (database.rs: l=2060, 2123).
+        val generatedKeyInfo =
+            when (keyDescriptor.domain) {
+                Domain.KEY_ID -> findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
+                Domain.APP ->
+                    keyDescriptor.alias?.let { alias ->
+                        generatedKeys[KeyIdentifier(callingUid, alias)]
+                    }
+                else -> null
         }
-
-        val nspace = keyDescriptor.nspace
-        val generatedKeyInfo = findGeneratedKeyByKeyId(callingUid, nspace)
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
-                "[TX_ID: $txId] Operation for unknown/hardware KeyId ($nspace). Forwarding."
+                "[TX_ID: $txId] Operation for unknown/hardware key (domain=${keyDescriptor.domain}, " +
+                    "alias=${keyDescriptor.alias}, nspace=${keyDescriptor.nspace}). Forwarding."
             )
             return TransactionResult.Continue
         }
 
-        SystemLogger.info("[TX_ID: $txId] Creating SOFTWARE operation for KeyId $nspace.")
+        SystemLogger.info(
+            "[TX_ID: $txId] Creating SOFTWARE operation for key ${generatedKeyInfo.nspace}."
+        )
 
         val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedOpParams = KeyMintAttestation(opParams)
@@ -247,6 +256,18 @@ class KeyMintSecurityLevelInterceptor(
         if (forced) {
             return InterceptorUtils.createServiceSpecificErrorReply(
                 KeystoreErrorCode.PERMISSION_DENIED
+            )
+        }
+
+        // F8/F13: AOSP rejects VERIFY/ENCRYPT for asymmetric keys at the HAL level
+        // with UNSUPPORTED_PURPOSE (-2), distinct from INCOMPATIBLE_PURPOSE (-3).
+        val algorithm = keyParams.algorithm
+        if (
+            (algorithm == Algorithm.EC || algorithm == Algorithm.RSA) &&
+                (requestedPurpose == KeyPurpose.VERIFY || requestedPurpose == KeyPurpose.ENCRYPT)
+        ) {
+            return InterceptorUtils.createServiceSpecificErrorReply(
+                KeystoreErrorCode.UNSUPPORTED_PURPOSE
             )
         }
 
@@ -315,12 +336,19 @@ class KeyMintSecurityLevelInterceptor(
                 // after_finish (enforcements.rs: l=510).
                 keyParams.usageCountLimit?.let { limit ->
                     val keyId =
-                        generatedKeys.entries.find { it.value === generatedKeyInfo }?.key
-                            ?: return@let
+                        generatedKeys.entries
+                            .find { it.value.nspace == generatedKeyInfo.nspace }
+                            ?.key ?: return@let
                     val remaining =
                         usageCounters.getOrPut(keyId) {
                             java.util.concurrent.atomic.AtomicInteger(limit)
                         }
+                    // Check if already exhausted before creating the operation
+                    if (remaining.get() <= 0) {
+                        cleanupKeyData(keyId)
+                        usageCounters.remove(keyId)
+                        throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
+                    }
                     softwareOperation.onFinishCallback = {
                         if (remaining.decrementAndGet() <= 0) {
                             cleanupKeyData(keyId)
