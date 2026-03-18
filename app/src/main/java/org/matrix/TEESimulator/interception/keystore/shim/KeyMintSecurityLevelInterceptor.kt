@@ -3,6 +3,7 @@ package org.matrix.TEESimulator.interception.keystore.shim
 import android.hardware.security.keymint.KeyOrigin
 import android.hardware.security.keymint.KeyParameter
 import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.SecurityLevel
 import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
@@ -430,7 +431,7 @@ private fun KeyMintAttestation.toAuthorizations(
      * @param value The value for the tag, wrapped in a KeyParameterValue.
      * @return A populated Authorization object.
      */
-    fun createAuth(tag: Int, value: KeyParameterValue): Authorization {
+    fun createAuth(tag: Int, value: KeyParameterValue, level: Int = securityLevel): Authorization {
         val param =
             KeyParameter().apply {
                 this.tag = tag
@@ -438,7 +439,7 @@ private fun KeyMintAttestation.toAuthorizations(
             }
         return Authorization().apply {
             this.keyParameter = param
-            this.securityLevel = securityLevel
+            this.securityLevel = level
         }
     }
 
@@ -499,7 +500,13 @@ private fun KeyMintAttestation.toAuthorizations(
     )
 
     // AOSP class android.os.UserHandle: PER_USER_RANGE = 100000;
-    authList.add(createAuth(Tag.USER_ID, KeyParameterValue.integer(callingUid / 100000)))
+    authList.add(
+        createAuth(
+            Tag.USER_ID,
+            KeyParameterValue.integer(callingUid / 100000),
+            SecurityLevel.SOFTWARE,
+        )
+    )
 
     return authList.toTypedArray()
 }
