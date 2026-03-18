@@ -32,7 +32,7 @@ import org.matrix.TEESimulator.logging.SystemLogger
  * Reference:
  * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl
  */
-private object KeystoreErrorCode {
+object KeystoreErrorCode {
     /** km_compat_type_conversion.h: l=88 */
     const val INVALID_OPERATION_HANDLE = -28
 
@@ -41,6 +41,9 @@ private object KeystoreErrorCode {
 
     /** km_compat_type_conversion.h: l=36 */
     const val UNSUPPORTED_PURPOSE = -2
+
+    /** km_compat_type_conversion.h: l=38 */
+    const val INCOMPATIBLE_PURPOSE = -3
 
     /** ResponseCode.aidl: l=35 */
     const val SYSTEM_ERROR = 4
