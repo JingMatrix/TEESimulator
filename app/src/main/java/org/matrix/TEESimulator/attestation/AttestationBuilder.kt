@@ -133,7 +133,7 @@ object AttestationBuilder {
         securityLevel: Int,
     ): ASN1Sequence {
         val teeEnforced = buildTeeEnforcedList(params, uid, securityLevel)
-        val softwareEnforced = buildSoftwareEnforcedList(uid, securityLevel)
+        val softwareEnforced = buildSoftwareEnforcedList(params, uid, securityLevel)
 
         val fields =
             arrayOf(
@@ -320,20 +320,32 @@ object AttestationBuilder {
      * Builds the `SoftwareEnforced` authorization list. These are properties guaranteed by
      * Keystore.
      */
-    private fun buildSoftwareEnforcedList(uid: Int, securityLevel: Int): DERSequence {
-        val list =
-            mutableListOf<ASN1Encodable>(
-                DERTaggedObject(
-                    true,
-                    AttestationConstants.TAG_CREATION_DATETIME,
-                    ASN1Integer(System.currentTimeMillis()),
-                ),
+    private fun buildSoftwareEnforcedList(
+        params: KeyMintAttestation,
+        uid: Int,
+        securityLevel: Int,
+    ): DERSequence {
+        val list = mutableListOf<ASN1Encodable>()
+
+        list.add(
+            DERTaggedObject(
+                true,
+                AttestationConstants.TAG_CREATION_DATETIME,
+                ASN1Integer(System.currentTimeMillis()),
+            )
+        )
+
+        // AOSP add_required_parameters (security_level.rs) only adds
+        // ATTESTATION_APPLICATION_ID when an attestation challenge is present.
+        if (params.attestationChallenge != null) {
+            list.add(
                 DERTaggedObject(
                     true,
                     AttestationConstants.TAG_ATTESTATION_APPLICATION_ID,
                     createApplicationId(uid),
-                ),
+                )
             )
+        }
         if (AndroidDeviceUtils.getAttestVersion(securityLevel) >= 400) {
             list.add(
                 DERTaggedObject(
