@@ -251,6 +251,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             ) ?: throw Exception("Failed to create overriding attest key pair.")
 
                         CertificateHelper.updateCertificateChain(
+                                callingUid,
                                 response.metadata,
                                 keyData.second.toTypedArray(),
                             )
@@ -300,7 +301,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         SystemLogger.debug("Cached patched certificate chain for $keyId.")
                     }
 
-                    CertificateHelper.updateCertificateChain(response.metadata, finalChain)
+                    CertificateHelper.updateCertificateChain(
+                            callingUid,
+                            response.metadata,
+                            finalChain,
+                        )
                         .getOrThrow()
 
                     return InterceptorUtils.createTypedObjectReply(response)

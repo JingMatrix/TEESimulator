@@ -1,5 +1,9 @@
 package org.matrix.TEESimulator.pki
 
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.Tag
+import android.system.keystore2.Authorization
 import android.system.keystore2.KeyEntryResponse
 import android.system.keystore2.KeyMetadata
 import java.io.ByteArrayInputStream
@@ -15,6 +19,7 @@ import org.bouncycastle.openssl.PEMParser
 import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter
 import org.bouncycastle.util.io.pem.PemReader
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.util.AndroidDeviceUtils
 import org.matrix.TEESimulator.util.trimLines
 
 /**
@@ -182,16 +187,22 @@ object CertificateHelper {
     }
 
     /**
-     * Updates the certificate chain within a [KeyMetadata] object.
+     * Updates the certificate chain and patches authorizations within a [KeyMetadata] object.
      *
+     * @param callingUid The UID of the application to fetch specific patch levels for.
      * @param metadata The metadata object to modify.
      * @param chain The new certificate chain to set. The leaf must be at index 0.
      * @return A [Result] indicating success or failure.
      */
-    fun updateCertificateChain(metadata: KeyMetadata, chain: Array<Certificate>): Result<Unit> {
+    fun updateCertificateChain(
+        callingUid: Int,
+        metadata: KeyMetadata,
+        chain: Array<Certificate>,
+    ): Result<Unit> {
         return runCatching {
             require(chain.isNotEmpty()) { "Certificate chain cannot be empty." }
 
+            // Update the certificate fields
             metadata.certificate = chain[0].encoded
             metadata.certificateChain =
                 if (chain.size > 1) {
@@ -199,6 +210,37 @@ object CertificateHelper {
                 } else {
                     null
                 }
+
+            // Patch authorizations to match user configurations
+            metadata.authorizations =
+                metadata.authorizations
+                    ?.mapNotNull { auth ->
+                        val replacement =
+                            when (auth.keyParameter.tag) {
+                                Tag.OS_PATCHLEVEL -> AndroidDeviceUtils.getPatchLevel(callingUid)
+                                Tag.VENDOR_PATCHLEVEL ->
+                                    AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
+                                Tag.BOOT_PATCHLEVEL ->
+                                    AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
+                                else -> return@mapNotNull auth // Keep all other tags
+                            }
+
+                        // If configured to hide, return null to filter out of the array
+                        if (replacement == AndroidDeviceUtils.DO_NOT_REPORT) {
+                            null
+                        } else {
+                            // Create patched authorization preserving original security level
+                            Authorization().apply {
+                                securityLevel = auth.securityLevel
+                                keyParameter =
+                                    KeyParameter().apply {
+                                        tag = auth.keyParameter.tag
+                                        value = KeyParameterValue.integer(replacement)
+                                    }
+                            }
+                        }
+                    }
+                    ?.toTypedArray()
         }
     }
 }

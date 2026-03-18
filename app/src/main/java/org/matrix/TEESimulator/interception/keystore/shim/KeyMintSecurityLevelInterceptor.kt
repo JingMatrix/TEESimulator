@@ -162,7 +162,8 @@ class KeyMintSecurityLevelInterceptor(
                 val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
                 val key = metadata.key!!
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                CertificateHelper.updateCertificateChain(metadata, newChain).getOrThrow()
+                CertificateHelper.updateCertificateChain(callingUid, metadata, newChain)
+                    .getOrThrow()
 
                 // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
@@ -311,10 +312,11 @@ class KeyMintSecurityLevelInterceptor(
             KeyMetadata().apply {
                 keySecurityLevel = securityLevel
                 key = normalizedKeyDescriptor
-                CertificateHelper.updateCertificateChain(this, chain.toTypedArray()).getOrThrow()
                 authorizations = params.toAuthorizations(callingUid, securityLevel)
                 modificationTimeMs = System.currentTimeMillis()
             }
+        CertificateHelper.updateCertificateChain(callingUid, metadata, chain.toTypedArray())
+            .getOrThrow()
         return KeyEntryResponse().apply {
             this.metadata = metadata
             iSecurityLevel = original
@@ -481,19 +483,13 @@ private fun KeyMintAttestation.toAuthorizations(
     )
 
     val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
-    if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
-    }
+    authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
 
     val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
-    if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
-    }
+    authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
 
     val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
-    if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
-    }
+    authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
 
     authList.add(
         createAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis()))
