@@ -9,6 +9,8 @@ import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
+import java.security.interfaces.ECKey
+import java.security.interfaces.RSAKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.RSAKeyGenParameterSpec
 import java.util.Date
@@ -241,10 +243,13 @@ object CertificateGenerator {
         )
 
         val signerAlgorithm =
-            when (params.algorithm) {
-                Algorithm.EC -> "SHA256withECDSA"
-                Algorithm.RSA -> "SHA256withRSA"
-                else -> throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
+            when (signingKeyPair.private) {
+                is ECKey -> "SHA256withECDSA"
+                is RSAKey -> "SHA256withRSA"
+                else ->
+                    throw IllegalArgumentException(
+                        "Unsupported signing key type: ${signingKeyPair.private.javaClass}"
+                    )
             }
         val contentSigner =
             JcaContentSignerBuilder(signerAlgorithm)
