@@ -44,6 +44,9 @@ class OperationInterceptor(
         private val ABORT_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreOperation.Stub::class.java, "abort")
 
+        /** Only intercept finish/abort for cleanup. Other ops pass through without round-trip. */
+        val INTERCEPTED_CODES = intArrayOf(FINISH_TRANSACTION, ABORT_TRANSACTION)
+
         private val transactionNames: Map<Int, String> by lazy {
             IKeystoreOperation.Stub::class
                 .java

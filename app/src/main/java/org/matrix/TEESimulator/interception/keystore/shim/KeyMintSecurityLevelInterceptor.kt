@@ -151,7 +151,12 @@ class KeyMintSecurityLevelInterceptor(
                     val backdoor = getBackdoor(target)
                     if (backdoor != null) {
                         val interceptor = OperationInterceptor(operation, backdoor)
-                        register(backdoor, operationBinder, interceptor)
+                        register(
+                            backdoor,
+                            operationBinder,
+                            interceptor,
+                            OperationInterceptor.INTERCEPTED_CODES,
+                        )
                         interceptedOperations[operationBinder] = interceptor
                     } else {
                         SystemLogger.error(
@@ -392,6 +397,35 @@ class KeyMintSecurityLevelInterceptor(
                 "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
             )
             val params = data.createTypedArray(KeyParameter.CREATOR)!!
+
+                // AOSP add_required_parameters parity for CREATION_DATETIME rejection
+                // and device-ID attestation permission checks
+                // (security_level.rs: l=416, 424; utils.rs: l=115).
+                if (params.any { it.tag == Tag.CREATION_DATETIME }) {
+                    return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                        INVALID_ARGUMENT
+                    )
+                }
+
+                // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE.
+                val hasDeviceIdTags =
+                    params.any {
+                        it.tag == Tag.ATTESTATION_ID_SERIAL ||
+                            it.tag == Tag.ATTESTATION_ID_IMEI ||
+                            it.tag == Tag.ATTESTATION_ID_MEID ||
+                            it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
+                    }
+                if (
+                    hasDeviceIdTags &&
+                        !ConfigurationManager.hasPermissionForUid(
+                            callingUid,
+                            "android.permission.READ_PRIVILEGED_PHONE_STATE",
+                        )
+                ) {
+                    return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                        CANNOT_ATTEST_IDS
+                    )
+                }
             val parsedParams = KeyMintAttestation(params)
             val isAttestKeyRequest = parsedParams.isAttestKey()
 
@@ -487,6 +521,8 @@ class KeyMintSecurityLevelInterceptor(
     companion object {
         private val secureRandom = SecureRandom()
 
+        private const val INVALID_ARGUMENT = 20
+        private const val CANNOT_ATTEST_IDS = -66
         // Transaction codes for IKeystoreSecurityLevel interface.
         private val GENERATE_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
@@ -496,6 +532,14 @@ class KeyMintSecurityLevelInterceptor(
             InterceptorUtils.getTransactCode(
                 IKeystoreSecurityLevel.Stub::class.java,
                 "createOperation",
+            )
+
+        /** Only these transaction codes need native-level interception. */
+        val INTERCEPTED_CODES =
+            intArrayOf(
+                GENERATE_KEY_TRANSACTION,
+                IMPORT_KEY_TRANSACTION,
+                CREATE_OPERATION_TRANSACTION,
             )
 
         private val transactionNames: Map<Int, String> by lazy {

@@ -13,6 +13,8 @@ public interface IPackageManager {
 
     ParceledListSlice<PackageInfo> getInstalledPackages(long flags, int userId);
 
+    int checkPermission(String permName, String pkgName, int userId);
+
     class Stub {
         public static IPackageManager asInterface(IBinder binder) {
             throw new UnsupportedOperationException("STUB!");

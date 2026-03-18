@@ -235,6 +235,8 @@ class BinderInterceptor : public BBinder {
     struct RegistrationEntry {
         wp<IBinder> target;
         sp<IBinder> callback_interface;
+        // Transaction codes to intercept. Empty = intercept all (legacy behavior).
+        std::vector<uint32_t> filtered_codes;
     };
 
     // Reader-Writer lock for the registry to allow concurrent reads (lookups)
@@ -244,10 +246,15 @@ class BinderInterceptor : public BBinder {
 public:
     BinderInterceptor() = default;
 
-    // Checks if a specific Binder instance is currently registered for interception
-    bool isBinderIntercepted(const wp<BBinder> &target) const {
+    // Checks if a specific Binder+code combination should be intercepted.
+    // Returns true if the binder is registered AND the code is in its filter
+    // (or the filter is empty, meaning intercept everything).
+    bool shouldIntercept(const wp<BBinder> &target, uint32_t code) const {
         std::shared_lock lock(registry_mutex_);
-        return registry_.find(target) != registry_.end();
+        auto it = registry_.find(target);
+        if (it == registry_.end()) return false;
+        const auto &codes = it->second.filtered_codes;
+        return codes.empty() || std::find(codes.begin(), codes.end(), code) != codes.end();
     }
 
     // Main entry point for processing the "Man-in-the-Middle" logic
@@ -386,7 +393,7 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             // This is safe because we are holding a strong reference.
             wp<BBinder> wp_target = target_binder_ptr;
 
-            if (g_interceptor_instance->isBinderIntercepted(wp_target)) {
+            if (g_interceptor_instance->shouldIntercept(wp_target, txn_data->code)) {
                 info.transaction_code = txn_data->code;
                 info.target_binder = wp_target; // Assign the valid weak pointer
                 hijack = true;
@@ -537,12 +544,26 @@ status_t BinderInterceptor::handleRegister(const Parcel &data) {
         return BAD_TYPE;
     }
 
+    // Read optional transaction code filter. If present: int32 count + count * uint32 codes.
+    // If absent or count <= 0: intercept all transaction codes (legacy behavior).
+    std::vector<uint32_t> codes;
+    int32_t code_count = 0;
+    if (data.dataAvail() >= sizeof(int32_t) && data.readInt32(&code_count) == OK && code_count > 0) {
+        codes.reserve(code_count);
+        for (int32_t i = 0; i < code_count; i++) {
+            uint32_t c = 0;
+            if (data.readUint32(&c) == OK) codes.push_back(c);
+        }
+        LOGI("Interceptor registered for binder %p with %zu filtered codes", target.get(), codes.size());
+    } else {
+        LOGI("Interceptor registered for binder %p (all codes)", target.get());
+    }
+
     wp<IBinder> weak_target = target;
 
     std::unique_lock lock(registry_mutex_);
-    registry_[weak_target] = {weak_target, callback};
+    registry_[weak_target] = {weak_target, callback, std::move(codes)};
 
-    LOGI("Interceptor registered for binder %p", target.get());
     return OK;
 }
 
