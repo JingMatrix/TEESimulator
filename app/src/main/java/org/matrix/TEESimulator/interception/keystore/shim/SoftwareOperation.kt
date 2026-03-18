@@ -9,11 +9,11 @@ import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
 import android.hardware.security.keymint.Tag
 import android.os.RemoteException
+import android.os.ServiceSpecificException
 import android.system.keystore2.IKeystoreOperation
 import android.system.keystore2.KeyParameters
 import java.security.KeyPair
 import java.security.Signature
-import java.security.SignatureException
 import javax.crypto.Cipher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
@@ -24,6 +24,48 @@ import org.matrix.TEESimulator.logging.SystemLogger
  * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs
  * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs
  */
+/**
+ * Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore.
+ *
+ * Reference:
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h
+ * Reference:
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl
+ */
+private object KeystoreErrorCode {
+    /** km_compat_type_conversion.h: l=88 */
+    const val INVALID_OPERATION_HANDLE = -28
+
+    /** km_compat_type_conversion.h: l=92 */
+    const val VERIFICATION_FAILED = -30
+
+    /** km_compat_type_conversion.h: l=36 */
+    const val UNSUPPORTED_PURPOSE = -2
+
+    /** ResponseCode.aidl: l=35 */
+    const val SYSTEM_ERROR = 4
+
+    /** Keystore2 ResponseCode::TOO_MUCH_DATA */
+    const val TOO_MUCH_DATA = 21
+
+    /** km_compat_type_conversion.h: l=82 */
+    const val KEY_EXPIRED = -25
+
+    /** km_compat_type_conversion.h: l=80 */
+    const val KEY_NOT_YET_VALID = -24
+
+    /** km_compat_type_conversion.h: l=138 */
+    const val CALLER_NONCE_PROHIBITED = -55
+
+    /** km_compat_type_conversion.h: l=108 */
+    const val INVALID_ARGUMENT = -38
+
+    /** ResponseCode.aidl: l=40 */
+    const val PERMISSION_DENIED = 6
+
+    /** ResponseCode.aidl: l=45 */
+    const val KEY_NOT_FOUND = 7
+}
 
 // A sealed interface to represent the different cryptographic operations we can perform.
 private sealed interface CryptoPrimitive {
@@ -54,8 +96,9 @@ private object JcaAlgorithmMapper {
                 Algorithm.EC -> "ECDSA"
                 Algorithm.RSA -> "RSA"
                 else ->
-                    throw IllegalArgumentException(
-                        "Unsupported signature algorithm: ${params.algorithm}"
+                    throw ServiceSpecificException(
+                        KeystoreErrorCode.SYSTEM_ERROR,
+                        "Unsupported signature algorithm: ${params.algorithm}",
                     )
             }
         return "${digest}with${keyAlgo}"
@@ -67,8 +110,9 @@ private object JcaAlgorithmMapper {
                 Algorithm.RSA -> "RSA"
                 Algorithm.AES -> "AES"
                 else ->
-                    throw IllegalArgumentException(
-                        "Unsupported cipher algorithm: ${params.algorithm}"
+                    throw ServiceSpecificException(
+                        KeystoreErrorCode.SYSTEM_ERROR,
+                        "Unsupported cipher algorithm: ${params.algorithm}",
                     )
             }
         val blockMode =
@@ -128,12 +172,17 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
 
     override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
         if (data != null) update(data)
-        if (signature == null) throw SignatureException("Signature to verify is null")
+        if (signature == null)
+            throw ServiceSpecificException(
+                KeystoreErrorCode.VERIFICATION_FAILED,
+                "Signature to verify is null",
+            )
         if (!this.signature.verify(signature)) {
-            // Throwing an exception is how Keystore signals verification failure.
-            throw SignatureException("Signature verification failed")
+            throw ServiceSpecificException(
+                KeystoreErrorCode.VERIFICATION_FAILED,
+                "Signature/MAC verification failed",
+            )
         }
-        // A successful verification returns no data.
         return null
     }
 
@@ -164,11 +213,7 @@ private class CipherPrimitive(
 
     override fun abort() {}
 
-    /**
-     * Returns the cipher IV as a NONCE parameter for GCM operations.
-     *
-     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
-     */
+    /** Returns the cipher IV as a NONCE parameter for GCM operations. */
     override fun getBeginParameters(): Array<KeyParameter>? {
         val iv = cipher.iv ?: return null
         return arrayOf(
@@ -184,11 +229,17 @@ private class CipherPrimitive(
  * A software-only implementation of a cryptographic operation. This class acts as a controller,
  * delegating to a specific cryptographic primitive based on the operation's purpose.
  *
- * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls will throw. This
- * matches AOSP keystore2 behavior where finalized operations return INVALID_OPERATION_HANDLE
- * (operation.rs: l=26, 320).
+ * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls throw
+ * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE]. This matches AOSP
+ * keystore2 behavior where finalized operations fail `check_active()` (operation.rs: l=26, 320).
  */
-class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMintAttestation) {
+class SoftwareOperation(
+    private val txId: Long,
+    keyPair: KeyPair,
+    params: KeyMintAttestation,
+    /** Called after a successful finish(), used for USAGE_COUNT_LIMIT enforcement. */
+    var onFinishCallback: (() -> Unit)? = null,
+) {
     private val primitive: CryptoPrimitive
 
     @Volatile private var finalized = false
@@ -205,7 +256,10 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
                 KeyPurpose.ENCRYPT -> CipherPrimitive(keyPair, params, Cipher.ENCRYPT_MODE)
                 KeyPurpose.DECRYPT -> CipherPrimitive(keyPair, params, Cipher.DECRYPT_MODE)
                 else ->
-                    throw UnsupportedOperationException("Unsupported operation purpose: $purpose")
+                    throw ServiceSpecificException(
+                        KeystoreErrorCode.UNSUPPORTED_PURPOSE,
+                        "Unsupported operation purpose: $purpose",
+                    )
             }
     }
 
@@ -219,17 +273,24 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
         }
 
     private fun checkActive() {
-        if (finalized) throw IllegalStateException("INVALID_OPERATION_HANDLE")
+        if (finalized)
+            throw ServiceSpecificException(
+                KeystoreErrorCode.INVALID_OPERATION_HANDLE,
+                "Operation already finalized.",
+            )
     }
 
     fun updateAad(data: ByteArray?) {
         checkActive()
         try {
             primitive.updateAad(data)
+        } catch (e: ServiceSpecificException) {
+            finalized = true
+            throw e
         } catch (e: Exception) {
             finalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to updateAad.", e)
-            throw e
+            throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
         }
     }
 
@@ -237,10 +298,13 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
         checkActive()
         try {
             return primitive.update(data)
+        } catch (e: ServiceSpecificException) {
+            finalized = true
+            throw e
         } catch (e: Exception) {
             finalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to update operation.", e)
-            throw e
+            throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
         }
     }
 
@@ -249,10 +313,13 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
         try {
             val result = primitive.finish(data, signature)
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
+            onFinishCallback?.invoke()
             return result
+        } catch (e: ServiceSpecificException) {
+            throw e
         } catch (e: Exception) {
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
-            throw e
+            throw ServiceSpecificException(KeystoreErrorCode.SYSTEM_ERROR, e.message)
         } finally {
             finalized = true
         }
@@ -271,7 +338,9 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
  *
  * All methods are synchronized to prevent concurrent access, matching AOSP's Mutex-protected
  * KeystoreOperation wrapper. Input data is validated against [MAX_RECEIVE_DATA] (32KB) to match
- * AOSP's enforced limit (operation.rs: l=74, 216, 809).
+ * AOSP's enforced limit. All errors are reported as [ServiceSpecificException] with AOSP-compatible
+ * numeric error codes, matching the wire format produced by AOSP's `into_binder()` (operation.rs:
+ * l=74, 216, 809).
  */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
@@ -279,7 +348,7 @@ class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     private fun checkInputLength(data: ByteArray?) {
         // operation.rs: l=337
         if (data != null && data.size > MAX_RECEIVE_DATA)
-            throw IllegalStateException("TOO_MUCH_DATA")
+            throw ServiceSpecificException(KeystoreErrorCode.TOO_MUCH_DATA)
     }
 
     @Throws(RemoteException::class)
