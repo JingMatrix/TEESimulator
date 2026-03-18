@@ -38,6 +38,10 @@ import org.matrix.TEESimulator.logging.SystemLogger
  */
 object CertificateGenerator {
 
+    // AOSP utils.rs: pub const UNDEFINED_NOT_AFTER: i64 = 253402300799000i64;
+    // RFC 5280 GeneralizedTime maximum: 9999-12-31T23:59:59 UTC (millis since epoch)
+    private const val UNDEFINED_NOT_AFTER = 253402300799000L
+
     /**
      * Generates a software-based cryptographic key pair.
      *
@@ -51,7 +55,10 @@ object CertificateGenerator {
                         Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)
                         Algorithm.RSA ->
                             "RSA" to
-                                RSAKeyGenParameterSpec(params.keySize, params.rsaPublicExponent)
+                                RSAKeyGenParameterSpec(
+                                    params.keySize,
+                                    params.rsaPublicExponent ?: RSAKeyGenParameterSpec.F4,
+                                )
                         else ->
                             throw IllegalArgumentException(
                                 "Unsupported algorithm: ${params.algorithm}"
@@ -218,16 +225,19 @@ object CertificateGenerator {
         securityLevel: Int,
     ): Certificate {
         val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
-        val leafNotAfter =
-            (signingKeyPair.public as? X509Certificate)?.notAfter
-                ?: Date(System.currentTimeMillis() + 31536000000L)
+
+        // AOSP add_required_parameters (security_level.rs) defaults:
+        //   CERTIFICATE_NOT_BEFORE = 0 (Unix epoch)
+        //   CERTIFICATE_NOT_AFTER  = 253402300799000 (9999-12-31T23:59:59 UTC)
+        val notBefore = params.certificateNotBefore ?: Date(0)
+        val notAfter = params.certificateNotAfter ?: Date(UNDEFINED_NOT_AFTER)
 
         val builder =
             JcaX509v3CertificateBuilder(
                 issuer,
                 params.certificateSerial ?: BigInteger.ONE,
-                params.certificateNotBefore ?: Date(),
-                params.certificateNotAfter ?: leafNotAfter,
+                notBefore,
+                notAfter,
                 subject,
                 subjectKeyPair.public,
             )
