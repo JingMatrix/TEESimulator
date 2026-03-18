@@ -3,10 +3,14 @@ package org.matrix.TEESimulator.interception.keystore.shim
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.BlockMode
 import android.hardware.security.keymint.Digest
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
+import android.hardware.security.keymint.Tag
 import android.os.RemoteException
 import android.system.keystore2.IKeystoreOperation
+import android.system.keystore2.KeyParameters
 import java.security.KeyPair
 import java.security.Signature
 import java.security.SignatureException
@@ -14,6 +18,12 @@ import javax.crypto.Cipher
 import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
+
+/*
+ * References:
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs
+ */
 
 // A sealed interface to represent the different cryptographic operations we can perform.
 private sealed interface CryptoPrimitive {
@@ -24,6 +34,9 @@ private sealed interface CryptoPrimitive {
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray?
 
     fun abort()
+
+    /** Returns parameters from the begin phase (e.g. GCM nonce), or null if none. */
+    fun getBeginParameters(): Array<KeyParameter>? = null
 }
 
 // Helper object to map KeyMint constants to JCA algorithm strings.
@@ -150,19 +163,33 @@ private class CipherPrimitive(
         if (data != null) cipher.doFinal(data) else cipher.doFinal()
 
     override fun abort() {}
+
+    /** Returns the cipher IV as a NONCE parameter for GCM operations. */
+    override fun getBeginParameters(): Array<KeyParameter>? {
+        val iv = cipher.iv ?: return null
+        return arrayOf(
+            KeyParameter().apply {
+                tag = Tag.NONCE
+                value = KeyParameterValue.blob(iv)
+            }
+        )
+    }
 }
 
 /**
  * A software-only implementation of a cryptographic operation. This class acts as a controller,
  * delegating to a specific cryptographic primitive based on the operation's purpose.
+ *
+ * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls will throw. This
+ * matches AOSP keystore2 behavior where finalized operations return INVALID_OPERATION_HANDLE
+ * (operation.rs: l=26, 320).
  */
 class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMintAttestation) {
-    // This now holds the specific strategy object (Signer, Verifier, etc.)
     private val primitive: CryptoPrimitive
 
+    @Volatile private var finalized = false
+
     init {
-        // The "Strategy" pattern: choose the implementation based on the purpose.
-        // For simplicity, we only consider the first purpose listed.
         val purpose = params.purpose.firstOrNull()
         val purposeName = KeyMintParameterLogger.purposeNames[purpose] ?: "UNKNOWN"
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] Initializing for purpose: $purposeName.")
@@ -178,63 +205,111 @@ class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMin
             }
     }
 
+    /** Parameters produced during begin (e.g. GCM nonce), to populate CreateOperationResponse. */
+    val beginParameters: KeyParameters?
+        // security_level.rs: l=402
+        get() {
+            val params = primitive.getBeginParameters() ?: return null
+            if (params.isEmpty()) return null
+            return KeyParameters().apply { keyParameter = params }
+        }
+
+    private fun checkActive() {
+        if (finalized) throw IllegalStateException("INVALID_OPERATION_HANDLE")
+    }
+
     fun updateAad(data: ByteArray?) {
+        checkActive()
         try {
             primitive.updateAad(data)
         } catch (e: Exception) {
+            finalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to updateAad.", e)
             throw e
         }
     }
 
     fun update(data: ByteArray?): ByteArray? {
+        checkActive()
         try {
             return primitive.update(data)
         } catch (e: Exception) {
+            finalized = true
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to update operation.", e)
             throw e
         }
     }
 
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        checkActive()
         try {
             val result = primitive.finish(data, signature)
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
             return result
         } catch (e: Exception) {
             SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
-            // Re-throw the exception so the binder can report it to the client.
             throw e
+        } finally {
+            finalized = true
         }
     }
 
     fun abort() {
+        checkActive()
+        finalized = true
         primitive.abort()
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] Operation aborted.")
     }
 }
 
-/** The Binder interface for our [SoftwareOperation]. */
+/**
+ * The Binder interface for [SoftwareOperation].
+ *
+ * All methods are synchronized to prevent concurrent access, matching AOSP's Mutex-protected
+ * KeystoreOperation wrapper. Input data is validated against [MAX_RECEIVE_DATA] (32KB) to match
+ * AOSP's enforced limit (operation.rs: l=74, 216, 809).
+ */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
 
+    private fun checkInputLength(data: ByteArray?) {
+        // operation.rs: l=337
+        if (data != null && data.size > MAX_RECEIVE_DATA)
+            throw IllegalStateException("TOO_MUCH_DATA")
+    }
+
     @Throws(RemoteException::class)
     override fun updateAad(aadInput: ByteArray?) {
-        operation.updateAad(aadInput)
+        synchronized(this) {
+            checkInputLength(aadInput)
+            operation.updateAad(aadInput)
+        }
     }
 
     @Throws(RemoteException::class)
     override fun update(input: ByteArray?): ByteArray? {
-        return operation.update(input)
+        synchronized(this) {
+            checkInputLength(input)
+            return operation.update(input)
+        }
     }
 
     @Throws(RemoteException::class)
     override fun finish(input: ByteArray?, signature: ByteArray?): ByteArray? {
-        return operation.finish(input, signature)
+        synchronized(this) {
+            checkInputLength(input)
+            checkInputLength(signature)
+            return operation.finish(input, signature)
+        }
     }
 
     @Throws(RemoteException::class)
     override fun abort() {
-        operation.abort()
+        synchronized(this) { operation.abort() }
+    }
+
+    companion object {
+        // operation.rs: l=216
+        private const val MAX_RECEIVE_DATA = 0x8000
     }
 }
