@@ -50,7 +50,8 @@ data class KeyMintAttestation(
         algorithm = params.findAlgorithm(Tag.ALGORITHM) ?: 0,
 
         // AOSP: [key_param(tag = KEY_SIZE, field = Integer)]
-        keySize = params.findInteger(Tag.KEY_SIZE) ?: 0,
+        // For EC keys, derive keySize from EC_CURVE when KEY_SIZE is absent.
+        keySize = params.findInteger(Tag.KEY_SIZE) ?: params.deriveKeySizeFromCurve(),
 
         // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)]
         ecCurve = params.findEcCurve(Tag.EC_CURVE),
@@ -166,6 +167,18 @@ private fun Array<KeyParameter>.findAllKeyPurpose(tag: Int): List<Int> =
 /** Maps to AOSP field = Digest (Repeated) */
 private fun Array<KeyParameter>.findAllDigests(tag: Int): List<Int> =
     this.filter { it.tag == tag }.map { it.value.digest }
+
+/** Derives keySize from EC_CURVE tag when KEY_SIZE is not explicitly provided. */
+private fun Array<KeyParameter>.deriveKeySizeFromCurve(): Int {
+    val curveId = this.find { it.tag == Tag.EC_CURVE }?.value?.ecCurve ?: return 0
+    return when (curveId) {
+        EcCurve.P_224 -> 224
+        EcCurve.P_256, EcCurve.CURVE_25519 -> 256
+        EcCurve.P_384 -> 384
+        EcCurve.P_521 -> 521
+        else -> 0
+    }
+}
 
 /**
  * Derives the EC Curve name. Logic: Checks specific EC_CURVE tag first (field=EcCurve), falls back
