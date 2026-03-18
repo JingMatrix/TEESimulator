@@ -227,6 +227,9 @@ class KeyMintSecurityLevelInterceptor(
             CreateOperationResponse().apply {
                 iOperation = operationBinder
                 operationChallenge = null
+                // AOSP forwards begin_result.params into CreateOperationResponse.parameters.
+                // https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
+                parameters = softwareOperation.beginParameters
             }
 
         return InterceptorUtils.createTypedObjectReply(response)

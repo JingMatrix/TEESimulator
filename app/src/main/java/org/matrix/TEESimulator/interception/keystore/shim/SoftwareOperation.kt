@@ -164,7 +164,11 @@ private class CipherPrimitive(
 
     override fun abort() {}
 
-    /** Returns the cipher IV as a NONCE parameter for GCM operations. */
+    /**
+     * Returns the cipher IV as a NONCE parameter for GCM operations.
+     *
+     * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs;l=402
+     */
     override fun getBeginParameters(): Array<KeyParameter>? {
         val iv = cipher.iv ?: return null
         return arrayOf(
