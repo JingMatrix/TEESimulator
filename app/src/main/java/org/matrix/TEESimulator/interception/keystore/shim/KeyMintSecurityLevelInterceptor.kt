@@ -243,7 +243,7 @@ class KeyMintSecurityLevelInterceptor(
 
         val opParams = data.createTypedArray(KeyParameter.CREATOR)!!
         val parsedOpParams = KeyMintAttestation(opParams)
-        val forced = data.readBoolean()
+        data.readBoolean() // forced: no-op for sw ops
 
         // AOSP authorize_create parity for purpose checks, date validity, caller nonce,
         // and deferred USAGE_COUNT_LIMIT accounting (enforcements.rs: l=382).
@@ -254,13 +254,6 @@ class KeyMintSecurityLevelInterceptor(
         if (requestedPurpose == null) {
             return InterceptorUtils.createServiceSpecificErrorReply(
                 KeystoreErrorCode.INVALID_ARGUMENT
-            )
-        }
-
-        // F9: Forced op without permission → PERMISSION_DENIED (6)
-        if (forced) {
-            return InterceptorUtils.createServiceSpecificErrorReply(
-                KeystoreErrorCode.PERMISSION_DENIED
             )
         }
 
@@ -699,6 +692,8 @@ class KeyMintSecurityLevelInterceptor(
 /**
  * Extension function to convert parsed `KeyMintAttestation` parameters back into an array of
  * `Authorization` objects for the fake `KeyMetadata`.
+ *
+ * References: security_level.rs: l=123, 165
  */
 private fun KeyMintAttestation.toAuthorizations(
     callingUid: Int,
@@ -757,6 +752,40 @@ private fun KeyMintAttestation.toAuthorizations(
         )
     }
 
+    if (this.callerNonce == true) {
+        authList.add(createAuth(Tag.CALLER_NONCE, KeyParameterValue.boolValue(true)))
+    }
+    if (this.minMacLength != null) {
+        authList.add(createAuth(Tag.MIN_MAC_LENGTH, KeyParameterValue.integer(this.minMacLength)))
+    }
+    if (this.rollbackResistance == true) {
+        authList.add(createAuth(Tag.ROLLBACK_RESISTANCE, KeyParameterValue.boolValue(true)))
+    }
+    if (this.earlyBootOnly == true) {
+        authList.add(createAuth(Tag.EARLY_BOOT_ONLY, KeyParameterValue.boolValue(true)))
+    }
+    if (this.allowWhileOnBody == true) {
+        authList.add(createAuth(Tag.ALLOW_WHILE_ON_BODY, KeyParameterValue.boolValue(true)))
+    }
+    if (this.trustedUserPresenceRequired == true) {
+        authList.add(
+            createAuth(Tag.TRUSTED_USER_PRESENCE_REQUIRED, KeyParameterValue.boolValue(true))
+        )
+    }
+    if (this.trustedConfirmationRequired == true) {
+        authList.add(
+            createAuth(Tag.TRUSTED_CONFIRMATION_REQUIRED, KeyParameterValue.boolValue(true))
+        )
+    }
+    if (this.maxUsesPerBoot != null) {
+        authList.add(
+            createAuth(Tag.MAX_USES_PER_BOOT, KeyParameterValue.integer(this.maxUsesPerBoot))
+        )
+    }
+    if (this.maxBootLevel != null) {
+        authList.add(createAuth(Tag.MAX_BOOT_LEVEL, KeyParameterValue.integer(this.maxBootLevel)))
+    }
+
     authList.add(
         createAuth(Tag.ORIGIN, KeyParameterValue.origin(this.origin ?: KeyOrigin.GENERATED))
     )
@@ -774,18 +803,43 @@ private fun KeyMintAttestation.toAuthorizations(
     val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
     authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
 
+    // Software-enforced tags: CREATION_DATETIME, enforcement dates, USER_ID
+    // (security_level.rs: l=165, 436).
+    fun createSwAuth(tag: Int, value: KeyParameterValue): Authorization {
+        val param =
+            KeyParameter().apply {
+                this.tag = tag
+                this.value = value
+            }
+        return Authorization().apply {
+            this.keyParameter = param
+            this.securityLevel = SecurityLevel.SOFTWARE
+        }
+    }
+
     authList.add(
-        createAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis()))
+        createSwAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis()))
     )
 
-    // AOSP class android.os.UserHandle: PER_USER_RANGE = 100000;
+    this.activeDateTime?.let {
+        authList.add(createSwAuth(Tag.ACTIVE_DATETIME, KeyParameterValue.dateTime(it.time)))
+    }
+    this.originationExpireDateTime?.let {
     authList.add(
-        createAuth(
-            Tag.USER_ID,
-            KeyParameterValue.integer(callingUid / 100000),
-            SecurityLevel.SOFTWARE,
-        )
+            createSwAuth(Tag.ORIGINATION_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time))
     )
+    }
+    this.usageExpireDateTime?.let {
+        authList.add(createSwAuth(Tag.USAGE_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time)))
+    }
+    this.usageCountLimit?.let {
+        authList.add(createSwAuth(Tag.USAGE_COUNT_LIMIT, KeyParameterValue.integer(it)))
+    }
+    if (this.unlockedDeviceRequired == true) {
+        authList.add(createSwAuth(Tag.UNLOCKED_DEVICE_REQUIRED, KeyParameterValue.boolValue(true)))
+    }
+
+    authList.add(createSwAuth(Tag.USER_ID, KeyParameterValue.integer(callingUid / 100000)))
 
     return authList.toTypedArray()
 }

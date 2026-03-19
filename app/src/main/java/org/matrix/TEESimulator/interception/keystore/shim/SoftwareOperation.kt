@@ -63,6 +63,13 @@ object KeystoreErrorCode {
     /** km_compat_type_conversion.h: l=108 */
     const val INVALID_ARGUMENT = -38
 
+    /**
+     * KeyMint ErrorCode::INVALID_TAG
+     *
+     * km_compat_type_conversion.h: l=112
+     */
+    const val INVALID_TAG = -40
+
     /** ResponseCode.aidl: l=40 */
     const val PERMISSION_DENIED = 6
 
@@ -144,7 +151,9 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
             initSign(keyPair.private)
         }
 
-    override fun updateAad(data: ByteArray?) {}
+    override fun updateAad(data: ByteArray?) {
+        throw ServiceSpecificException(KeystoreErrorCode.INVALID_TAG)
+    }
 
     override fun update(data: ByteArray?): ByteArray? {
         if (data != null) signature.update(data)
@@ -166,7 +175,9 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
             initVerify(keyPair.public)
         }
 
-    override fun updateAad(data: ByteArray?) {}
+    override fun updateAad(data: ByteArray?) {
+        throw ServiceSpecificException(KeystoreErrorCode.INVALID_TAG)
+    }
 
     override fun update(data: ByteArray?): ByteArray? {
         if (data != null) signature.update(data)
@@ -227,6 +238,33 @@ private class CipherPrimitive(
     }
 }
 
+// Concrete implementation for ECDH Key Agreement.
+private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
+    private val agreement: javax.crypto.KeyAgreement =
+        javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
+
+    override fun updateAad(data: ByteArray?) {
+        throw ServiceSpecificException(KeystoreErrorCode.INVALID_TAG)
+    }
+
+    override fun update(data: ByteArray?): ByteArray? = null
+
+    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        if (data == null)
+            throw ServiceSpecificException(
+                KeystoreErrorCode.INVALID_ARGUMENT,
+                "Peer public key required for key agreement",
+            )
+        val peerKey =
+            java.security.KeyFactory.getInstance("EC")
+                .generatePublic(java.security.spec.X509EncodedKeySpec(data))
+        agreement.doPhase(peerKey, true)
+        return agreement.generateSecret()
+    }
+
+    override fun abort() {}
+}
+
 /**
  * A software-only implementation of a cryptographic operation. This class acts as a controller,
  * delegating to a specific cryptographic primitive based on the operation's purpose.
@@ -264,6 +302,7 @@ class SoftwareOperation(
                     val key: java.security.Key = secretKey ?: keyPair!!.private
                     CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
                 }
+                KeyPurpose.AGREE_KEY -> KeyAgreementPrimitive(keyPair!!)
                 else ->
                     throw ServiceSpecificException(
                         KeystoreErrorCode.UNSUPPORTED_PURPOSE,
