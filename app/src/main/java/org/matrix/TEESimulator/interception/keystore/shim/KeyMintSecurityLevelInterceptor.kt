@@ -264,13 +264,16 @@ class KeyMintSecurityLevelInterceptor(
             )
         }
 
-        // F8/F13: AOSP rejects VERIFY/ENCRYPT for asymmetric keys at the HAL level
-        // with UNSUPPORTED_PURPOSE (-2), distinct from INCOMPATIBLE_PURPOSE (-3).
+        // F8/F13: AOSP rejects VERIFY/ENCRYPT for asymmetric keys, and rejects
+        // AGREE_KEY for any non-EC algorithm, with UNSUPPORTED_PURPOSE (-2).
         val algorithm = keyParams.algorithm
-        if (
-            (algorithm == Algorithm.EC || algorithm == Algorithm.RSA) &&
-                (requestedPurpose == KeyPurpose.VERIFY || requestedPurpose == KeyPurpose.ENCRYPT)
-        ) {
+        val isAsymmetric = algorithm == Algorithm.EC || algorithm == Algorithm.RSA
+        val unsupported =
+            (isAsymmetric &&
+                (requestedPurpose == KeyPurpose.VERIFY ||
+                    requestedPurpose == KeyPurpose.ENCRYPT)) ||
+                (requestedPurpose == KeyPurpose.AGREE_KEY && algorithm != Algorithm.EC)
+        if (unsupported) {
             return InterceptorUtils.createServiceSpecificErrorReply(
                 KeystoreErrorCode.UNSUPPORTED_PURPOSE
             )
