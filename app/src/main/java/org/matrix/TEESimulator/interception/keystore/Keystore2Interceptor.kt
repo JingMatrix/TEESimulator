@@ -283,6 +283,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                     KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
                         KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
                             keyData.first,
+                                null,
                             key.nspace,
                             response,
                                 parsedParameters,

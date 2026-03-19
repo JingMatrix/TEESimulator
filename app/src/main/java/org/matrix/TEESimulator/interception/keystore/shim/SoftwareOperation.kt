@@ -194,14 +194,13 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
 
 // Concrete implementation for Encryption/Decryption.
 private class CipherPrimitive(
-    keyPair: KeyPair,
+    cryptoKey: java.security.Key,
     params: KeyMintAttestation,
     private val opMode: Int,
 ) : CryptoPrimitive {
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
-            val key = if (opMode == Cipher.ENCRYPT_MODE) keyPair.public else keyPair.private
-            init(opMode, key)
+            init(opMode, cryptoKey)
         }
 
     override fun updateAad(data: ByteArray?) {
@@ -238,9 +237,10 @@ private class CipherPrimitive(
  */
 class SoftwareOperation(
     private val txId: Long,
-    keyPair: KeyPair,
+    keyPair: KeyPair?,
+    secretKey: javax.crypto.SecretKey?,
     params: KeyMintAttestation,
-    /** Called after a successful finish(), used for USAGE_COUNT_LIMIT enforcement. */
+    opParams: Array<KeyParameter> = emptyArray(),
     var onFinishCallback: (() -> Unit)? = null,
 ) {
     private val primitive: CryptoPrimitive
@@ -254,10 +254,16 @@ class SoftwareOperation(
 
         primitive =
             when (purpose) {
-                KeyPurpose.SIGN -> Signer(keyPair, params)
-                KeyPurpose.VERIFY -> Verifier(keyPair, params)
-                KeyPurpose.ENCRYPT -> CipherPrimitive(keyPair, params, Cipher.ENCRYPT_MODE)
-                KeyPurpose.DECRYPT -> CipherPrimitive(keyPair, params, Cipher.DECRYPT_MODE)
+                KeyPurpose.SIGN -> Signer(keyPair!!, params)
+                KeyPurpose.VERIFY -> Verifier(keyPair!!, params)
+                KeyPurpose.ENCRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair!!.public
+                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE)
+                }
+                KeyPurpose.DECRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair!!.private
+                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
+                }
                 else ->
                     throw ServiceSpecificException(
                         KeystoreErrorCode.UNSUPPORTED_PURPOSE,

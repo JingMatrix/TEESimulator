@@ -336,8 +336,21 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         return runCatching {
+                val effectiveParams =
+                    keyParams.copy(
+                        purpose = parsedOpParams.purpose,
+                        digest = parsedOpParams.digest.ifEmpty { keyParams.digest },
+                        blockMode = parsedOpParams.blockMode.ifEmpty { keyParams.blockMode },
+                        padding = parsedOpParams.padding.ifEmpty { keyParams.padding },
+                    )
                 val softwareOperation =
-                    SoftwareOperation(txId, generatedKeyInfo.keyPair!!, parsedOpParams)
+                    SoftwareOperation(
+                        txId,
+                        generatedKeyInfo.keyPair,
+                        generatedKeyInfo.secretKey,
+                        effectiveParams,
+                        opParams,
+                    )
 
                 // F11: USAGE_COUNT_LIMIT — decrement on finish, delete key when exhausted.
                 // AOSP tracks this in database via check_and_update_key_usage_count on
@@ -446,6 +459,63 @@ class KeyMintSecurityLevelInterceptor(
                     "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
                 )
 
+                    // Software generation follows the same high-level generateKey path as
+                    // security_level.rs, but substitutes our local key material and metadata
+                    // (security_level.rs: l=123).
+                    val isSymmetric =
+                        parsedParams.algorithm != Algorithm.EC &&
+                            parsedParams.algorithm != Algorithm.RSA
+
+                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                    cleanupKeyData(keyId)
+
+                    if (isSymmetric) {
+                        val algoName =
+                            when (parsedParams.algorithm) {
+                                Algorithm.AES -> "AES"
+                                Algorithm.HMAC -> "HmacSHA256"
+                                else ->
+                                    throw android.os.ServiceSpecificException(
+                                        KeystoreErrorCode.SYSTEM_ERROR,
+                                        "Unsupported symmetric algorithm: ${parsedParams.algorithm}",
+                                    )
+                            }
+                        val keyGen = javax.crypto.KeyGenerator.getInstance(algoName)
+                        keyGen.init(parsedParams.keySize)
+                        val secretKey = keyGen.generateKey()
+
+                        val metadata =
+                            KeyMetadata().apply {
+                                keySecurityLevel = securityLevel
+                                key =
+                                    KeyDescriptor().apply {
+                                        domain = Domain.KEY_ID
+                                        nspace = keyDescriptor.nspace
+                                        alias = null
+                                        blob = null
+                                    }
+                                certificate = null
+                                certificateChain = null
+                                authorizations =
+                                    parsedParams.toAuthorizations(callingUid, securityLevel)
+                                modificationTimeMs = System.currentTimeMillis()
+                            }
+                        val response =
+                            KeyEntryResponse().apply {
+                                this.metadata = metadata
+                                iSecurityLevel = original
+                            }
+                        generatedKeys[keyId] =
+                            GeneratedKeyInfo(
+                                null,
+                                secretKey,
+                                keyDescriptor.nspace,
+                                response,
+                                parsedParams,
+                            )
+                        return@runCatching InterceptorUtils.createTypedObjectReply(metadata)
+                    }
+
                 // Generate the key pair and certificate chain.
                 val keyData =
                     CertificateGenerator.generateAttestedKeyPair(
@@ -456,9 +526,6 @@ class KeyMintSecurityLevelInterceptor(
                         securityLevel,
                     ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
-                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                // It is unnecessary but a good practice to clean up possible caches
-                cleanupKeyData(keyId)
                 // Store the generated key data.
                 val response =
                     buildKeyEntryResponse(
