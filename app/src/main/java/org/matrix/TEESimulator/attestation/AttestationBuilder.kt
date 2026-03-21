@@ -422,10 +422,11 @@ object AttestationBuilder {
                 )
             )
 
-            // Collect unique signature digests from the signing history.
-            packageInfo.signingInfo?.signingCertificateHistory?.forEach { signature ->
-                val digest = sha256.digest(signature.toByteArray())
-                signatureDigests.add(Digest(digest))
+            val certs =
+                packageInfo.signingInfo?.signingCertificateHistory
+                    ?: packageInfo.signingInfo?.apkContentsSigners
+            certs?.forEach { signature ->
+                signatureDigests.add(Digest(sha256.digest(signature.toByteArray())))
             }
         }
 

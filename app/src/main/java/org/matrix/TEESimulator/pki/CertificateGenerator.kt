@@ -90,8 +90,8 @@ object CertificateGenerator {
     ): List<Certificate>? {
         val challenge = params.attestationChallenge
         if (challenge != null && challenge.size > AttestationConstants.CHALLENGE_LENGTH_LIMIT)
-            throw IllegalArgumentException(
-                "Attestation challenge exceeds length limit (${challenge.size} > ${AttestationConstants.CHALLENGE_LENGTH_LIMIT})"
+            throw android.os.ServiceSpecificException(
+                -21 // INVALID_INPUT_LENGTH (KM_ERROR_INVALID_INPUT_LENGTH)
             )
 
         return runCatching {

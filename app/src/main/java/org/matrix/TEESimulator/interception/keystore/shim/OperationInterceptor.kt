@@ -5,6 +5,7 @@ import android.os.Parcel
 import android.system.keystore2.IKeystoreOperation
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
+import org.matrix.TEESimulator.logging.SystemLogger
 
 /**
  * Intercepts calls to an `IKeystoreOperation` service. This is used to log the data manipulation
@@ -28,7 +29,11 @@ class OperationInterceptor(
         logTransaction(txId, methodName, callingUid, callingPid, true)
 
         if (code == FINISH_TRANSACTION || code == ABORT_TRANSACTION) {
-            KeyMintSecurityLevelInterceptor.removeOperationInterceptor(target, backdoor)
+            try {
+                KeyMintSecurityLevelInterceptor.removeOperationInterceptor(target, backdoor)
+            } catch (e: Exception) {
+                SystemLogger.error("[TX_ID: $txId] Failed to unregister operation interceptor.", e)
+            }
         }
 
         return TransactionResult.ContinueAndSkipPost

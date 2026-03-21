@@ -81,7 +81,7 @@ object ListEntriesHandler {
         // See AOSP function `get_key_descriptor_for_lookup` in service.rs.
         val keysToInject =
             extractGeneratedKeyDescriptors(callingUid, callingUid.toLong(), params.startPastAlias)
-        val originalList = reply.createTypedArray(KeyDescriptor.CREATOR)!!
+        val originalList = reply.createTypedArray(KeyDescriptor.CREATOR) ?: emptyArray()
         val mergedArray = mergeKeyDescriptors(originalList, keysToInject)
 
         // Limit response size to avoid binder buffer overflow.
