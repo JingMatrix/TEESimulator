@@ -91,8 +91,10 @@ private sealed interface CryptoPrimitive {
     fun getBeginParameters(): Array<KeyParameter>? = null
 }
 
-// Helper object to map KeyMint constants to JCA algorithm strings.
+// Helper object to map KeyMint parameters onto the simulated software primitives we expose via JCA.
 private object JcaAlgorithmMapper {
+    // AOSP sign operations derive the effective signature behavior from the key algorithm and the
+    // selected digest (ecdsa_operation.cpp: l=79; rsa_operation.cpp: l=63).
     fun mapSignatureAlgorithm(params: KeyMintAttestation): String {
         val digest =
             when (params.digest.firstOrNull()) {
@@ -114,6 +116,8 @@ private object JcaAlgorithmMapper {
         return "${digest}with${keyAlgo}"
     }
 
+    // AOSP cipher operations derive behavior from algorithm, block mode, and padding tags
+    // (block_cipher_operation.cpp: l=39, 79; rsa_operation.cpp: l=66).
     fun mapCipherAlgorithm(params: KeyMintAttestation): String {
         val keyAlgo =
             when (params.algorithm) {
@@ -129,6 +133,7 @@ private object JcaAlgorithmMapper {
             when (params.blockMode.firstOrNull()) {
                 BlockMode.ECB -> "ECB"
                 BlockMode.CBC -> "CBC"
+                BlockMode.CTR -> "CTR"
                 BlockMode.GCM -> "GCM"
                 else -> "ECB" // Default for RSA
             }
@@ -144,7 +149,8 @@ private object JcaAlgorithmMapper {
     }
 }
 
-// Concrete implementation for Signing.
+// Concrete implementation for Signing
+// (ecdsa_operation.cpp: l=138; rsa_operation.cpp: l=305).
 private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -168,7 +174,8 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
     override fun abort() {}
 }
 
-// Concrete implementation for Verification.
+// Concrete implementation for Verification
+// (ecdsa_operation.cpp: l=273; rsa_operation.cpp: l=438).
 private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -203,15 +210,46 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
     override fun abort() {}
 }
 
-// Concrete implementation for Encryption/Decryption.
+// Concrete implementation for Encryption/Decryption (block_cipher_operation.cpp: l=79).
 private class CipherPrimitive(
     cryptoKey: java.security.Key,
     params: KeyMintAttestation,
     private val opMode: Int,
+    nonce: ByteArray?,
+    macLength: Int?,
 ) : CryptoPrimitive {
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
-            init(opMode, cryptoKey)
+            val algSpec =
+                when {
+                    nonce != null && params.blockMode.contains(BlockMode.GCM) ->
+                        javax.crypto.spec.GCMParameterSpec((macLength ?: 128), nonce)
+                    params.padding.contains(PaddingMode.RSA_OAEP) -> {
+                        val mgfDigest =
+                            when (params.rsaOaepMgfDigest.firstOrNull()) {
+                                Digest.SHA_2_256 -> "SHA-256"
+                                Digest.SHA_2_384 -> "SHA-384"
+                                Digest.SHA_2_512 -> "SHA-512"
+                                else -> "SHA-1"
+                            }
+                        val mainDigest =
+                            when (params.digest.firstOrNull()) {
+                                Digest.SHA_2_256 -> "SHA-256"
+                                Digest.SHA_2_384 -> "SHA-384"
+                                Digest.SHA_2_512 -> "SHA-512"
+                                else -> "SHA-1"
+                            }
+                        javax.crypto.spec.OAEPParameterSpec(
+                            mainDigest,
+                            "MGF1",
+                            java.security.spec.MGF1ParameterSpec(mgfDigest),
+                            javax.crypto.spec.PSource.PSpecified.DEFAULT,
+                        )
+                    }
+                    nonce != null -> javax.crypto.spec.IvParameterSpec(nonce)
+                    else -> null
+                }
+            if (algSpec != null) init(opMode, cryptoKey, algSpec) else init(opMode, cryptoKey)
         }
 
     override fun updateAad(data: ByteArray?) {
@@ -221,8 +259,16 @@ private class CipherPrimitive(
     override fun update(data: ByteArray?): ByteArray? =
         if (data != null) cipher.update(data) else null
 
-    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? =
-        if (data != null) cipher.doFinal(data) else cipher.doFinal()
+    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        return try {
+            if (data != null) cipher.doFinal(data) else cipher.doFinal()
+        } catch (e: javax.crypto.AEADBadTagException) {
+            throw ServiceSpecificException(
+                KeystoreErrorCode.VERIFICATION_FAILED,
+                "GCM tag verification failed",
+            )
+        }
+    }
 
     override fun abort() {}
 
@@ -238,7 +284,7 @@ private class CipherPrimitive(
     }
 }
 
-// Concrete implementation for ECDH Key Agreement.
+// Concrete implementation for ECDH Key Agreement (ecdh_operation.cpp: l=52).
 private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
     private val agreement: javax.crypto.KeyAgreement =
         javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
@@ -296,11 +342,15 @@ class SoftwareOperation(
                 KeyPurpose.VERIFY -> Verifier(keyPair!!, params)
                 KeyPurpose.ENCRYPT -> {
                     val key: java.security.Key = secretKey ?: keyPair!!.public
-                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE)
+                    val nonce = opParams.find { it.tag == Tag.NONCE }?.value?.blob
+                    val macLen = opParams.find { it.tag == Tag.MAC_LENGTH }?.value?.integer
+                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE, nonce, macLen)
                 }
                 KeyPurpose.DECRYPT -> {
                     val key: java.security.Key = secretKey ?: keyPair!!.private
-                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
+                    val nonce = opParams.find { it.tag == Tag.NONCE }?.value?.blob
+                    val macLen = opParams.find { it.tag == Tag.MAC_LENGTH }?.value?.integer
+                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE, nonce, macLen)
                 }
                 KeyPurpose.AGREE_KEY -> KeyAgreementPrimitive(keyPair!!)
                 else ->
@@ -361,7 +411,11 @@ class SoftwareOperation(
         try {
             val result = primitive.finish(data, signature)
             SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
-            onFinishCallback?.invoke()
+            try {
+                onFinishCallback?.invoke()
+            } catch (e: Exception) {
+                SystemLogger.error("[SoftwareOp TX_ID: $txId] onFinishCallback failed.", e)
+            }
             return result
         } catch (e: ServiceSpecificException) {
             throw e
