@@ -314,7 +314,11 @@ protected:
         }
 
         if (!found_context) {
-            LOGW("BinderStub received transaction but no context found for thread");
+            LOGW("BinderStub received transaction but no context found for thread (code=%u)", code);
+#ifndef NDEBUG
+            std::lock_guard<std::mutex> dbg_lock(g_thread_context_mutex);
+            LOGW("  Thread context map has %zu entries", g_thread_context_map.size());
+#endif
             return UNKNOWN_TRANSACTION;
         }
 
@@ -400,6 +404,9 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             }
             // Manually release the temporary strong reference we acquired at the start.
             target_binder_ptr->decStrong(nullptr);
+        } else {
+            LOGD("[Hook] attemptIncStrong failed for target %p (code=%u, uid=%d) — binder may be dying",
+                 reinterpret_cast<void*>(txn_data->target.ptr), txn_data->code, txn_data->sender_euid);
         }
     }
 
@@ -416,7 +423,13 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
 
         // Store context for the stub to retrieve later in its onTransact
         std::lock_guard<std::mutex> lock(g_thread_context_mutex);
-        g_thread_context_map[std::this_thread::get_id()].push(std::move(info));
+        auto &queue = g_thread_context_map[std::this_thread::get_id()];
+        queue.push(std::move(info));
+#ifndef NDEBUG
+        if (queue.size() > 8) {
+            LOGW("[Hook] Thread context queue depth=%zu for thread — possible leak", queue.size());
+        }
+#endif
     }
 }
 
@@ -613,8 +626,24 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     Parcel pre_req, pre_resp;
     writeTransactionData(pre_req, tx_id, target, code, flags, request);
 
-    if (callback->transact(intercept::kPreTransact, pre_req, &pre_resp) != OK) {
-        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed. Forwarding original call.", tx_id);
+#ifndef NDEBUG
+    struct timespec ts_start{};
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
+#endif
+
+    status_t pre_cb_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
+
+#ifndef NDEBUG
+    struct timespec ts_end{};
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    double pre_ms = (ts_end.tv_sec - ts_start.tv_sec) * 1000.0 + (ts_end.tv_nsec - ts_start.tv_nsec) / 1e6;
+    if (pre_ms > 5000.0) {
+        LOGW("[TX_ID: %" PRIu64 "] Pre-callback took %.0fms (code=%u) — possible hang", tx_id, pre_ms, code);
+    }
+#endif
+
+    if (pre_cb_status != OK) {
+        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed (status=%d). Forwarding original call.", tx_id, pre_cb_status);
         return false; // Callback failed, proceed as if not intercepted
     }
 
@@ -648,8 +677,10 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     if (action == intercept::kActionOverrideData) {
         size_t size = pre_resp.readUint64();
         final_request.appendFrom(&pre_resp, pre_resp.dataPosition(), size);
+    } else if (action == intercept::kActionContinue) {
+        final_request.appendFrom(&request, 0, request.dataSize());
     } else {
-        // Default (kActionContinue): Use original data
+        LOGW("[TX_ID: %" PRIu64 "] Unknown pre-callback action %d (code=%u). Forwarding original data.", tx_id, action, code);
         final_request.appendFrom(&request, 0, request.dataSize());
     }
 
@@ -668,7 +699,8 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
         VALIDATE_STATUS(tx_id, post_req.appendFrom(reply, 0, reply_size));
     }
 
-    if (callback->transact(intercept::kPostTransact, post_req, &post_resp) == OK) {
+    status_t post_cb_status = callback->transact(intercept::kPostTransact, post_req, &post_resp);
+    if (post_cb_status == OK) {
         int32_t post_action = post_resp.readInt32();
         if (post_action == intercept::kActionOverrideReply && reply) {
             result = post_resp.readInt32(); // Read new status
@@ -676,6 +708,9 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
             reply->setDataSize(0); // Clear original reply
             VALIDATE_STATUS(tx_id, reply->appendFrom(&post_resp, post_resp.dataPosition(), new_size));
         }
+    } else {
+        LOGW("[TX_ID: %" PRIu64 "] Post-transaction callback failed (status=%d, code=%u). Using original reply.",
+             tx_id, post_cb_status, code);
     }
 
     return true; // We handled the flow, even if we just forwarded it

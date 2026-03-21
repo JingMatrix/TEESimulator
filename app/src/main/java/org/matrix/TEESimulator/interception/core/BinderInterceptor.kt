@@ -148,6 +148,12 @@ abstract class BinderInterceptor : Binder() {
                 callingPid,
                 transactionData,
             )
+        } catch (e: Exception) {
+            SystemLogger.error(
+                "[TX_ID: $txId] onPreTransact crashed (code=$transactionCode, uid=$callingUid)",
+                e,
+            )
+            TransactionResult.ContinueAndSkipPost
         } finally {
             transactionData.recycle()
         }
@@ -191,6 +197,12 @@ abstract class BinderInterceptor : Binder() {
                 reply,
                 resultCode,
             )
+        } catch (e: Exception) {
+            SystemLogger.error(
+                "[TX_ID: $txId] onPostTransact crashed (code=$transactionCode, uid=$callingUid, resultCode=${data.readInt()})",
+                e,
+            )
+            TransactionResult.SkipTransaction
         } finally {
             transactionData.recycle()
             transactionReply.recycle()
