@@ -257,11 +257,12 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             )
                             .getOrThrow()
 
-                        keyDescriptor.nspace = SecureRandom().nextLong()
+                        val key = response.metadata.key!!
+                        key.nspace = SecureRandom().nextLong()
                         KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
                             KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
                                 keyData.first,
-                                keyDescriptor.nspace,
+                                key.nspace,
                                 response,
                             )
                         KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
