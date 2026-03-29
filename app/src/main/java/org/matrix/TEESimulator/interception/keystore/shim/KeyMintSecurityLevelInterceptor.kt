@@ -187,6 +187,8 @@ class KeyMintSecurityLevelInterceptor(
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(callingUid, metadata, newChain)
                     .getOrThrow()
+                metadata.authorizations =
+                    InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
 
                 // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
@@ -219,15 +221,25 @@ class KeyMintSecurityLevelInterceptor(
         // AOSP createOperation accepts Domain::APP (alias), Domain::KEY_ID (nspace),
         // Domain::SELINUX, and Domain::BLOB. Resolve to our generated key by trying
         // both alias-based and nspace-based lookups (database.rs: l=2060, 2123).
-        val generatedKeyInfo =
+        val resolvedEntry: Map.Entry<KeyIdentifier, GeneratedKeyInfo>? =
             when (keyDescriptor.domain) {
-                Domain.KEY_ID -> findGeneratedKeyByKeyId(callingUid, keyDescriptor.nspace)
+                Domain.KEY_ID -> {
+                    val nspace = keyDescriptor.nspace
+                    if (nspace == 0L) null
+                    else
+                        generatedKeys.entries
+                            .filter { it.key.uid == callingUid }
+                            .find { it.value.nspace == nspace }
+                }
                 Domain.APP ->
                     keyDescriptor.alias?.let { alias ->
-                        generatedKeys[KeyIdentifier(callingUid, alias)]
+                        val key = KeyIdentifier(callingUid, alias)
+                        generatedKeys[key]?.let { java.util.AbstractMap.SimpleEntry(key, it) }
                     }
                 else -> null
         }
+        val generatedKeyInfo = resolvedEntry?.value
+        val resolvedKeyId = resolvedEntry?.key
 
         if (generatedKeyInfo == null) {
             SystemLogger.debug(
@@ -348,26 +360,24 @@ class KeyMintSecurityLevelInterceptor(
                 // F11: USAGE_COUNT_LIMIT — decrement on finish, delete key when exhausted.
                 // AOSP tracks this in database via check_and_update_key_usage_count on
                 // after_finish (enforcements.rs: l=510).
-                keyParams.usageCountLimit?.let { limit ->
-                    val keyId =
-                        generatedKeys.entries
-                            .find { it.value.nspace == generatedKeyInfo.nspace }
-                            ?.key ?: return@let
+                if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
+                    val limit = keyParams.usageCountLimit
                     val remaining =
-                        usageCounters.getOrPut(keyId) {
+                        usageCounters.getOrPut(resolvedKeyId) {
                             java.util.concurrent.atomic.AtomicInteger(limit)
                         }
-                    // Check if already exhausted before creating the operation
                     if (remaining.get() <= 0) {
-                        cleanupKeyData(keyId)
-                        usageCounters.remove(keyId)
+                        cleanupKeyData(resolvedKeyId)
+                        usageCounters.remove(resolvedKeyId)
                         throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
                     }
                     softwareOperation.onFinishCallback = {
                         if (remaining.decrementAndGet() <= 0) {
-                            cleanupKeyData(keyId)
-                            usageCounters.remove(keyId)
-                            SystemLogger.info("Key $keyId exhausted (USAGE_COUNT_LIMIT=$limit).")
+                            cleanupKeyData(resolvedKeyId)
+                            usageCounters.remove(resolvedKeyId)
+                            SystemLogger.info(
+                                "Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit)."
+                            )
                         }
                     }
                 }

@@ -50,30 +50,35 @@ object InterceptorUtils {
         callingUid: Int,
     ): Array<Authorization>? {
         if (authorizations == null) return null
+
         val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
         val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
         val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
 
         return authorizations
-            .mapNotNull { auth ->
+            .map { auth ->
                 val replacement =
                     when (auth.keyParameter.tag) {
-                        Tag.OS_PATCHLEVEL -> osPatch
-                        Tag.VENDOR_PATCHLEVEL -> vendorPatch
-                        Tag.BOOT_PATCHLEVEL -> bootPatch
-                        else -> return@mapNotNull auth
+                        Tag.OS_PATCHLEVEL ->
+                            if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) osPatch else null
+                        Tag.VENDOR_PATCHLEVEL ->
+                            if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) vendorPatch
+                            else null
+                        Tag.BOOT_PATCHLEVEL ->
+                            if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) bootPatch else null
+                        else -> null
                     }
-                if (replacement == AndroidDeviceUtils.DO_NOT_REPORT) {
-                    null
-                } else {
+                if (replacement != null) {
                     Authorization().apply {
-                        securityLevel = auth.securityLevel
                         keyParameter =
                             KeyParameter().apply {
                                 tag = auth.keyParameter.tag
                                 value = KeyParameterValue.integer(replacement)
                             }
+                        securityLevel = auth.securityLevel
                     }
+                } else {
+                    auth
                 }
             }
             .toTypedArray()
