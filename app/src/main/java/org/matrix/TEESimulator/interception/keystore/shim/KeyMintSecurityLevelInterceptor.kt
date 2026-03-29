@@ -805,13 +805,19 @@ private fun KeyMintAttestation.toAuthorizations(
     )
 
     val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
+    if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
     authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
+    }
 
     val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
+    if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
     authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
+    }
 
     val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
+    if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
     authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
+    }
 
     // Software-enforced tags: CREATION_DATETIME, enforcement dates, USER_ID
     // (security_level.rs: l=165, 436).
