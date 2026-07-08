@@ -2,3 +2,9 @@
 # These get packaged into flashable zips and run on Android devices.
 *.sh text eol=lf
 module/daemon text eol=lf
+module/sepolicy.rule text eol=lf
+module/target.txt text eol=lf
+module/changelog.md text eol=lf
+module/update.json text eol=lf
+module/keybox.xml text eol=lf
+module/module.prop text eol=lf

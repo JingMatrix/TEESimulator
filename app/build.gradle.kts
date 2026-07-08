@@ -120,9 +120,19 @@ androidComponents {
                 }
 
                 // Now, copy and process the files from 'module' directory.
+                // Every file here is plain text (shell scripts, sepolicy rules, XML, JSON, MD).
+                // Force LF endings unconditionally so a contributor's git checkout (e.g. Windows
+                // with core.autocrlf=true) can never ship a CRLF-corrupted shebang or rule file —
+                // `daemon` in particular is exec()'d directly via its shebang by service.sh, and a
+                // stray \r there makes the interpreter path unresolvable, silently killing the
+                // whole module at runtime.
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
                     exclude("module.prop", "service.sh") // Exclude templated files.
+                    filter(
+                        mapOf("eol" to org.apache.tools.ant.filters.FixCrLfFilter.CrLf.newInstance("lf")),
+                        org.apache.tools.ant.filters.FixCrLfFilter::class.java,
+                    )
                 }
 
                 // Copy and filter the module.prop template separately.
