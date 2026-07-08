@@ -118,10 +118,15 @@ object AndroidDeviceUtils {
     /**
      * Retrieves a system property and validates its format.
      *
+     * A real, verified-boot-locked device never reports an all-zero digest here; a zero value only
+     * shows up when verification has been disabled (e.g. a patched vbmeta on a rooted device). Since
+     * that value would immediately give away the real device state, it is treated as absent so the
+     * caller falls through to the cached attestation or a random value instead.
+     *
      * @param name The name of the system property.
      * @param expectedSize The expected byte length of the property (e.g., 32 for a 64-char hex
      *   string).
-     * @return The property value as a ByteArray, or null if not found or invalid.
+     * @return The property value as a ByteArray, or null if not found, invalid, or all-zero.
      */
     @OptIn(ExperimentalStdlibApi::class)
     private fun getProperty(name: String, expectedSize: Int): ByteArray? {
@@ -130,7 +135,17 @@ object AndroidDeviceUtils {
             return null
         }
         // A valid digest is (2 * size) hex characters.
-        return if (value.length == expectedSize * 2) value.hexToByteArray() else null
+        if (value.length != expectedSize * 2) {
+            return null
+        }
+        val bytes = value.hexToByteArray()
+        if (bytes.all { it == 0.toByte() }) {
+            SystemLogger.debug(
+                "System property '$name' is all-zero (verification disabled); ignoring it."
+            )
+            return null
+        }
+        return bytes
     }
 
     /**
