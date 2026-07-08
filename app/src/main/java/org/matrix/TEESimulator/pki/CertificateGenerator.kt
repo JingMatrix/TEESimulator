@@ -139,18 +139,31 @@ object CertificateGenerator {
         return try {
                 val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
 
-                val (signingKey, issuer) =
+                // Only when a real, cached attest key is used for signing does the app already
+                // hold that key's own chain elsewhere (Android splices it in client-side). In
+                // every other case — including the fallback below when the requested attest key
+                // isn't cached (e.g. after a process restart) — we forged the issuer ourselves,
+                // so the keybox's chain MUST be appended or the leaf has no path to a root.
+                val realAttestKeyInfo: Pair<KeyPair, X500Name>? =
                     if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
-                            ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
+                        getAttestationKeyInfo(uid, attestKeyAlias)
                     } else {
-                        keybox.keyPair to getIssuerFromKeybox(keybox)
+                        null
                     }
+                val signingKey: KeyPair
+                val issuer: X500Name
+                if (realAttestKeyInfo != null) {
+                    signingKey = realAttestKeyInfo.first
+                    issuer = realAttestKeyInfo.second
+                } else {
+                    signingKey = keybox.keyPair
+                    issuer = getIssuerFromKeybox(keybox)
+                }
 
                 val leafCert =
                     buildCertificate(subjectKeyPair, signingKey, issuer, params, uid, securityLevel)
 
-                if (attestKeyAlias != null) {
+                if (realAttestKeyInfo != null) {
                     listOf(leafCert)
                 } else {
                     listOf(leafCert) + keybox.certificates
