@@ -236,7 +236,7 @@ class KeyMintSecurityLevelInterceptor(
                         generatedKeys[key]?.let { java.util.AbstractMap.SimpleEntry(key, it) }
                     }
                 else -> null
-        }
+            }
         val generatedKeyInfo = resolvedEntry?.value
         val resolvedKeyId = resolvedEntry?.key
 
@@ -343,59 +343,59 @@ class KeyMintSecurityLevelInterceptor(
         }
 
         return runCatching {
-                val effectiveParams =
-                    keyParams.copy(
-                        purpose = parsedOpParams.purpose,
-                        digest = parsedOpParams.digest.ifEmpty { keyParams.digest },
-                        blockMode = parsedOpParams.blockMode.ifEmpty { keyParams.blockMode },
-                        padding = parsedOpParams.padding.ifEmpty { keyParams.padding },
-                    )
-                val softwareOperation =
-                    SoftwareOperation(
-                        txId,
-                        generatedKeyInfo.keyPair,
-                        generatedKeyInfo.secretKey,
-                        effectiveParams,
-                        opParams,
-                    )
+            val effectiveParams =
+                keyParams.copy(
+                    purpose = parsedOpParams.purpose,
+                    digest = parsedOpParams.digest.ifEmpty { keyParams.digest },
+                    blockMode = parsedOpParams.blockMode.ifEmpty { keyParams.blockMode },
+                    padding = parsedOpParams.padding.ifEmpty { keyParams.padding },
+                )
+            val softwareOperation =
+                SoftwareOperation(
+                    txId,
+                    generatedKeyInfo.keyPair,
+                    generatedKeyInfo.secretKey,
+                    effectiveParams,
+                    opParams,
+                )
 
-                // USAGE_COUNT_LIMIT is enforced on finish: AOSP records the key id during
-                // authorize_create and updates the counter via check_and_update_key_usage_count,
-                // marking the key for deletion once the count is exhausted.
-                if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
-                    val limit = keyParams.usageCountLimit
-                    val remaining =
-                        usageCounters.getOrPut(resolvedKeyId) {
-                            java.util.concurrent.atomic.AtomicInteger(limit)
-                        }
-                    if (remaining.get() <= 0) {
+            // USAGE_COUNT_LIMIT is enforced on finish: AOSP records the key id during
+            // authorize_create and updates the counter via check_and_update_key_usage_count,
+            // marking the key for deletion once the count is exhausted.
+            if (keyParams.usageCountLimit != null && resolvedKeyId != null) {
+                val limit = keyParams.usageCountLimit
+                val remaining =
+                    usageCounters.getOrPut(resolvedKeyId) {
+                        java.util.concurrent.atomic.AtomicInteger(limit)
+                    }
+                if (remaining.get() <= 0) {
+                    cleanupKeyData(resolvedKeyId)
+                    usageCounters.remove(resolvedKeyId)
+                    throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
+                }
+                softwareOperation.onFinishCallback = {
+                    if (remaining.decrementAndGet() <= 0) {
                         cleanupKeyData(resolvedKeyId)
                         usageCounters.remove(resolvedKeyId)
-                        throw android.os.ServiceSpecificException(KeystoreErrorCode.KEY_NOT_FOUND)
-                    }
-                    softwareOperation.onFinishCallback = {
-                        if (remaining.decrementAndGet() <= 0) {
-                            cleanupKeyData(resolvedKeyId)
-                            usageCounters.remove(resolvedKeyId)
-                            SystemLogger.info(
-                                "Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit)."
-                            )
-                        }
+                        SystemLogger.info(
+                            "Key $resolvedKeyId exhausted (USAGE_COUNT_LIMIT=$limit)."
+                        )
                     }
                 }
-
-        val operationBinder = SoftwareOperationBinder(softwareOperation)
-        val response =
-            CreateOperationResponse().apply {
-                iOperation = operationBinder
-                operationChallenge = null
-                        // AOSP forwards begin_result.params into
-                        // CreateOperationResponse.parameters.
-                parameters = softwareOperation.beginParameters
             }
 
-                InterceptorUtils.createTypedObjectReply(response)
-            }
+            val operationBinder = SoftwareOperationBinder(softwareOperation)
+            val response =
+                CreateOperationResponse().apply {
+                    iOperation = operationBinder
+                    operationChallenge = null
+                    // AOSP forwards begin_result.params into
+                    // CreateOperationResponse.parameters.
+                    parameters = softwareOperation.beginParameters
+                }
+
+            InterceptorUtils.createTypedObjectReply(response)
+        }
             .getOrElse { e ->
                 SystemLogger.error("[TX_ID: $txId] Failed to create software operation.", e)
                 InterceptorUtils.createServiceSpecificErrorReply(
@@ -419,35 +419,34 @@ class KeyMintSecurityLevelInterceptor(
             )
             val params = data.createTypedArray(KeyParameter.CREATOR)!!
 
-                // AOSP add_required_parameters rejects a caller-supplied CREATION_DATETIME with
-                // INVALID_ARGUMENT, and gates device-ID attestation on a permission check.
-                if (params.any { it.tag == Tag.CREATION_DATETIME }) {
-                    return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
-                        INVALID_ARGUMENT
-                    )
-                }
+            // AOSP add_required_parameters rejects a caller-supplied CREATION_DATETIME with
+            // INVALID_ARGUMENT, and gates device-ID attestation on a permission check.
+            if (params.any { it.tag == Tag.CREATION_DATETIME }) {
+                return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                    INVALID_ARGUMENT
+                )
+            }
 
-                // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE. The tag set mirrors
-                // AOSP `is_device_id_attestation_tag`.
-                val hasDeviceIdTags =
-                    params.any {
-                        it.tag == Tag.ATTESTATION_ID_SERIAL ||
-                            it.tag == Tag.ATTESTATION_ID_IMEI ||
-                            it.tag == Tag.ATTESTATION_ID_MEID ||
-                            it.tag == Tag.ATTESTATION_ID_SECOND_IMEI ||
-                            it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
-                    }
-                if (
-                    hasDeviceIdTags &&
-                        !ConfigurationManager.hasPermissionForUid(
-                            callingUid,
-                            "android.permission.READ_PRIVILEGED_PHONE_STATE",
-                        )
-                ) {
-                    return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
-                        CANNOT_ATTEST_IDS
+            // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE. The tag set mirrors
+            // AOSP `is_device_id_attestation_tag`.
+            val hasDeviceIdTags = params.any {
+                it.tag == Tag.ATTESTATION_ID_SERIAL ||
+                    it.tag == Tag.ATTESTATION_ID_IMEI ||
+                    it.tag == Tag.ATTESTATION_ID_MEID ||
+                    it.tag == Tag.ATTESTATION_ID_SECOND_IMEI ||
+                    it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
+            }
+            if (
+                hasDeviceIdTags &&
+                    !ConfigurationManager.hasPermissionForUid(
+                        callingUid,
+                        "android.permission.READ_PRIVILEGED_PHONE_STATE",
                     )
-                }
+            ) {
+                return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
+                    CANNOT_ATTEST_IDS
+                )
+            }
             val parsedParams = KeyMintAttestation(params)
             val isAttestKeyRequest = parsedParams.isAttestKey()
 
@@ -465,61 +464,61 @@ class KeyMintSecurityLevelInterceptor(
                     "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
                 )
 
-                    // Software generation follows the same high-level generateKey path as AOSP
-                    // security_level.rs, but substitutes our local key material and metadata.
-                    val isSymmetric =
-                        parsedParams.algorithm != Algorithm.EC &&
-                            parsedParams.algorithm != Algorithm.RSA
+                // Software generation follows the same high-level generateKey path as AOSP
+                // security_level.rs, but substitutes our local key material and metadata.
+                val isSymmetric =
+                    parsedParams.algorithm != Algorithm.EC &&
+                        parsedParams.algorithm != Algorithm.RSA
 
-                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                    cleanupKeyData(keyId)
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                cleanupKeyData(keyId)
 
-                    if (isSymmetric) {
-                        val algoName =
-                            when (parsedParams.algorithm) {
-                                Algorithm.AES -> "AES"
-                                Algorithm.HMAC -> "HmacSHA256"
-                                else ->
-                                    throw android.os.ServiceSpecificException(
-                                        KeystoreErrorCode.SYSTEM_ERROR,
-                                        "Unsupported symmetric algorithm: ${parsedParams.algorithm}",
-                                    )
-                            }
-                        val keyGen = javax.crypto.KeyGenerator.getInstance(algoName)
-                        keyGen.init(parsedParams.keySize)
-                        val secretKey = keyGen.generateKey()
+                if (isSymmetric) {
+                    val algoName =
+                        when (parsedParams.algorithm) {
+                            Algorithm.AES -> "AES"
+                            Algorithm.HMAC -> "HmacSHA256"
+                            else ->
+                                throw android.os.ServiceSpecificException(
+                                    KeystoreErrorCode.SYSTEM_ERROR,
+                                    "Unsupported symmetric algorithm: ${parsedParams.algorithm}",
+                                )
+                        }
+                    val keyGen = javax.crypto.KeyGenerator.getInstance(algoName)
+                    keyGen.init(parsedParams.keySize)
+                    val secretKey = keyGen.generateKey()
 
-                        val metadata =
-                            KeyMetadata().apply {
-                                keySecurityLevel = securityLevel
-                                key =
-                                    KeyDescriptor().apply {
-                                        domain = Domain.KEY_ID
-                                        nspace = keyDescriptor.nspace
-                                        alias = null
-                                        blob = null
-                                    }
-                                certificate = null
-                                certificateChain = null
-                                authorizations =
-                                    parsedParams.toAuthorizations(callingUid, securityLevel)
-                                modificationTimeMs = System.currentTimeMillis()
-                            }
-                        val response =
-                            KeyEntryResponse().apply {
-                                this.metadata = metadata
-                                iSecurityLevel = original
-                            }
-                        generatedKeys[keyId] =
-                            GeneratedKeyInfo(
-                                null,
-                                secretKey,
-                                keyDescriptor.nspace,
-                                response,
-                                parsedParams,
-                            )
-                        return@runCatching InterceptorUtils.createTypedObjectReply(metadata)
-                    }
+                    val metadata =
+                        KeyMetadata().apply {
+                            keySecurityLevel = securityLevel
+                            key =
+                                KeyDescriptor().apply {
+                                    domain = Domain.KEY_ID
+                                    nspace = keyDescriptor.nspace
+                                    alias = null
+                                    blob = null
+                                }
+                            certificate = null
+                            certificateChain = null
+                            authorizations =
+                                parsedParams.toAuthorizations(callingUid, securityLevel)
+                            modificationTimeMs = System.currentTimeMillis()
+                        }
+                    val response =
+                        KeyEntryResponse().apply {
+                            this.metadata = metadata
+                            iSecurityLevel = original
+                        }
+                    generatedKeys[keyId] =
+                        GeneratedKeyInfo(
+                            null,
+                            secretKey,
+                            keyDescriptor.nspace,
+                            response,
+                            parsedParams,
+                        )
+                    return@runCatching InterceptorUtils.createTypedObjectReply(metadata)
+                }
 
                 // Generate the key pair and certificate chain.
                 val keyData =
@@ -540,12 +539,12 @@ class KeyMintSecurityLevelInterceptor(
                         keyDescriptor,
                     )
                 generatedKeys[keyId] =
-                        GeneratedKeyInfo(
-                            keyData.first,
-                            keyDescriptor.nspace,
-                            response,
-                            parsedParams,
-                        )
+                    GeneratedKeyInfo(
+                        keyData.first,
+                        keyDescriptor.nspace,
+                        response,
+                        parsedParams,
+                    )
                 if (isAttestKeyRequest) attestationKeys.add(keyId)
 
                 // Return the metadata of our generated key, skipping the real hardware call.
@@ -807,17 +806,17 @@ private fun KeyMintAttestation.toAuthorizations(
 
     val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
     if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-    authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
+        authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
     }
 
     val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
     if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-    authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
+        authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
     }
 
     val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
     if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-    authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
+        authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
     }
 
     // Software-enforced tags (SecurityLevel.SOFTWARE): CREATION_DATETIME, enforcement dates,
@@ -842,9 +841,9 @@ private fun KeyMintAttestation.toAuthorizations(
         authList.add(createSwAuth(Tag.ACTIVE_DATETIME, KeyParameterValue.dateTime(it.time)))
     }
     this.originationExpireDateTime?.let {
-    authList.add(
+        authList.add(
             createSwAuth(Tag.ORIGINATION_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time))
-    )
+        )
     }
     this.usageExpireDateTime?.let {
         authList.add(createSwAuth(Tag.USAGE_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time)))

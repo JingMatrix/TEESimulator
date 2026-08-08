@@ -84,12 +84,12 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
                 val interceptor =
                     KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
-                    register(
-                        backdoor,
-                        tee.asBinder(),
-                        interceptor,
-                        KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                    )
+                register(
+                    backdoor,
+                    tee.asBinder(),
+                    interceptor,
+                    KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
+                )
             }
         }
             .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
@@ -100,12 +100,12 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
                 val interceptor =
                     KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
-                    register(
-                        backdoor,
-                        strongbox.asBinder(),
-                        interceptor,
-                        KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                    )
+                register(
+                    backdoor,
+                    strongbox.asBinder(),
+                    interceptor,
+                    KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
+                )
             }
         }
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
@@ -277,21 +277,21 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             keyData.second.toTypedArray(),
                         )
                         .getOrThrow()
-                        response.metadata.authorizations =
-                            InterceptorUtils.patchAuthorizations(
-                                response.metadata.authorizations,
-                                callingUid,
-                            )
+                    response.metadata.authorizations =
+                        InterceptorUtils.patchAuthorizations(
+                            response.metadata.authorizations,
+                            callingUid,
+                        )
 
                     val key = response.metadata.key!!
                     key.nspace = SecureRandom().nextLong()
                     KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
                         KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
                             keyData.first,
-                                null,
+                            null,
                             key.nspace,
                             response,
-                                parsedParameters,
+                            parsedParameters,
                         )
                     KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
                     return InterceptorUtils.createTypedObjectReply(response)
@@ -335,11 +335,11 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         finalChain,
                     )
                     .getOrThrow()
-                    response.metadata.authorizations =
-                        InterceptorUtils.patchAuthorizations(
-                            response.metadata.authorizations,
-                            callingUid,
-                        )
+                response.metadata.authorizations =
+                    InterceptorUtils.patchAuthorizations(
+                        response.metadata.authorizations,
+                        callingUid,
+                    )
 
                 return InterceptorUtils.createTypedObjectReply(response)
             }
