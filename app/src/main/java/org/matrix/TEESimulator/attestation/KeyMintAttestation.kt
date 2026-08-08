@@ -41,7 +41,7 @@ data class KeyMintAttestation(
     val manufacturer: ByteArray?,
     val model: ByteArray?,
     val secondImei: ByteArray?,
-    // key_parameter.rs: l=855..1041 (RSA_OAEP_MGF_DIGEST through MAX_BOOT_LEVEL)
+    // Enforcement tags used by createOperation authorization and KeyMetadata population.
     val userAuthType: Int? = null,
     val userConfirmationRequired: Boolean? = null,
     val activeDateTime: Date? = null,
@@ -65,60 +65,55 @@ data class KeyMintAttestation(
     constructor(
         params: Array<KeyParameter>
     ) : this(
-        // AOSP: [key_param(tag = ALGORITHM, field = Algorithm)] (key_parameter.rs: l=837)
+        // AOSP: [key_param(tag = ALGORITHM, field = Algorithm)]
         algorithm = params.findAlgorithm(Tag.ALGORITHM) ?: 0,
 
         // AOSP: [key_param(tag = KEY_SIZE, field = Integer)]
         // For EC keys, derive keySize from EC_CURVE when KEY_SIZE is absent.
-        // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=54
         keySize = params.findInteger(Tag.KEY_SIZE) ?: params.deriveKeySizeFromCurve(),
 
-        // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)] (key_parameter.rs: l=871)
+        // AOSP: [key_param(tag = EC_CURVE, field = EcCurve)]
         ecCurve = params.findEcCurve(Tag.EC_CURVE),
         ecCurveName = params.deriveEcCurveName(),
 
-        // AOSP: [key_param(tag = ORIGIN, field = Origin)] (key_parameter.rs: l=955)
+        // AOSP: [key_param(tag = ORIGIN, field = Origin)]
         origin = params.findOrigin(Tag.ORIGIN),
 
-        // AOSP: [key_param(tag = NO_AUTH_REQUIRED, field = BoolValue)] (key_parameter.rs: l=917)
+        // AOSP: [key_param(tag = NO_AUTH_REQUIRED, field = BoolValue)]
         noAuthRequired = params.findBoolean(Tag.NO_AUTH_REQUIRED),
 
-        // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)] (key_parameter.rs: l=845)
+        // AOSP: [key_param(tag = BLOCK_MODE, field = BlockMode)]
         blockMode = params.findAllBlockMode(Tag.BLOCK_MODE),
 
-        // AOSP: [key_param(tag = PADDING, field = PaddingMode)] (key_parameter.rs: l=860)
+        // AOSP: [key_param(tag = PADDING, field = PaddingMode)]
         padding = params.findAllPaddingMode(Tag.PADDING),
 
-        // AOSP: [key_param(tag = PURPOSE, field = KeyPurpose)] (key_parameter.rs: l=832)
+        // AOSP: [key_param(tag = PURPOSE, field = KeyPurpose)]
         purpose = params.findAllKeyPurpose(Tag.PURPOSE),
 
-        // AOSP: [key_param(tag = DIGEST, field = Digest)] (key_parameter.rs: l=850)
+        // AOSP: [key_param(tag = DIGEST, field = Digest)]
         digest = params.findAllDigests(Tag.DIGEST),
 
-        // AOSP: [key_param(tag = RSA_PUBLIC_EXPONENT, field = LongInteger)] (key_parameter.rs:
-        // l=874)
+        // AOSP: [key_param(tag = RSA_PUBLIC_EXPONENT, field = LongInteger)]
         rsaPublicExponent = params.findLongInteger(Tag.RSA_PUBLIC_EXPONENT),
 
-        // AOSP: [key_param(tag = CERTIFICATE_SERIAL, field = Blob)] (key_parameter.rs: l=1028)
+        // AOSP: [key_param(tag = CERTIFICATE_SERIAL, field = Blob)]
         certificateSerial = params.findBlob(Tag.CERTIFICATE_SERIAL)?.let { BigInteger(it) },
 
-        // AOSP: [key_param(tag = CERTIFICATE_SUBJECT, field = Blob)] (key_parameter.rs: l=1032)
+        // AOSP: [key_param(tag = CERTIFICATE_SUBJECT, field = Blob)]
         certificateSubject =
             params.findBlob(Tag.CERTIFICATE_SUBJECT)?.let { X500Name(X500Principal(it).name) },
 
-        // AOSP: [key_param(tag = CERTIFICATE_NOT_BEFORE, field = DateTime)] (key_parameter.rs:
-        // l=1035)
+        // AOSP: [key_param(tag = CERTIFICATE_NOT_BEFORE, field = DateTime)]
         certificateNotBefore = params.findDate(Tag.CERTIFICATE_NOT_BEFORE),
 
-        // AOSP: [key_param(tag = CERTIFICATE_NOT_AFTER, field = DateTime)] (key_parameter.rs:
-        // l=1038)
+        // AOSP: [key_param(tag = CERTIFICATE_NOT_AFTER, field = DateTime)]
         certificateNotAfter = params.findDate(Tag.CERTIFICATE_NOT_AFTER),
 
-        // AOSP: [key_param(tag = ATTESTATION_CHALLENGE, field = Blob)] (key_parameter.rs: l=970)
+        // AOSP: [key_param(tag = ATTESTATION_CHALLENGE, field = Blob)]
         attestationChallenge = params.findBlob(Tag.ATTESTATION_CHALLENGE),
 
-        // AOSP: [key_param(tag = ATTESTATION_ID_*, field = Blob)] (key_parameter.rs: l=976, 991,
-        // 1000)
+        // AOSP: [key_param(tag = ATTESTATION_ID_*, field = Blob)]
         brand = params.findBlob(Tag.ATTESTATION_ID_BRAND),
         device = params.findBlob(Tag.ATTESTATION_ID_DEVICE),
         product = params.findBlob(Tag.ATTESTATION_ID_PRODUCT),
@@ -128,8 +123,7 @@ data class KeyMintAttestation(
         manufacturer = params.findBlob(Tag.ATTESTATION_ID_MANUFACTURER),
         model = params.findBlob(Tag.ATTESTATION_ID_MODEL),
         secondImei = params.findBlob(Tag.ATTESTATION_ID_SECOND_IMEI),
-        // Enforcement tags.
-        // key_parameter.rs: l=855..1041 (RSA_OAEP_MGF_DIGEST through MAX_BOOT_LEVEL)
+        // Enforcement tags consulted by createOperation authorization.
         userAuthType = params.findInteger(Tag.USER_AUTH_TYPE),
         userConfirmationRequired = params.findBoolean(Tag.USER_SECURE_ID),
         activeDateTime = params.findDate(Tag.ACTIVE_DATETIME),
@@ -147,7 +141,6 @@ data class KeyMintAttestation(
         maxUsesPerBoot = params.findInteger(Tag.MAX_USES_PER_BOOT),
         maxBootLevel = params.findInteger(Tag.MAX_BOOT_LEVEL),
         minMacLength = params.findInteger(Tag.MIN_MAC_LENGTH),
-        // key_parameter.rs: l=855
         rsaOaepMgfDigest = params.findAllDigests(Tag.RSA_OAEP_MGF_DIGEST),
     ) {
         // Log all parsed parameters for debugging purposes.
@@ -214,9 +207,10 @@ private fun Array<KeyParameter>.findAllDigests(tag: Int): List<Int> =
     this.filter { it.tag == tag }.map { it.value.digest }
 
 /**
- * Derives keySize from EC_CURVE tag when KEY_SIZE is not explicitly provided.
+ * Derives keySize from EC_CURVE tag when KEY_SIZE is not explicitly provided, mirroring how AOSP
+ * keymaster infers the key size from the curve in `EcKeyFactory`.
  *
- * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp;l=54
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/ec_key_factory.cpp
  */
 private fun Array<KeyParameter>.deriveKeySizeFromCurve(): Int {
     val curveId = this.find { it.tag == Tag.EC_CURVE }?.value?.ecCurve ?: return 0

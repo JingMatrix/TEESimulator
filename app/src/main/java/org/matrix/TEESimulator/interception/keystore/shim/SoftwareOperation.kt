@@ -19,62 +19,36 @@ import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 
-/*
- * References:
- * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs
- * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs
- */
+// References for the operation lifecycle and create_operation semantics mirrored here:
+// https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/operation.rs
+// https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/security_level.rs
+
 /**
- * Keystore2 error codes for ServiceSpecificException. Negative = KeyMint, positive = Keystore.
+ * Error codes returned to keystore2 clients through [ServiceSpecificException]. Negative values are
+ * KeyMint `ErrorCode`s; non-negative values are keystore2 `ResponseCode`s. Both are carried as the
+ * service-specific error of an `EX_SERVICE_SPECIFIC` binder status, matching what keystore2 emits.
  *
- * Reference:
- * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/src/km_compat/km_compat_type_conversion.h
- * Reference:
- * https://cs.android.com/android/platform/superproject/main/+/main:system/security/keystore2/aidl/android/security/authorization/ResponseCode.aidl
+ * References:
+ * https://cs.android.com/android/platform/superproject/main/+/main:hardware/interfaces/security/keymint/aidl/android/hardware/security/keymint/ErrorCode.aidl
+ * https://cs.android.com/android/platform/superproject/main/+/main:system/hardware/interfaces/keystore2/aidl/android/system/keystore2/ResponseCode.aidl
  */
 object KeystoreErrorCode {
-    /** km_compat_type_conversion.h: l=88 */
-    const val INVALID_OPERATION_HANDLE = -28
-
-    /** km_compat_type_conversion.h: l=92 */
-    const val VERIFICATION_FAILED = -30
-
-    /** km_compat_type_conversion.h: l=36 */
+    // KeyMint ErrorCode.
     const val UNSUPPORTED_PURPOSE = -2
-
-    /** km_compat_type_conversion.h: l=38 */
     const val INCOMPATIBLE_PURPOSE = -3
-
-    /** ResponseCode.aidl: l=35 */
-    const val SYSTEM_ERROR = 4
-
-    /** Keystore2 ResponseCode::TOO_MUCH_DATA */
-    const val TOO_MUCH_DATA = 21
-
-    /** km_compat_type_conversion.h: l=82 */
-    const val KEY_EXPIRED = -25
-
-    /** km_compat_type_conversion.h: l=80 */
     const val KEY_NOT_YET_VALID = -24
-
-    /** km_compat_type_conversion.h: l=138 */
+    const val KEY_EXPIRED = -25
+    const val INVALID_OPERATION_HANDLE = -28
+    const val VERIFICATION_FAILED = -30
+    const val INVALID_ARGUMENT = -38
+    const val INVALID_TAG = -40
     const val CALLER_NONCE_PROHIBITED = -55
 
-    /** km_compat_type_conversion.h: l=108 */
-    const val INVALID_ARGUMENT = -38
-
-    /**
-     * KeyMint ErrorCode::INVALID_TAG
-     *
-     * km_compat_type_conversion.h: l=112
-     */
-    const val INVALID_TAG = -40
-
-    /** ResponseCode.aidl: l=40 */
+    // Keystore2 ResponseCode.
+    const val SYSTEM_ERROR = 4
     const val PERMISSION_DENIED = 6
-
-    /** ResponseCode.aidl: l=45 */
     const val KEY_NOT_FOUND = 7
+    const val TOO_MUCH_DATA = 21
 }
 
 // A sealed interface to represent the different cryptographic operations we can perform.
@@ -93,8 +67,7 @@ private sealed interface CryptoPrimitive {
 
 // Helper object to map KeyMint parameters onto the simulated software primitives we expose via JCA.
 private object JcaAlgorithmMapper {
-    // AOSP sign operations derive the effective signature behavior from the key algorithm and the
-    // selected digest (ecdsa_operation.cpp: l=79; rsa_operation.cpp: l=63).
+    // AOSP derives the effective signature behavior from the key algorithm and the selected digest.
     fun mapSignatureAlgorithm(params: KeyMintAttestation): String {
         val digest =
             when (params.digest.firstOrNull()) {
@@ -116,8 +89,7 @@ private object JcaAlgorithmMapper {
         return "${digest}with${keyAlgo}"
     }
 
-    // AOSP cipher operations derive behavior from algorithm, block mode, and padding tags
-    // (block_cipher_operation.cpp: l=39, 79; rsa_operation.cpp: l=66).
+    // AOSP derives cipher behavior from the algorithm, block mode, and padding tags.
     fun mapCipherAlgorithm(params: KeyMintAttestation): String {
         val keyAlgo =
             when (params.algorithm) {
@@ -149,8 +121,7 @@ private object JcaAlgorithmMapper {
     }
 }
 
-// Concrete implementation for Signing
-// (ecdsa_operation.cpp: l=138; rsa_operation.cpp: l=305).
+// Concrete implementation for Signing.
 private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -174,8 +145,7 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
     override fun abort() {}
 }
 
-// Concrete implementation for Verification
-// (ecdsa_operation.cpp: l=273; rsa_operation.cpp: l=438).
+// Concrete implementation for Verification.
 private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -210,7 +180,7 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
     override fun abort() {}
 }
 
-// Concrete implementation for Encryption/Decryption (block_cipher_operation.cpp: l=79).
+// Concrete implementation for Encryption/Decryption.
 private class CipherPrimitive(
     cryptoKey: java.security.Key,
     params: KeyMintAttestation,
@@ -284,7 +254,7 @@ private class CipherPrimitive(
     }
 }
 
-// Concrete implementation for ECDH Key Agreement (ecdh_operation.cpp: l=52).
+// Concrete implementation for ECDH Key Agreement.
 private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
     private val agreement: javax.crypto.KeyAgreement =
         javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
@@ -316,8 +286,8 @@ private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
  * delegating to a specific cryptographic primitive based on the operation's purpose.
  *
  * Tracks operation lifecycle: once [finish] or [abort] is called, subsequent calls throw
- * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE]. This matches AOSP
- * keystore2 behavior where finalized operations fail `check_active()` (operation.rs: l=26, 320).
+ * [ServiceSpecificException] with [KeystoreErrorCode.INVALID_OPERATION_HANDLE], matching AOSP
+ * keystore2, where a finalized operation fails `check_active()` in operation.rs.
  */
 class SoftwareOperation(
     private val txId: Long,
@@ -361,9 +331,11 @@ class SoftwareOperation(
             }
     }
 
-    /** Parameters produced during begin (e.g. GCM nonce), to populate CreateOperationResponse. */
+    /**
+     * Parameters produced during begin (e.g. the GCM nonce), used to populate
+     * CreateOperationResponse.parameters just as AOSP forwards `begin_result.params`.
+     */
     val beginParameters: KeyParameters?
-        // security_level.rs: l=402
         get() {
             val params = primitive.getBeginParameters() ?: return null
             if (params.isEmpty()) return null
@@ -439,16 +411,16 @@ class SoftwareOperation(
  * The Binder interface for [SoftwareOperation].
  *
  * All methods are synchronized to prevent concurrent access, matching AOSP's Mutex-protected
- * KeystoreOperation wrapper. Input data is validated against [MAX_RECEIVE_DATA] (32KB) to match
- * AOSP's enforced limit. All errors are reported as [ServiceSpecificException] with AOSP-compatible
- * numeric error codes, matching the wire format produced by AOSP's `into_binder()` (operation.rs:
- * l=74, 216, 809).
+ * KeystoreOperation wrapper. Input data is validated against [MAX_RECEIVE_DATA] to match AOSP's
+ * enforced limit. All errors are reported as [ServiceSpecificException] with AOSP-compatible
+ * numeric error codes, matching the wire format AOSP produces via `into_binder()`.
  */
 class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     IKeystoreOperation.Stub() {
 
     private fun checkInputLength(data: ByteArray?) {
-        // operation.rs: l=337
+        // AOSP rejects update/updateAad/finish inputs larger than MAX_RECEIVE_DATA with
+        // TOO_MUCH_DATA.
         if (data != null && data.size > MAX_RECEIVE_DATA)
             throw ServiceSpecificException(KeystoreErrorCode.TOO_MUCH_DATA)
     }
@@ -484,7 +456,8 @@ class SoftwareOperationBinder(private val operation: SoftwareOperation) :
     }
 
     companion object {
-        // operation.rs: l=216
+        // AOSP keystore2 limits a single transaction's payload to 32 KiB (operation.rs
+        // MAX_RECEIVE_DATA).
         private const val MAX_RECEIVE_DATA = 0x8000
     }
 }
