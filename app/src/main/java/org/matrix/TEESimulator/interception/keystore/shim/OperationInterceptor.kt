@@ -5,7 +5,6 @@ import android.os.Parcel
 import android.system.keystore2.IKeystoreOperation
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.interception.keystore.InterceptorUtils
-import org.matrix.TEESimulator.logging.SystemLogger
 
 /**
  * Intercepts calls to an `IKeystoreOperation` service. This is used to log the data manipulation
@@ -29,11 +28,7 @@ class OperationInterceptor(
         logTransaction(txId, methodName, callingUid, callingPid, true)
 
         if (code == FINISH_TRANSACTION || code == ABORT_TRANSACTION) {
-            try {
-                KeyMintSecurityLevelInterceptor.removeOperationInterceptor(target, backdoor)
-            } catch (e: Exception) {
-                SystemLogger.error("[TX_ID: $txId] Failed to unregister operation interceptor.", e)
-            }
+            KeyMintSecurityLevelInterceptor.removeOperationInterceptor(target, backdoor)
         }
 
         return TransactionResult.ContinueAndSkipPost
@@ -48,9 +43,6 @@ class OperationInterceptor(
             InterceptorUtils.getTransactCode(IKeystoreOperation.Stub::class.java, "finish")
         private val ABORT_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreOperation.Stub::class.java, "abort")
-
-        /** Only intercept finish/abort for cleanup. Other ops pass through without round-trip. */
-        val INTERCEPTED_CODES = intArrayOf(FINISH_TRANSACTION, ABORT_TRANSACTION)
 
         private val transactionNames: Map<Int, String> by lazy {
             IKeystoreOperation.Stub::class

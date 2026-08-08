@@ -151,12 +151,7 @@ class KeyMintSecurityLevelInterceptor(
                     val backdoor = getBackdoor(target)
                     if (backdoor != null) {
                         val interceptor = OperationInterceptor(operation, backdoor)
-                        register(
-                            backdoor,
-                            operationBinder,
-                            interceptor,
-                            OperationInterceptor.INTERCEPTED_CODES,
-                        )
+                        register(backdoor, operationBinder, interceptor)
                         interceptedOperations[operationBinder] = interceptor
                     } else {
                         SystemLogger.error(
@@ -187,8 +182,6 @@ class KeyMintSecurityLevelInterceptor(
                 val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
                 CertificateHelper.updateCertificateChain(callingUid, metadata, newChain)
                     .getOrThrow()
-                metadata.authorizations =
-                    InterceptorUtils.patchAuthorizations(metadata.authorizations, callingUid)
 
                 // We must clean up cached generated keys before storing the patched chain
                 cleanupKeyData(keyId)
@@ -418,35 +411,6 @@ class KeyMintSecurityLevelInterceptor(
                 "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
             )
             val params = data.createTypedArray(KeyParameter.CREATOR)!!
-
-            // AOSP add_required_parameters rejects a caller-supplied CREATION_DATETIME with
-            // INVALID_ARGUMENT, and gates device-ID attestation on a permission check.
-            if (params.any { it.tag == Tag.CREATION_DATETIME }) {
-                return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
-                    INVALID_ARGUMENT
-                )
-            }
-
-            // Device ID attestation requires READ_PRIVILEGED_PHONE_STATE. The tag set mirrors
-            // AOSP `is_device_id_attestation_tag`.
-            val hasDeviceIdTags = params.any {
-                it.tag == Tag.ATTESTATION_ID_SERIAL ||
-                    it.tag == Tag.ATTESTATION_ID_IMEI ||
-                    it.tag == Tag.ATTESTATION_ID_MEID ||
-                    it.tag == Tag.ATTESTATION_ID_SECOND_IMEI ||
-                    it.tag == Tag.DEVICE_UNIQUE_ATTESTATION
-            }
-            if (
-                hasDeviceIdTags &&
-                    !ConfigurationManager.hasPermissionForUid(
-                        callingUid,
-                        "android.permission.READ_PRIVILEGED_PHONE_STATE",
-                    )
-            ) {
-                return@runCatching InterceptorUtils.createServiceSpecificErrorReply(
-                    CANNOT_ATTEST_IDS
-                )
-            }
             val parsedParams = KeyMintAttestation(params)
             val isAttestKeyRequest = parsedParams.isAttestKey()
 
@@ -595,8 +559,6 @@ class KeyMintSecurityLevelInterceptor(
     companion object {
         private val secureRandom = SecureRandom()
 
-        private const val INVALID_ARGUMENT = 20
-        private const val CANNOT_ATTEST_IDS = -66
         // Transaction codes for IKeystoreSecurityLevel interface.
         private val GENERATE_KEY_TRANSACTION =
             InterceptorUtils.getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
@@ -606,14 +568,6 @@ class KeyMintSecurityLevelInterceptor(
             InterceptorUtils.getTransactCode(
                 IKeystoreSecurityLevel.Stub::class.java,
                 "createOperation",
-            )
-
-        /** Only these transaction codes need native-level interception. */
-        val INTERCEPTED_CODES =
-            intArrayOf(
-                GENERATE_KEY_TRANSACTION,
-                IMPORT_KEY_TRANSACTION,
-                CREATE_OPERATION_TRANSACTION,
             )
 
         private val transactionNames: Map<Int, String> by lazy {
@@ -805,19 +759,13 @@ private fun KeyMintAttestation.toAuthorizations(
     )
 
     val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
-    if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
-    }
+    authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
 
     val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
-    if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
-    }
+    authList.add(createAuth(Tag.VENDOR_PATCHLEVEL, KeyParameterValue.integer(vendorPatch)))
 
     val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
-    if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) {
-        authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
-    }
+    authList.add(createAuth(Tag.BOOT_PATCHLEVEL, KeyParameterValue.integer(bootPatch)))
 
     // Software-enforced tags (SecurityLevel.SOFTWARE): CREATION_DATETIME, enforcement dates,
     // USER_ID.

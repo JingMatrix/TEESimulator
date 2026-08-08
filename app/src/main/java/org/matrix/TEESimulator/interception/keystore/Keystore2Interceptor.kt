@@ -57,17 +57,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     override val processName = "keystore2"
     override val injectionCommand = "exec ./inject `pidof keystore2` libTEESimulator.so entry"
 
-    override val interceptedCodes: IntArray by lazy {
-        listOfNotNull(
-                GET_KEY_ENTRY_TRANSACTION,
-                DELETE_KEY_TRANSACTION,
-                UPDATE_SUBCOMPONENT_TRANSACTION,
-                LIST_ENTRIES_TRANSACTION,
-                LIST_ENTRIES_BATCHED_TRANSACTION,
-            )
-            .toIntArray()
-    }
-
     /**
      * This method is called once the main service is hooked. It proceeds to find and hook the
      * security level sub-services (e.g., TEE, StrongBox).
@@ -84,12 +73,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
                 val interceptor =
                     KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
-                register(
-                    backdoor,
-                    tee.asBinder(),
-                    interceptor,
-                    KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                )
+                register(backdoor, tee.asBinder(), interceptor)
             }
         }
             .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
@@ -100,12 +84,7 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                 SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
                 val interceptor =
                     KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
-                register(
-                    backdoor,
-                    strongbox.asBinder(),
-                    interceptor,
-                    KeyMintSecurityLevelInterceptor.INTERCEPTED_CODES,
-                )
+                register(backdoor, strongbox.asBinder(), interceptor)
             }
         }
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
@@ -277,11 +256,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                             keyData.second.toTypedArray(),
                         )
                         .getOrThrow()
-                    response.metadata.authorizations =
-                        InterceptorUtils.patchAuthorizations(
-                            response.metadata.authorizations,
-                            callingUid,
-                        )
 
                     val key = response.metadata.key!!
                     key.nspace = SecureRandom().nextLong()
@@ -335,11 +309,6 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
                         finalChain,
                     )
                     .getOrThrow()
-                response.metadata.authorizations =
-                    InterceptorUtils.patchAuthorizations(
-                        response.metadata.authorizations,
-                        callingUid,
-                    )
 
                 return InterceptorUtils.createTypedObjectReply(response)
             }

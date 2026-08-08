@@ -235,8 +235,6 @@ class BinderInterceptor : public BBinder {
     struct RegistrationEntry {
         wp<IBinder> target;
         sp<IBinder> callback_interface;
-        // Transaction codes to intercept. Empty = intercept all (legacy behavior).
-        std::vector<uint32_t> filtered_codes;
     };
 
     // Reader-Writer lock for the registry to allow concurrent reads (lookups)
@@ -246,15 +244,10 @@ class BinderInterceptor : public BBinder {
 public:
     BinderInterceptor() = default;
 
-    // Checks if a specific Binder+code combination should be intercepted.
-    // Returns true if the binder is registered AND the code is in its filter
-    // (or the filter is empty, meaning intercept everything).
-    bool shouldIntercept(const wp<BBinder> &target, uint32_t code) const {
+    // Checks if a specific Binder instance is currently registered for interception
+    bool isBinderIntercepted(const wp<BBinder> &target) const {
         std::shared_lock lock(registry_mutex_);
-        auto it = registry_.find(target);
-        if (it == registry_.end()) return false;
-        const auto &codes = it->second.filtered_codes;
-        return codes.empty() || std::find(codes.begin(), codes.end(), code) != codes.end();
+        return registry_.find(target) != registry_.end();
     }
 
     // Main entry point for processing the "Man-in-the-Middle" logic
@@ -314,11 +307,7 @@ protected:
         }
 
         if (!found_context) {
-            LOGW("BinderStub received transaction but no context found for thread (code=%u)", code);
-#ifndef NDEBUG
-            std::lock_guard<std::mutex> dbg_lock(g_thread_context_mutex);
-            LOGW("  Thread context map has %zu entries", g_thread_context_map.size());
-#endif
+            LOGW("BinderStub received transaction but no context found for thread");
             return UNKNOWN_TRANSACTION;
         }
 
@@ -397,16 +386,13 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
             // This is safe because we are holding a strong reference.
             wp<BBinder> wp_target = target_binder_ptr;
 
-            if (g_interceptor_instance->shouldIntercept(wp_target, txn_data->code)) {
+            if (g_interceptor_instance->isBinderIntercepted(wp_target)) {
                 info.transaction_code = txn_data->code;
                 info.target_binder = wp_target; // Assign the valid weak pointer
                 hijack = true;
             }
             // Manually release the temporary strong reference we acquired at the start.
             target_binder_ptr->decStrong(nullptr);
-        } else {
-            LOGD("[Hook] attemptIncStrong failed for target %p (code=%u, uid=%d) — binder may be dying",
-                 reinterpret_cast<void*>(txn_data->target.ptr), txn_data->code, txn_data->sender_euid);
         }
     }
 
@@ -423,13 +409,7 @@ void inspectAndRewriteTransaction(binder_transaction_data *txn_data) {
 
         // Store context for the stub to retrieve later in its onTransact
         std::lock_guard<std::mutex> lock(g_thread_context_mutex);
-        auto &queue = g_thread_context_map[std::this_thread::get_id()];
-        queue.push(std::move(info));
-#ifndef NDEBUG
-        if (queue.size() > 8) {
-            LOGW("[Hook] Thread context queue depth=%zu for thread — possible leak", queue.size());
-        }
-#endif
+        g_thread_context_map[std::this_thread::get_id()].push(std::move(info));
     }
 }
 
@@ -557,26 +537,12 @@ status_t BinderInterceptor::handleRegister(const Parcel &data) {
         return BAD_TYPE;
     }
 
-    // Read optional transaction code filter. If present: int32 count + count * uint32 codes.
-    // If absent or count <= 0: intercept all transaction codes (legacy behavior).
-    std::vector<uint32_t> codes;
-    int32_t code_count = 0;
-    if (data.dataAvail() >= sizeof(int32_t) && data.readInt32(&code_count) == OK && code_count > 0) {
-        codes.reserve(code_count);
-        for (int32_t i = 0; i < code_count; i++) {
-            uint32_t c = 0;
-            if (data.readUint32(&c) == OK) codes.push_back(c);
-        }
-        LOGI("Interceptor registered for binder %p with %zu filtered codes", target.get(), codes.size());
-    } else {
-        LOGI("Interceptor registered for binder %p (all codes)", target.get());
-    }
-
     wp<IBinder> weak_target = target;
 
     std::unique_lock lock(registry_mutex_);
-    registry_[weak_target] = {weak_target, callback, std::move(codes)};
+    registry_[weak_target] = {weak_target, callback};
 
+    LOGI("Interceptor registered for binder %p", target.get());
     return OK;
 }
 
@@ -626,24 +592,8 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     Parcel pre_req, pre_resp;
     writeTransactionData(pre_req, tx_id, target, code, flags, request);
 
-#ifndef NDEBUG
-    struct timespec ts_start{};
-    clock_gettime(CLOCK_MONOTONIC, &ts_start);
-#endif
-
-    status_t pre_cb_status = callback->transact(intercept::kPreTransact, pre_req, &pre_resp);
-
-#ifndef NDEBUG
-    struct timespec ts_end{};
-    clock_gettime(CLOCK_MONOTONIC, &ts_end);
-    double pre_ms = (ts_end.tv_sec - ts_start.tv_sec) * 1000.0 + (ts_end.tv_nsec - ts_start.tv_nsec) / 1e6;
-    if (pre_ms > 5000.0) {
-        LOGW("[TX_ID: %" PRIu64 "] Pre-callback took %.0fms (code=%u) — possible hang", tx_id, pre_ms, code);
-    }
-#endif
-
-    if (pre_cb_status != OK) {
-        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed (status=%d). Forwarding original call.", tx_id, pre_cb_status);
+    if (callback->transact(intercept::kPreTransact, pre_req, &pre_resp) != OK) {
+        LOGW("[TX_ID: %" PRIu64 "] Pre-transaction callback failed. Forwarding original call.", tx_id);
         return false; // Callback failed, proceed as if not intercepted
     }
 
@@ -677,10 +627,8 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
     if (action == intercept::kActionOverrideData) {
         size_t size = pre_resp.readUint64();
         final_request.appendFrom(&pre_resp, pre_resp.dataPosition(), size);
-    } else if (action == intercept::kActionContinue) {
-        final_request.appendFrom(&request, 0, request.dataSize());
     } else {
-        LOGW("[TX_ID: %" PRIu64 "] Unknown pre-callback action %d (code=%u). Forwarding original data.", tx_id, action, code);
+        // Default (kActionContinue): Use original data
         final_request.appendFrom(&request, 0, request.dataSize());
     }
 
@@ -699,8 +647,7 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
         VALIDATE_STATUS(tx_id, post_req.appendFrom(reply, 0, reply_size));
     }
 
-    status_t post_cb_status = callback->transact(intercept::kPostTransact, post_req, &post_resp);
-    if (post_cb_status == OK) {
+    if (callback->transact(intercept::kPostTransact, post_req, &post_resp) == OK) {
         int32_t post_action = post_resp.readInt32();
         if (post_action == intercept::kActionOverrideReply && reply) {
             result = post_resp.readInt32(); // Read new status
@@ -708,9 +655,6 @@ bool BinderInterceptor::processInterceptedTransaction(uint64_t tx_id, sp<BBinder
             reply->setDataSize(0); // Clear original reply
             VALIDATE_STATUS(tx_id, reply->appendFrom(&post_resp, post_resp.dataPosition(), new_size));
         }
-    } else {
-        LOGW("[TX_ID: %" PRIu64 "] Post-transaction callback failed (status=%d, code=%u). Using original reply.",
-             tx_id, post_cb_status, code);
     }
 
     return true; // We handled the flow, even if we just forwarded it

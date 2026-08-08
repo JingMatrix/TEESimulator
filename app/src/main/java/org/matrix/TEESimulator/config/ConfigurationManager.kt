@@ -352,18 +352,6 @@ object ConfigurationManager {
         return iPackageManager
     }
 
-    /** Checks if any package belonging to the UID holds the given permission. */
-    fun hasPermissionForUid(uid: Int, permission: String): Boolean {
-        val userId = uid / 100000
-        return getPackagesForUid(uid).any { pkg ->
-            try {
-                getPackageManager()?.checkPermission(permission, pkg, userId) == 0
-            } catch (_: Exception) {
-                false
-            }
-        }
-    }
-
     /** Retrieves the package names associated with a UID. */
     fun getPackagesForUid(uid: Int): Array<String> {
         return uidToPackagesCache.getOrPut(uid) {

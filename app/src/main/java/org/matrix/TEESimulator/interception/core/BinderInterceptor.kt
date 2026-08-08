@@ -148,12 +148,6 @@ abstract class BinderInterceptor : Binder() {
                 callingPid,
                 transactionData,
             )
-        } catch (e: Exception) {
-            SystemLogger.error(
-                "[TX_ID: $txId] onPreTransact crashed (code=$transactionCode, uid=$callingUid)",
-                e,
-            )
-            TransactionResult.ContinueAndSkipPost
         } finally {
             transactionData.recycle()
         }
@@ -197,12 +191,6 @@ abstract class BinderInterceptor : Binder() {
                 reply,
                 resultCode,
             )
-        } catch (e: Exception) {
-            SystemLogger.error(
-                "[TX_ID: $txId] onPostTransact crashed (code=$transactionCode, uid=$callingUid, resultCode=${data.readInt()})",
-                e,
-            )
-            TransactionResult.SkipTransaction
         } finally {
             transactionData.recycle()
             transactionReply.recycle()
@@ -305,29 +293,15 @@ abstract class BinderInterceptor : Binder() {
             }
         }
 
-        /**
-         * Uses the backdoor binder to register an interceptor for a specific target service.
-         *
-         * @param filteredCodes If non-empty, only these transaction codes will be intercepted at
-         *   the native level. All other codes pass through without the round-trip to Java.
-         */
-        fun register(
-            backdoor: IBinder,
-            target: IBinder,
-            interceptor: BinderInterceptor,
-            filteredCodes: IntArray = intArrayOf(),
-        ) {
+        /** Uses the backdoor binder to register an interceptor for a specific target service. */
+        fun register(backdoor: IBinder, target: IBinder, interceptor: BinderInterceptor) {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
             try {
                 data.writeStrongBinder(target)
                 data.writeStrongBinder(interceptor)
-                data.writeInt(filteredCodes.size)
-                for (code in filteredCodes) data.writeInt(code)
                 backdoor.transact(REGISTER_INTERCEPTOR_CODE, data, reply, 0)
-                SystemLogger.info(
-                    "Registered interceptor for target: $target (${filteredCodes.size} filtered codes)"
-                )
+                SystemLogger.info("Registered interceptor for target: $target")
             } catch (e: Exception) {
                 SystemLogger.error("Failed to register binder interceptor.", e)
             } finally {

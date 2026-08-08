@@ -46,7 +46,6 @@ object KeystoreErrorCode {
 
     // Keystore2 ResponseCode.
     const val SYSTEM_ERROR = 4
-    const val PERMISSION_DENIED = 6
     const val KEY_NOT_FOUND = 7
     const val TOO_MUCH_DATA = 21
 }
