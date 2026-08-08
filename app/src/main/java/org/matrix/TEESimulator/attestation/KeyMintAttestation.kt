@@ -173,7 +173,8 @@ private fun Array<KeyParameter>.deriveKeySizeFromCurve(): Int {
     val curveId = this.find { it.tag == Tag.EC_CURVE }?.value?.ecCurve ?: return 0
     return when (curveId) {
         EcCurve.P_224 -> 224
-        EcCurve.P_256, EcCurve.CURVE_25519 -> 256
+        EcCurve.P_256,
+        EcCurve.CURVE_25519 -> 256
         EcCurve.P_384 -> 384
         EcCurve.P_521 -> 521
         else -> 0

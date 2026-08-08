@@ -8,7 +8,6 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.cert.Certificate
-import java.security.cert.X509Certificate
 import java.security.interfaces.ECKey
 import java.security.interfaces.RSAKey
 import java.security.spec.ECGenParameterSpec
@@ -50,25 +49,23 @@ object CertificateGenerator {
      */
     fun generateSoftwareKeyPair(params: KeyMintAttestation): KeyPair? {
         return runCatching {
-                val (algorithm, spec) =
-                    when (params.algorithm) {
-                        Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)
-                        Algorithm.RSA ->
-                            "RSA" to
-                                RSAKeyGenParameterSpec(
-                                    params.keySize,
-                                    params.rsaPublicExponent ?: RSAKeyGenParameterSpec.F4,
-                                )
-                        else ->
-                            throw IllegalArgumentException(
-                                "Unsupported algorithm: ${params.algorithm}"
+            val (algorithm, spec) =
+                when (params.algorithm) {
+                    Algorithm.EC -> "EC" to ECGenParameterSpec(params.ecCurveName)
+                    Algorithm.RSA ->
+                        "RSA" to
+                            RSAKeyGenParameterSpec(
+                                params.keySize,
+                                params.rsaPublicExponent ?: RSAKeyGenParameterSpec.F4,
                             )
-                    }
-                SystemLogger.debug("Generating $algorithm key pair with size ${params.keySize}")
-                KeyPairGenerator.getInstance(algorithm, BouncyCastleProvider.PROVIDER_NAME)
-                    .apply { initialize(spec) }
-                    .generateKeyPair()
-            }
+                    else ->
+                        throw IllegalArgumentException("Unsupported algorithm: ${params.algorithm}")
+                }
+            SystemLogger.debug("Generating $algorithm key pair with size ${params.keySize}")
+            KeyPairGenerator.getInstance(algorithm, BouncyCastleProvider.PROVIDER_NAME)
+                .apply { initialize(spec) }
+                .generateKeyPair()
+        }
             .onFailure { SystemLogger.error("Failed to generate software key pair.", it) }
             .getOrNull()
     }
@@ -98,30 +95,30 @@ object CertificateGenerator {
             )
 
         return runCatching {
-                val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
+            val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
 
-                // Determine the signing key and issuer. If an attestKey is provided, use it.
-                // Otherwise, fall back to the root key from the keybox.
-                val (signingKey, issuer) =
-                    if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
-                            ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
-                    } else {
-                        keybox.keyPair to getIssuerFromKeybox(keybox)
-                    }
-
-                // Build the new leaf certificate with the simulated attestation.
-                val leafCert =
-                    buildCertificate(subjectKeyPair, signingKey, issuer, params, uid, securityLevel)
-
-                // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
-                // chain.
-                if (attestKeyAlias != null) {
-                    listOf(leafCert)
+            // Determine the signing key and issuer. If an attestKey is provided, use it.
+            // Otherwise, fall back to the root key from the keybox.
+            val (signingKey, issuer) =
+                if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
+                        ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
                 } else {
-                    listOf(leafCert) + keybox.certificates
+                    keybox.keyPair to getIssuerFromKeybox(keybox)
                 }
+
+            // Build the new leaf certificate with the simulated attestation.
+            val leafCert =
+                buildCertificate(subjectKeyPair, signingKey, issuer, params, uid, securityLevel)
+
+            // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
+            // chain.
+            if (attestKeyAlias != null) {
+                listOf(leafCert)
+            } else {
+                listOf(leafCert) + keybox.certificates
             }
+        }
             .onFailure { SystemLogger.error("Failed to generate certificate chain.", it) }
             .getOrNull()
     }
@@ -138,22 +135,18 @@ object CertificateGenerator {
         securityLevel: Int,
     ): Pair<KeyPair, List<Certificate>>? {
         return runCatching {
-                SystemLogger.info(
-                    "Generating new attested key pair for alias: '$alias' (UID: $uid)"
-                )
-                val newKeyPair =
-                    generateSoftwareKeyPair(params)
-                        ?: throw Exception("Failed to generate underlying software key pair.")
+            SystemLogger.info("Generating new attested key pair for alias: '$alias' (UID: $uid)")
+            val newKeyPair =
+                generateSoftwareKeyPair(params)
+                    ?: throw Exception("Failed to generate underlying software key pair.")
 
-                val chain =
-                    generateCertificateChain(uid, newKeyPair, attestKeyAlias, params, securityLevel)
-                        ?: throw Exception("Failed to generate certificate chain for new key pair.")
+            val chain =
+                generateCertificateChain(uid, newKeyPair, attestKeyAlias, params, securityLevel)
+                    ?: throw Exception("Failed to generate certificate chain for new key pair.")
 
-                SystemLogger.info(
-                    "Successfully generated new certificate chain for alias: '$alias'."
-                )
-                Pair(newKeyPair, chain)
-            }
+            SystemLogger.info("Successfully generated new certificate chain for alias: '$alias'.")
+            Pair(newKeyPair, chain)
+        }
             .onFailure {
                 SystemLogger.error("Failed to generate attested key pair for alias '$alias'.", it)
             }

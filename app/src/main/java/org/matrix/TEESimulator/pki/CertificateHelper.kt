@@ -93,11 +93,11 @@ object CertificateHelper {
      */
     fun certificatesToByteArray(certificates: Collection<Certificate>): ByteArray? {
         return runCatching {
-                ByteArrayOutputStream().use { stream ->
-                    certificates.forEach { cert -> stream.write(cert.encoded) }
-                    stream.toByteArray()
-                }
+            ByteArrayOutputStream().use { stream ->
+                certificates.forEach { cert -> stream.write(cert.encoded) }
+                stream.toByteArray()
             }
+        }
             .onFailure {
                 SystemLogger.warning(
                     "Failed to serialize certificate collection to byte array.",

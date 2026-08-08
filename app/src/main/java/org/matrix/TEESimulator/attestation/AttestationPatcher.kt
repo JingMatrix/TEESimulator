@@ -43,37 +43,37 @@ object AttestationPatcher {
         }
 
         return runCatching {
-                val originalLeaf = originalChain[0] as X509Certificate
-                val originalLeafHolder = X509CertificateHolder(originalLeaf.encoded)
+            val originalLeaf = originalChain[0] as X509Certificate
+            val originalLeafHolder = X509CertificateHolder(originalLeaf.encoded)
 
-                // 1. Attempt to parse the existing attestation extension. If it doesn't exist,
-                // there's nothing to patch.
-                val parsedAttestation =
-                    parseAttestationExtension(originalLeafHolder) ?: return originalChain
+            // 1. Attempt to parse the existing attestation extension. If it doesn't exist,
+            // there's nothing to patch.
+            val parsedAttestation =
+                parseAttestationExtension(originalLeafHolder) ?: return originalChain
 
-                // 2. Get the appropriate keybox for the given algorithm to sign the new
-                // certificate.
-                val keybox = getKeyboxForUidAndAlgorithm(uid, originalLeaf.sigAlgName)
+            // 2. Get the appropriate keybox for the given algorithm to sign the new
+            // certificate.
+            val keybox = getKeyboxForUidAndAlgorithm(uid, originalLeaf.sigAlgName)
 
-                // 3. Create the new, patched leaf certificate.
-                val patchedLeaf =
-                    createPatchedLeafCertificate(
-                        originalLeafHolder,
-                        parsedAttestation,
-                        keybox,
-                        originalLeaf.sigAlgName,
-                        uid,
-                    )
-
-                // 4. Construct the NEW, VALID chain by prepending the patched leaf to the keybox's
-                // chain.
-                val newChain = listOf(patchedLeaf) + keybox.certificates
-
-                SystemLogger.info(
-                    "Successfully rebuilt a valid, patched certificate chain for UID $uid."
+            // 3. Create the new, patched leaf certificate.
+            val patchedLeaf =
+                createPatchedLeafCertificate(
+                    originalLeafHolder,
+                    parsedAttestation,
+                    keybox,
+                    originalLeaf.sigAlgName,
+                    uid,
                 )
-                newChain.toTypedArray()
-            }
+
+            // 4. Construct the NEW, VALID chain by prepending the patched leaf to the keybox's
+            // chain.
+            val newChain = listOf(patchedLeaf) + keybox.certificates
+
+            SystemLogger.info(
+                "Successfully rebuilt a valid, patched certificate chain for UID $uid."
+            )
+            newChain.toTypedArray()
+        }
             .getOrElse {
                 SystemLogger.error(
                     "Failed to patch and rebuild certificate chain for UID $uid.",

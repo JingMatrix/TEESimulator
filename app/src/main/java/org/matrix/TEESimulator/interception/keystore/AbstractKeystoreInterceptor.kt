@@ -120,13 +120,12 @@ abstract class AbstractKeystoreInterceptor : BinderInterceptor() {
     /**
      * Creates a `DeathRecipient` that will restart the application if the intercepted service dies.
      */
-    private fun createDeathRecipient() =
-        IBinder.DeathRecipient {
-            SystemLogger.error(
-                "The intercepted service '$serviceName' has died. Restarting application."
-            )
-            exitProcess(0)
-        }
+    private fun createDeathRecipient() = IBinder.DeathRecipient {
+        SystemLogger.error(
+            "The intercepted service '$serviceName' has died. Restarting application."
+        )
+        exitProcess(0)
+    }
 
     /**
      * A hook for subclasses to perform additional setup after the interceptor is registered. For

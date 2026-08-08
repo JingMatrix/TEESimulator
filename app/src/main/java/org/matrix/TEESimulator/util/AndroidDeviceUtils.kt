@@ -478,52 +478,50 @@ object AndroidDeviceUtils {
     val moduleHash: ByteArray by lazy {
         DeviceAttestationService.CachedAttestationData?.moduleHash
             ?: runCatching {
-                    // 1. Create a container to hold the sort key (name encoded) and the full data
-                    // (sequence encoded)
-                    data class ModuleEntry(
-                        val nameEncoded: ByteArray, // The sort key
-                        val fullEncoded: ByteArray, // The data to hash
+                // 1. Create a container to hold the sort key (name encoded) and the full data
+                // (sequence encoded)
+                data class ModuleEntry(
+                    val nameEncoded: ByteArray, // The sort key
+                    val fullEncoded: ByteArray, // The data to hash
+                )
+
+                val modules = apexInfos.map { (packageName, versionCode) ->
+                    // Create the components
+                    val nameOctet = DEROctetString(packageName.toByteArray(Charsets.UTF_8))
+                    val versionInt = ASN1Integer(versionCode)
+
+                    // Create the Sequence: SEQUENCE { packageName, version }
+                    val vec = ASN1EncodableVector()
+                    vec.add(nameOctet)
+                    vec.add(versionInt)
+                    val sequence = DERSequence(vec)
+
+                    // We store the encoded name separately because Rust sorts ONLY by this
+                    ModuleEntry(
+                        nameEncoded = nameOctet.encoded,
+                        fullEncoded = sequence.encoded,
                     )
-
-                    val modules =
-                        apexInfos.map { (packageName, versionCode) ->
-                            // Create the components
-                            val nameOctet = DEROctetString(packageName.toByteArray(Charsets.UTF_8))
-                            val versionInt = ASN1Integer(versionCode)
-
-                            // Create the Sequence: SEQUENCE { packageName, version }
-                            val vec = ASN1EncodableVector()
-                            vec.add(nameOctet)
-                            vec.add(versionInt)
-                            val sequence = DERSequence(vec)
-
-                            // We store the encoded name separately because Rust sorts ONLY by this
-                            ModuleEntry(
-                                nameEncoded = nameOctet.encoded,
-                                fullEncoded = sequence.encoded,
-                            )
-                        }
-
-                    // 2. Sort manually based on the encoded Package Name (lexicographically)
-                    // This mimics the Rust 'impl DerOrd for ModuleInfo' which delegates to
-                    // 'self.name'
-                    val sortedModules =
-                        modules.sortedWith { m1, m2 ->
-                            compareByteArrays(m1.nameEncoded, m2.nameEncoded)
-                        }
-
-                    // 3. Concatenate the full sequences in the specific sorted order
-                    val payloadStream = ByteArrayOutputStream()
-                    sortedModules.forEach { payloadStream.write(it.fullEncoded) }
-                    val payload = payloadStream.toByteArray()
-
-                    // 4. Wrap manually in a DER SET tag (0x31)
-                    // We cannot use DERSet(vector) because it would re-sort incorrectly.
-                    val finalDerSet = encodeAsDerSet(payload)
-
-                    // 5. Compute SHA-256
-                    MessageDigest.getInstance("SHA-256").digest(finalDerSet)
                 }
+
+                // 2. Sort manually based on the encoded Package Name (lexicographically)
+                // This mimics the Rust 'impl DerOrd for ModuleInfo' which delegates to
+                // 'self.name'
+                val sortedModules = modules.sortedWith { m1, m2 ->
+                    compareByteArrays(m1.nameEncoded, m2.nameEncoded)
+                }
+
+                // 3. Concatenate the full sequences in the specific sorted order
+                val payloadStream = ByteArrayOutputStream()
+                sortedModules.forEach { payloadStream.write(it.fullEncoded) }
+                val payload = payloadStream.toByteArray()
+
+                // 4. Wrap manually in a DER SET tag (0x31)
+                // We cannot use DERSet(vector) because it would re-sort incorrectly.
+                val finalDerSet = encodeAsDerSet(payload)
+
+                // 5. Compute SHA-256
+                MessageDigest.getInstance("SHA-256").digest(finalDerSet)
+            }
                 .getOrElse {
                     SystemLogger.error("Failed to compute module hash.", it)
                     ByteArray(32)

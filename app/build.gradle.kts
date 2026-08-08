@@ -5,7 +5,6 @@ import org.gradle.process.ExecOperations
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ktfmt)
 }
 
@@ -57,6 +56,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
     buildFeatures { buildConfig = true }
+    // Since 1.85, every BouncyCastle artifact ships an identical META-INF/LICENSE.md.
+    packaging { resources { excludes += "META-INF/LICENSE.md" } }
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

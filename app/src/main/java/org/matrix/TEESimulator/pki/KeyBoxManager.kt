@@ -162,63 +162,61 @@ object KeyBoxManager {
                             // Use runCatching to ensure one malformed key doesn't stop the whole
                             // process.
                             runCatching {
-                                    val xmlAlgorithm = currentAlgorithm
-                                    val keyPem = currentPrivateKeyPem
-                                    if (
-                                        xmlAlgorithm != null &&
-                                            keyPem != null &&
-                                            currentCertificatePems.isNotEmpty()
-                                    ) {
-                                        val keyPair =
-                                            (CertificateHelper.parsePemKeyPair(keyPem)
-                                                    as CertificateHelper.OperationResult.Success)
-                                                .data
-                                        val certificates =
-                                            currentCertificatePems.map {
-                                                (CertificateHelper.parsePemCertificate(it)
-                                                        as
-                                                        CertificateHelper.OperationResult.Success)
-                                                    .data
-                                            }
-
-                                        // Derive the TRUE algorithm from the key object itself.
-                                        // This is our source of truth.
-                                        val derivedAlgorithm =
-                                            when (keyPair.private) {
-                                                is RSAPrivateKey -> KeyProperties.KEY_ALGORITHM_RSA
-                                                is ECPrivateKey -> KeyProperties.KEY_ALGORITHM_EC
-                                                else ->
-                                                    throw IllegalArgumentException(
-                                                        "Unsupported key type found: ${keyPair.private.javaClass.name}"
-                                                    )
-                                            }
-
-                                        // Normalize the algorithm from the XML tag to compare it
-                                        // fairly with the derived algorithm.
-                                        val normalizedXmlAlgorithm =
-                                            when {
-                                                xmlAlgorithm.contains("RSA", ignoreCase = true) ==
-                                                    true -> KeyProperties.KEY_ALGORITHM_RSA
-                                                xmlAlgorithm.contains("EC", ignoreCase = true) ==
-                                                    true -> KeyProperties.KEY_ALGORITHM_EC
-                                                else -> xmlAlgorithm
-                                            }
-
-                                        // Warn the user if the XML tag was misleading.
-                                        if (normalizedXmlAlgorithm != derivedAlgorithm) {
-                                            SystemLogger.warning(
-                                                "Key algorithm mismatch in XML file. Tag said '$xmlAlgorithm' but key is actually '$derivedAlgorithm'. Using the correct derived algorithm."
-                                            )
-                                        }
-
-                                        if (foundKeys.containsKey(derivedAlgorithm)) {
-                                            SystemLogger.warning(
-                                                "Duplicate key found for algorithm '$derivedAlgorithm'. The later one in the file will be used."
-                                            )
-                                        }
-                                        foundKeys[derivedAlgorithm] = KeyBox(keyPair, certificates)
+                                val xmlAlgorithm = currentAlgorithm
+                                val keyPem = currentPrivateKeyPem
+                                if (
+                                    xmlAlgorithm != null &&
+                                        keyPem != null &&
+                                        currentCertificatePems.isNotEmpty()
+                                ) {
+                                    val keyPair =
+                                        (CertificateHelper.parsePemKeyPair(keyPem)
+                                                as CertificateHelper.OperationResult.Success)
+                                            .data
+                                    val certificates = currentCertificatePems.map {
+                                        (CertificateHelper.parsePemCertificate(it)
+                                                as CertificateHelper.OperationResult.Success)
+                                            .data
                                     }
+
+                                    // Derive the TRUE algorithm from the key object itself.
+                                    // This is our source of truth.
+                                    val derivedAlgorithm =
+                                        when (keyPair.private) {
+                                            is RSAPrivateKey -> KeyProperties.KEY_ALGORITHM_RSA
+                                            is ECPrivateKey -> KeyProperties.KEY_ALGORITHM_EC
+                                            else ->
+                                                throw IllegalArgumentException(
+                                                    "Unsupported key type found: ${keyPair.private.javaClass.name}"
+                                                )
+                                        }
+
+                                    // Normalize the algorithm from the XML tag to compare it
+                                    // fairly with the derived algorithm.
+                                    val normalizedXmlAlgorithm =
+                                        when {
+                                            xmlAlgorithm.contains("RSA", ignoreCase = true) ==
+                                                true -> KeyProperties.KEY_ALGORITHM_RSA
+                                            xmlAlgorithm.contains("EC", ignoreCase = true) ==
+                                                true -> KeyProperties.KEY_ALGORITHM_EC
+                                            else -> xmlAlgorithm
+                                        }
+
+                                    // Warn the user if the XML tag was misleading.
+                                    if (normalizedXmlAlgorithm != derivedAlgorithm) {
+                                        SystemLogger.warning(
+                                            "Key algorithm mismatch in XML file. Tag said '$xmlAlgorithm' but key is actually '$derivedAlgorithm'. Using the correct derived algorithm."
+                                        )
+                                    }
+
+                                    if (foundKeys.containsKey(derivedAlgorithm)) {
+                                        SystemLogger.warning(
+                                            "Duplicate key found for algorithm '$derivedAlgorithm'. The later one in the file will be used."
+                                        )
+                                    }
+                                    foundKeys[derivedAlgorithm] = KeyBox(keyPair, certificates)
                                 }
+                            }
                                 .onFailure {
                                     SystemLogger.error(
                                         "Failed to parse a <Key> entry for algorithm '$currentAlgorithm'",

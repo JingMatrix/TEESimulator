@@ -229,63 +229,63 @@ class KeyMintSecurityLevelInterceptor(
      */
     private fun handleGenerateKey(callingUid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-                val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
-                val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
-                SystemLogger.debug(
-                    "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
+            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
+            val keyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)!!
+            val attestationKey = data.readTypedObject(KeyDescriptor.CREATOR)
+            SystemLogger.debug(
+                "Handling generateKey ${keyDescriptor.alias}, attestKey=${attestationKey?.alias}"
+            )
+            val params = data.createTypedArray(KeyParameter.CREATOR)!!
+            val parsedParams = KeyMintAttestation(params)
+            val isAttestKeyRequest = parsedParams.isAttestKey()
+
+            // Determine if we need to generate a key based on config or
+            // if it's an attestation request in patch mode.
+            val needsSoftwareGeneration =
+                ConfigurationManager.shouldGenerate(callingUid) ||
+                    (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
+                    (attestationKey != null &&
+                        isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
+
+            if (needsSoftwareGeneration) {
+                keyDescriptor.nspace = secureRandom.nextLong()
+                SystemLogger.info(
+                    "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
                 )
-                val params = data.createTypedArray(KeyParameter.CREATOR)!!
-                val parsedParams = KeyMintAttestation(params)
-                val isAttestKeyRequest = parsedParams.isAttestKey()
 
-                // Determine if we need to generate a key based on config or
-                // if it's an attestation request in patch mode.
-                val needsSoftwareGeneration =
-                    ConfigurationManager.shouldGenerate(callingUid) ||
-                        (ConfigurationManager.shouldPatch(callingUid) && isAttestKeyRequest) ||
-                        (attestationKey != null &&
-                            isAttestationKey(KeyIdentifier(callingUid, attestationKey.alias)))
+                // Generate the key pair and certificate chain.
+                val keyData =
+                    CertificateGenerator.generateAttestedKeyPair(
+                        callingUid,
+                        keyDescriptor.alias,
+                        attestationKey?.alias,
+                        parsedParams,
+                        securityLevel,
+                    ) ?: throw Exception("CertificateGenerator failed to create key pair.")
 
-                if (needsSoftwareGeneration) {
-                    keyDescriptor.nspace = secureRandom.nextLong()
-                    SystemLogger.info(
-                        "Generating software key for ${keyDescriptor.alias}[${keyDescriptor.nspace}]."
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                // It is unnecessary but a good practice to clean up possible caches
+                cleanupKeyData(keyId)
+                // Store the generated key data.
+                val response =
+                    buildKeyEntryResponse(
+                        callingUid,
+                        keyData.second,
+                        parsedParams,
+                        keyDescriptor,
                     )
+                generatedKeys[keyId] =
+                    GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
+                if (isAttestKeyRequest) attestationKeys.add(keyId)
 
-                    // Generate the key pair and certificate chain.
-                    val keyData =
-                        CertificateGenerator.generateAttestedKeyPair(
-                            callingUid,
-                            keyDescriptor.alias,
-                            attestationKey?.alias,
-                            parsedParams,
-                            securityLevel,
-                        ) ?: throw Exception("CertificateGenerator failed to create key pair.")
-
-                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
-                    // It is unnecessary but a good practice to clean up possible caches
-                    cleanupKeyData(keyId)
-                    // Store the generated key data.
-                    val response =
-                        buildKeyEntryResponse(
-                            callingUid,
-                            keyData.second,
-                            parsedParams,
-                            keyDescriptor,
-                        )
-                    generatedKeys[keyId] =
-                        GeneratedKeyInfo(keyData.first, keyDescriptor.nspace, response)
-                    if (isAttestKeyRequest) attestationKeys.add(keyId)
-
-                    // Return the metadata of our generated key, skipping the real hardware call.
-                    InterceptorUtils.createTypedObjectReply(response.metadata)
-                } else if (parsedParams.attestationChallenge != null) {
-                    TransactionResult.Continue
-                } else {
-                    TransactionResult.ContinueAndSkipPost
-                }
+                // Return the metadata of our generated key, skipping the real hardware call.
+                InterceptorUtils.createTypedObjectReply(response.metadata)
+            } else if (parsedParams.attestationChallenge != null) {
+                TransactionResult.Continue
+            } else {
+                TransactionResult.ContinueAndSkipPost
             }
+        }
             .getOrElse {
                 SystemLogger.error("No key pair generated for UID $callingUid.", it)
                 TransactionResult.ContinueAndSkipPost

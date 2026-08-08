@@ -126,8 +126,9 @@ object ConfigurationManager {
     fun getPatchLevelForUid(uid: Int): CustomPatchLevel? {
         val packages = getPackagesForUid(uid)
         // Find the first package-specific configuration for this UID.
-        val packageSpecificPatchLevel =
-            packages.firstNotNullOfOrNull { pkg -> packagePatchLevels[pkg] }
+        val packageSpecificPatchLevel = packages.firstNotNullOfOrNull { pkg ->
+            packagePatchLevels[pkg]
+        }
         return packageSpecificPatchLevel ?: globalCustomPatchLevel
     }
 

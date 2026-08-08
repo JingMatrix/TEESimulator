@@ -69,24 +69,24 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
     private fun setupSecurityLevelInterceptors(service: IKeystoreService, backdoor: IBinder) {
         // Attempt to get and intercept the TEE security level service.
         runCatching {
-                service.getSecurityLevel(SecurityLevel.TRUSTED_ENVIRONMENT)?.let { tee ->
-                    SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
-                    register(backdoor, tee.asBinder(), interceptor)
-                }
+            service.getSecurityLevel(SecurityLevel.TRUSTED_ENVIRONMENT)?.let { tee ->
+                SystemLogger.info("Found TEE SecurityLevel. Registering interceptor...")
+                val interceptor =
+                    KeyMintSecurityLevelInterceptor(tee, SecurityLevel.TRUSTED_ENVIRONMENT)
+                register(backdoor, tee.asBinder(), interceptor)
             }
+        }
             .onFailure { SystemLogger.error("Failed to intercept TEE SecurityLevel.", it) }
 
         // Attempt to get and intercept the StrongBox security level service.
         runCatching {
-                service.getSecurityLevel(SecurityLevel.STRONGBOX)?.let { strongbox ->
-                    SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
-                    val interceptor =
-                        KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
-                    register(backdoor, strongbox.asBinder(), interceptor)
-                }
+            service.getSecurityLevel(SecurityLevel.STRONGBOX)?.let { strongbox ->
+                SystemLogger.info("Found StrongBox SecurityLevel. Registering interceptor...")
+                val interceptor =
+                    KeyMintSecurityLevelInterceptor(strongbox, SecurityLevel.STRONGBOX)
+                register(backdoor, strongbox.asBinder(), interceptor)
             }
+        }
             .onFailure { SystemLogger.error("Failed to intercept StrongBox SecurityLevel.", it) }
     }
 
@@ -193,14 +193,14 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             return runCatching {
-                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
-                    val params =
-                        ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
-                            ?: throw Exception("Abort updating entries for invalid parameters.")
-                    val updatedKeyDescriptors =
-                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, params, reply)
-                    InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
-                }
+                val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
+                val params =
+                    ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
+                        ?: throw Exception("Abort updating entries for invalid parameters.")
+                val updatedKeyDescriptors =
+                    ListEntriesHandler.injectGeneratedKeys(txId, callingUid, params, reply)
+                InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
+            }
                 .getOrElse {
                     SystemLogger.error(
                         "[TX_ID: $txId] Failed to update the result of ${transactionNames[code]!!}.",
@@ -222,95 +222,94 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             )
 
             runCatching {
-                    val response = reply.readTypedObject(KeyEntryResponse.CREATOR)!!
-                    val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
+                val response = reply.readTypedObject(KeyEntryResponse.CREATOR)!!
+                val keyId = KeyIdentifier(callingUid, keyDescriptor.alias)
 
-                    val authorizations = response.metadata.authorizations
-                    val parsedParameters =
-                        KeyMintAttestation(
-                            authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
-                        )
+                val authorizations = response.metadata.authorizations
+                val parsedParameters =
+                    KeyMintAttestation(
+                        authorizations?.map { it.keyParameter }?.toTypedArray() ?: emptyArray()
+                    )
 
-                    if (parsedParameters.isImportKey()) {
-                        SystemLogger.info("[TX_ID: $txId] Skip patching for imported keys.")
-                        return TransactionResult.SkipTransaction
-                    }
+                if (parsedParameters.isImportKey()) {
+                    SystemLogger.info("[TX_ID: $txId] Skip patching for imported keys.")
+                    return TransactionResult.SkipTransaction
+                }
 
-                    if (parsedParameters.isAttestKey()) {
-                        SystemLogger.warning(
-                            "[TX_ID: $txId] Found hardware attest key ${keyId.alias} in the reply."
-                        )
-                        // Attest keys that are not under our control should be overriden.
-                        val keyData =
-                            CertificateGenerator.generateAttestedKeyPair(
-                                callingUid,
-                                keyId.alias,
-                                null,
-                                parsedParameters,
-                                response.metadata.keySecurityLevel,
-                            ) ?: throw Exception("Failed to create overriding attest key pair.")
-
-                        CertificateHelper.updateCertificateChain(
-                                callingUid,
-                                response.metadata,
-                                keyData.second.toTypedArray(),
-                            )
-                            .getOrThrow()
-
-                        val key = response.metadata.key!!
-                        key.nspace = SecureRandom().nextLong()
-                        KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
-                            KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
-                                keyData.first,
-                                key.nspace,
-                                response,
-                            )
-                        KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
-                        return InterceptorUtils.createTypedObjectReply(response)
-                    }
-
-                    val originalChain = CertificateHelper.getCertificateChain(response)
-
-                    // Check if we should perform attestation patch.
-                    if (originalChain == null || originalChain.size < 2) {
-                        SystemLogger.info(
-                            "[TX_ID: $txId] Skip patching short certificate chain of length ${originalChain?.size}."
-                        )
-                        return TransactionResult.SkipTransaction
-                    }
-
-                    // First, try to retrieve the already-patched chain from our cache to ensure
-                    // consistency.
-                    val cachedChain = KeyMintSecurityLevelInterceptor.getPatchedChain(keyId)
-
-                    val finalChain: Array<Certificate>
-                    if (cachedChain != null) {
-                        SystemLogger.debug(
-                            "[TX_ID: $txId] Using cached patched certificate chain for $keyId."
-                        )
-                        finalChain = cachedChain
-                    } else {
-                        // If no chain is cached (e.g., key existed before simulator started),
-                        // perform a live patch as a fallback. This may still be detectable.
-                        SystemLogger.info(
-                            "[TX_ID: $txId] No cached chain for $keyId. Performing live patch as a fallback."
-                        )
-                        finalChain =
-                            AttestationPatcher.patchCertificateChain(originalChain, callingUid)
-
-                        KeyMintSecurityLevelInterceptor.patchedChains[keyId] = finalChain
-                        SystemLogger.debug("Cached patched certificate chain for $keyId.")
-                    }
+                if (parsedParameters.isAttestKey()) {
+                    SystemLogger.warning(
+                        "[TX_ID: $txId] Found hardware attest key ${keyId.alias} in the reply."
+                    )
+                    // Attest keys that are not under our control should be overriden.
+                    val keyData =
+                        CertificateGenerator.generateAttestedKeyPair(
+                            callingUid,
+                            keyId.alias,
+                            null,
+                            parsedParameters,
+                            response.metadata.keySecurityLevel,
+                        ) ?: throw Exception("Failed to create overriding attest key pair.")
 
                     CertificateHelper.updateCertificateChain(
                             callingUid,
                             response.metadata,
-                            finalChain,
+                            keyData.second.toTypedArray(),
                         )
                         .getOrThrow()
 
+                    val key = response.metadata.key!!
+                    key.nspace = SecureRandom().nextLong()
+                    KeyMintSecurityLevelInterceptor.generatedKeys[keyId] =
+                        KeyMintSecurityLevelInterceptor.GeneratedKeyInfo(
+                            keyData.first,
+                            key.nspace,
+                            response,
+                        )
+                    KeyMintSecurityLevelInterceptor.attestationKeys.add(keyId)
                     return InterceptorUtils.createTypedObjectReply(response)
                 }
+
+                val originalChain = CertificateHelper.getCertificateChain(response)
+
+                // Check if we should perform attestation patch.
+                if (originalChain == null || originalChain.size < 2) {
+                    SystemLogger.info(
+                        "[TX_ID: $txId] Skip patching short certificate chain of length ${originalChain?.size}."
+                    )
+                    return TransactionResult.SkipTransaction
+                }
+
+                // First, try to retrieve the already-patched chain from our cache to ensure
+                // consistency.
+                val cachedChain = KeyMintSecurityLevelInterceptor.getPatchedChain(keyId)
+
+                val finalChain: Array<Certificate>
+                if (cachedChain != null) {
+                    SystemLogger.debug(
+                        "[TX_ID: $txId] Using cached patched certificate chain for $keyId."
+                    )
+                    finalChain = cachedChain
+                } else {
+                    // If no chain is cached (e.g., key existed before simulator started),
+                    // perform a live patch as a fallback. This may still be detectable.
+                    SystemLogger.info(
+                        "[TX_ID: $txId] No cached chain for $keyId. Performing live patch as a fallback."
+                    )
+                    finalChain = AttestationPatcher.patchCertificateChain(originalChain, callingUid)
+
+                    KeyMintSecurityLevelInterceptor.patchedChains[keyId] = finalChain
+                    SystemLogger.debug("Cached patched certificate chain for $keyId.")
+                }
+
+                CertificateHelper.updateCertificateChain(
+                        callingUid,
+                        response.metadata,
+                        finalChain,
+                    )
+                    .getOrThrow()
+
+                return InterceptorUtils.createTypedObjectReply(response)
+            }
                 .onFailure {
                     SystemLogger.error(
                         "[TX_ID: $txId] Failed to modify hardware KeyEntryResponse.",

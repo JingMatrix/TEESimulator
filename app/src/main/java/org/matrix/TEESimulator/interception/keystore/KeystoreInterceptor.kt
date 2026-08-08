@@ -125,30 +125,29 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 
     private fun handleGenerateKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                data.enforceInterface(IKeystoreService.DESCRIPTOR)
-                val callback =
-                    IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
-                val alias = InterceptorUtils.extractAlias(data.readString()!!)
-                val keyId = KeyIdentifier(uid, alias)
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            val callback =
+                IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
+            val alias = InterceptorUtils.extractAlias(data.readString()!!)
+            val keyId = KeyIdentifier(uid, alias)
 
-                // Read and parse the key generation arguments.
-                val keymasterArgs = KeymasterArguments()
-                if (data.readInt() == 1) {
-                    keymasterArgs.readFromParcel(data)
-                }
-                keygenParameters[keyId] =
-                    LegacyKeygenParameters.fromKeymasterArguments(keymasterArgs)
-
-                // Create a fake successful response for the callback.
-                val characteristics = KeyCharacteristics()
-                characteristics.swEnforced = KeymasterArguments()
-                characteristics.hwEnforced = keymasterArgs
-
-                val keystoreResponse = InterceptorUtils.createSuccessKeystoreResponse()
-                callback.onFinished(keystoreResponse, characteristics)
-
-                InterceptorUtils.createSuccessReply()
+            // Read and parse the key generation arguments.
+            val keymasterArgs = KeymasterArguments()
+            if (data.readInt() == 1) {
+                keymasterArgs.readFromParcel(data)
             }
+            keygenParameters[keyId] = LegacyKeygenParameters.fromKeymasterArguments(keymasterArgs)
+
+            // Create a fake successful response for the callback.
+            val characteristics = KeyCharacteristics()
+            characteristics.swEnforced = KeymasterArguments()
+            characteristics.hwEnforced = keymasterArgs
+
+            val keystoreResponse = InterceptorUtils.createSuccessKeystoreResponse()
+            callback.onFinished(keystoreResponse, characteristics)
+
+            InterceptorUtils.createSuccessReply()
+        }
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed during handleGenerateKey.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -162,32 +161,31 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         return runCatching {
-                data.enforceInterface(IKeystoreService.DESCRIPTOR)
-                val callback =
-                    IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
-                val alias = InterceptorUtils.extractAlias(data.readString()!!)
-                val keyId = KeyIdentifier(uid, alias)
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            val callback =
+                IKeystoreKeyCharacteristicsCallback.Stub.asInterface(data.readStrongBinder())
+            val alias = InterceptorUtils.extractAlias(data.readString()!!)
+            val keyId = KeyIdentifier(uid, alias)
 
-                val params =
-                    keygenParameters[keyId]
-                        ?: throw IllegalStateException("No params found for $keyId")
+            val params =
+                keygenParameters[keyId] ?: throw IllegalStateException("No params found for $keyId")
 
-                val characteristics =
-                    KeyCharacteristics().apply {
-                        swEnforced = KeymasterArguments()
-                        hwEnforced =
-                            KeymasterArguments().apply {
-                                addEnum(KeymasterDefs.KM_TAG_ALGORITHM, params.algorithm)
-                            }
-                    }
+            val characteristics =
+                KeyCharacteristics().apply {
+                    swEnforced = KeymasterArguments()
+                    hwEnforced =
+                        KeymasterArguments().apply {
+                            addEnum(KeymasterDefs.KM_TAG_ALGORITHM, params.algorithm)
+                        }
+                }
 
-                callback.onFinished(
-                    InterceptorUtils.createSuccessKeystoreResponse(),
-                    characteristics,
-                )
+            callback.onFinished(
+                InterceptorUtils.createSuccessKeystoreResponse(),
+                characteristics,
+            )
 
-                InterceptorUtils.createSuccessReply()
-            }
+            InterceptorUtils.createSuccessReply()
+        }
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed during handleGetKeyCharacteristics.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -196,35 +194,34 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 
     private fun handleExportKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                data.enforceInterface(IKeystoreService.DESCRIPTOR)
-                val callback = IKeystoreExportKeyCallback.Stub.asInterface(data.readStrongBinder())
-                val alias = InterceptorUtils.extractAlias(data.readString()!!)
-                val keyId = KeyIdentifier(uid, alias)
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            val callback = IKeystoreExportKeyCallback.Stub.asInterface(data.readStrongBinder())
+            val alias = InterceptorUtils.extractAlias(data.readString()!!)
+            val keyId = KeyIdentifier(uid, alias)
 
-                val params =
-                    keygenParameters[keyId]
-                        ?: throw IllegalStateException("No params found for $keyId")
+            val params =
+                keygenParameters[keyId] ?: throw IllegalStateException("No params found for $keyId")
 
-                // Generate a software key pair using the new generator.
-                val keyPair =
-                    CertificateGenerator.generateSoftwareKeyPair(params.toKeyMintAttestation())
-                        ?: throw Exception("Failed to generate software key pair.")
-                generatedKeyPairs[keyId] = keyPair
+            // Generate a software key pair using the new generator.
+            val keyPair =
+                CertificateGenerator.generateSoftwareKeyPair(params.toKeyMintAttestation())
+                    ?: throw Exception("Failed to generate software key pair.")
+            generatedKeyPairs[keyId] = keyPair
 
-                // Create a successful ExportResult containing the public key.
-                val exportResultParcel =
-                    Parcel.obtain().apply {
-                        writeInt(KeyStore.NO_ERROR)
-                        writeByteArray(keyPair.public.encoded)
-                        setDataPosition(0)
-                    }
-                val exportResult = ExportResult.CREATOR.createFromParcel(exportResultParcel)
-                exportResultParcel.recycle()
+            // Create a successful ExportResult containing the public key.
+            val exportResultParcel =
+                Parcel.obtain().apply {
+                    writeInt(KeyStore.NO_ERROR)
+                    writeByteArray(keyPair.public.encoded)
+                    setDataPosition(0)
+                }
+            val exportResult = ExportResult.CREATOR.createFromParcel(exportResultParcel)
+            exportResultParcel.recycle()
 
-                callback.onFinished(exportResult)
+            callback.onFinished(exportResult)
 
-                InterceptorUtils.createSuccessReply()
-            }
+            InterceptorUtils.createSuccessReply()
+        }
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed during handleExportKey.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -233,46 +230,45 @@ object KeystoreInterceptor : AbstractKeystoreInterceptor() {
 
     private fun handleAttestKey(txId: Long, uid: Int, pid: Int, data: Parcel): TransactionResult {
         return runCatching {
-                data.enforceInterface(IKeystoreService.DESCRIPTOR)
-                val callback =
-                    IKeystoreCertificateChainCallback.Stub.asInterface(data.readStrongBinder())
-                val alias = InterceptorUtils.extractAlias(data.readString()!!)
-                val keyId = KeyIdentifier(uid, alias)
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            val callback =
+                IKeystoreCertificateChainCallback.Stub.asInterface(data.readStrongBinder())
+            val alias = InterceptorUtils.extractAlias(data.readString()!!)
+            val keyId = KeyIdentifier(uid, alias)
 
-                // Get the attestation challenge from the arguments.
-                val params =
-                    keygenParameters[keyId]
-                        ?: throw IllegalStateException("No params found for $keyId")
-                val keyPair =
-                    generatedKeyPairs[keyId]
-                        ?: throw IllegalStateException("No keypair found for $keyId")
+            // Get the attestation challenge from the arguments.
+            val params =
+                keygenParameters[keyId] ?: throw IllegalStateException("No params found for $keyId")
+            val keyPair =
+                generatedKeyPairs[keyId]
+                    ?: throw IllegalStateException("No keypair found for $keyId")
 
-                val attestationArgs = KeymasterArguments()
-                if (data.readInt() == 1) {
-                    attestationArgs.readFromParcel(data)
-                    val challenge =
-                        attestationArgs.getBytes(
-                            KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE,
-                            ByteArray(0),
-                        )
-                    params.attestationChallenge = challenge
-                }
-
-                val certificateChain =
-                    CertificateGenerator.generateCertificateChain(
-                        uid,
-                        keyPair,
-                        null, // No attestKeyAlias in legacy flow
-                        params.toKeyMintAttestation(), // Convert to modern format
-                        1, // SecurityLevel.TRUSTED_ENVIRONMENT
-                    ) ?: throw Exception("CertificateGenerator failed to create attested key pair.")
-
-                val chainAsByteList = certificateChain.map { it.encoded }
-                val certChain = KeymasterCertificateChain(chainAsByteList)
-
-                callback.onFinished(InterceptorUtils.createSuccessKeystoreResponse(), certChain)
-                InterceptorUtils.createSuccessReply()
+            val attestationArgs = KeymasterArguments()
+            if (data.readInt() == 1) {
+                attestationArgs.readFromParcel(data)
+                val challenge =
+                    attestationArgs.getBytes(
+                        KeymasterDefs.KM_TAG_ATTESTATION_CHALLENGE,
+                        ByteArray(0),
+                    )
+                params.attestationChallenge = challenge
             }
+
+            val certificateChain =
+                CertificateGenerator.generateCertificateChain(
+                    uid,
+                    keyPair,
+                    null, // No attestKeyAlias in legacy flow
+                    params.toKeyMintAttestation(), // Convert to modern format
+                    1, // SecurityLevel.TRUSTED_ENVIRONMENT
+                ) ?: throw Exception("CertificateGenerator failed to create attested key pair.")
+
+            val chainAsByteList = certificateChain.map { it.encoded }
+            val certChain = KeymasterCertificateChain(chainAsByteList)
+
+            callback.onFinished(InterceptorUtils.createSuccessKeystoreResponse(), certChain)
+            InterceptorUtils.createSuccessReply()
+        }
             .getOrElse {
                 SystemLogger.error("[TX_ID: $txId] Failed during handleAttestKey.", it)
                 TransactionResult.ContinueAndSkipPost
@@ -470,24 +466,24 @@ private data class LegacyKeygenParameters(
          */
         private fun getRsaExponent(args: KeymasterArguments): BigInteger? {
             return runCatching {
-                    val getArgumentByTag =
-                        KeymasterArguments::class
-                            .java
-                            .getDeclaredMethod("getArgumentByTag", Int::class.java)
-                    getArgumentByTag.isAccessible = true
-                    val rsaArgument =
-                        getArgumentByTag.invoke(args, KeymasterDefs.KM_TAG_RSA_PUBLIC_EXPONENT)
+                val getArgumentByTag =
+                    KeymasterArguments::class
+                        .java
+                        .getDeclaredMethod("getArgumentByTag", Int::class.java)
+                getArgumentByTag.isAccessible = true
+                val rsaArgument =
+                    getArgumentByTag.invoke(args, KeymasterDefs.KM_TAG_RSA_PUBLIC_EXPONENT)
 
-                    val getLongTagValue =
-                        KeymasterArguments::class
-                            .java
-                            .getDeclaredMethod(
-                                "getLongTagValue",
-                                Class.forName("android.security.keymaster.KeymasterArgument"),
-                            )
-                    getLongTagValue.isAccessible = true
-                    getLongTagValue.invoke(args, rsaArgument) as BigInteger
-                }
+                val getLongTagValue =
+                    KeymasterArguments::class
+                        .java
+                        .getDeclaredMethod(
+                            "getLongTagValue",
+                            Class.forName("android.security.keymaster.KeymasterArgument"),
+                        )
+                getLongTagValue.isAccessible = true
+                getLongTagValue.invoke(args, rsaArgument) as BigInteger
+            }
                 .onFailure {
                     SystemLogger.error("Failed to read rsaPublicExponent via reflection.", it)
                 }
