@@ -1,0 +1,14 @@
+[versions]
+agp = "9.3.1"
+annotation = "1.10.0"
+jdk18on = "1.85"
+ktfmt = "0.27.0"
+
+[libraries]
+annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
+bcpkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "jdk18on" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+ktfmt = { id = "com.ncorti.ktfmt.gradle", version.ref = "ktfmt" }

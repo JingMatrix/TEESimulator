@@ -5,3 +5,9 @@ Cargo.lock
 compile_commands.json
 .cxx/
 /dist/
+
+# Gradle
+.gradle/
+/app/build/
+/stub/build/
+local.properties

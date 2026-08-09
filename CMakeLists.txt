@@ -86,34 +86,48 @@ add_custom_command(
     VERBATIM USES_TERMINAL)
 add_custom_target(rust_ta DEPENDS ${RUST_A})
 
-# --- How the TA reaches BoringSSL -------------------------------------------
-# On keystore2 (Android 12+) BoringSSL lives in the host process, so we link only
-# a stub libcrypto.so (empty functions with the right SONAME) and let the host's
-# real libcrypto provide the symbols at runtime. On Android 10 the host's libcrypto
-# is too old, so CRYPTO_STATIC_LIB bundles a modern static BoringSSL instead.
-set(CRYPTO_STATIC_LIB "" CACHE FILEPATH "Static libcrypto.a to bundle; empty = resolve libcrypto at runtime via a stub")
+# --- How the TAs reach BoringSSL --------------------------------------------
+# The two interceptors resolve BoringSSL differently, and a single configure now
+# builds both:
+#   * keymint (keystore2, Android 12+) links a stub libcrypto.so — empty functions
+#     carrying the right SONAME — and lets the host process's real libcrypto provide
+#     the symbols at runtime. exports.map hides everything but `entry`, so the stub
+#     never leaks.
+#   * keystore (Android 10/11) bundles a modern static BoringSSL, because the host's
+#     libcrypto is too old. That static `crypto` target is built internally below via
+#     add_subdirectory, inheriting this build's Android toolchain.
+# CRYPTO_STATIC_LIB stays as an optional override for a pre-built libcrypto.a.
+set(CRYPTO_STUB_C ${CMAKE_BINARY_DIR}/libcrypto_stub.c)
+file(STRINGS ${CMAKE_SOURCE_DIR}/keymint/libcrypto.syms _crypto_syms)
+set(_stub_body "")
+foreach(_s ${_crypto_syms})
+  string(APPEND _stub_body "void ${_s}(void){}\n")
+endforeach()
+file(WRITE ${CRYPTO_STUB_C} "${_stub_body}")
+add_library(crypto_stub SHARED ${CRYPTO_STUB_C})
+set_target_properties(crypto_stub PROPERTIES OUTPUT_NAME crypto)
+target_link_options(crypto_stub PRIVATE -nostdlib -Wl,-soname,libcrypto.so)
+set(CRYPTO_LINK crypto_stub)
+
+# The static BoringSSL the keystore interceptor bundles. Only the `crypto` target is
+# referenced, so BoringSSL's tools and tests never build (Go stays optional). A
+# caller may instead point CRYPTO_STATIC_LIB at a pre-built libcrypto.a.
+set(CRYPTO_STATIC_LIB "" CACHE FILEPATH "Pre-built static libcrypto.a to bundle; empty = build BoringSSL internally")
 if(CRYPTO_STATIC_LIB)
-  set(CRYPTO_LINK ${CRYPTO_STATIC_LIB})
+  set(KEYSTORE_CRYPTO ${CRYPTO_STATIC_LIB})
 else()
-  set(CRYPTO_STUB_C ${CMAKE_BINARY_DIR}/libcrypto_stub.c)
-  file(STRINGS ${CMAKE_SOURCE_DIR}/keymint/libcrypto.syms _crypto_syms)
-  set(_stub_body "")
-  foreach(_s ${_crypto_syms})
-    string(APPEND _stub_body "void ${_s}(void){}\n")
-  endforeach()
-  file(WRITE ${CRYPTO_STUB_C} "${_stub_body}")
-  add_library(crypto_stub SHARED ${CRYPTO_STUB_C})
-  set_target_properties(crypto_stub PROPERTIES OUTPUT_NAME crypto)
-  target_link_options(crypto_stub PRIVATE -nostdlib -Wl,-soname,libcrypto.so)
-  set(CRYPTO_LINK crypto_stub)
+  set(BUILD_SHARED_LIBS OFF)
+  add_subdirectory(${BORINGSSL_DIR} ${CMAKE_BINARY_DIR}/boringssl EXCLUDE_FROM_ALL)
+  set(KEYSTORE_CRYPTO crypto)
 endif()
 
 # --- The injected interceptor library ---------------------------------------
 add_library(teesim_keymint SHARED
-    keymint/keymint_router.cpp keymint/keymint_hook.cpp keymint/keymint_entry.cpp)
+    keymint/keymint_router.cpp keymint/keymint_hook.cpp keymint/keymint_entry.cpp
+    common/control.cpp common/json.cpp)
 add_dependencies(teesim_keymint rust_ta)
 target_include_directories(teesim_keymint PRIVATE
-    keymint injector/include rust/teesim-km/include ${LSPLT_JNI}/include)
+    keymint common injector/include rust/teesim-km/include ${LSPLT_JNI}/include)
 # libbinder_ndk and liblog come from the NDK sysroot; libcrypto is either the
 # runtime stub (shadowed by the host's copy) or a bundled static BoringSSL.
 target_link_libraries(teesim_keymint PRIVATE keymint_aidl lsplt ${RUST_A} ${CRYPTO_LINK} binder_ndk log)
@@ -129,12 +143,11 @@ target_link_options(teesim_keymint PRIVATE
 # Apps reach the keystore daemon over the C++ libbinder, which is not in the NDK.
 # Link stub libbinder/libutils (empty definitions carrying the right C++ ABI and
 # SONAMEs) so the device's real libraries provide the implementations at runtime.
-# Built only when a static BoringSSL is supplied: on Android 10/11 the TA's crypto
-# is bundled (CRYPTO_STATIC_LIB) rather than resolved from the host's older libcrypto.
+# The TA's crypto is bundled here (KEYSTORE_CRYPTO, a static BoringSSL) rather than
+# resolved from the host's older libcrypto.
 # The platform libbinder exports BBinder's vtable but not its RTTI typeinfo, so
 # anything deriving from BBinder must be built without RTTI (and, to match, without
 # exceptions) or it fails to load.
-if(CRYPTO_STATIC_LIB)
 set(AOSP ${CMAKE_SOURCE_DIR}/keystore/aosp)
 set(BINDER_CXX_FLAGS -fno-rtti -fno-exceptions)
 add_library(utils_stub SHARED ${AOSP}/stub_utils.cpp)
@@ -151,18 +164,18 @@ target_compile_options(binder_stub PRIVATE ${BINDER_CXX_FLAGS})
 target_link_libraries(binder_stub PRIVATE utils_stub)
 
 add_library(teesim_keystore SHARED
-    keystore/binder_interceptor.cpp keystore/keystore_router.cpp keystore/keystore_entry.cpp)
+    keystore/binder_interceptor.cpp keystore/keystore_router.cpp keystore/keystore_entry.cpp
+    common/control.cpp common/json.cpp)
 add_dependencies(teesim_keystore rust_ta)
 target_include_directories(teesim_keystore PRIVATE
-    keystore ${AOSP}/include injector/include ${LSPLT_JNI}/include
+    keystore common ${AOSP}/include injector/include ${LSPLT_JNI}/include
     rust/teesim-km/include ${BORINGSSL_DIR}/include)
 target_compile_definitions(teesim_keystore PRIVATE BINDER_DISABLE_NATIVE_HANDLE)
 target_compile_options(teesim_keystore PRIVATE ${BINDER_CXX_FLAGS})
 target_link_libraries(teesim_keystore PRIVATE
-    binder_stub utils_stub lsplt log ${RUST_A} ${CRYPTO_STATIC_LIB})
+    binder_stub utils_stub lsplt log ${RUST_A} ${KEYSTORE_CRYPTO})
 target_link_options(teesim_keystore PRIVATE
     -static-libstdc++
     -Wl,-z,undefs
     -Wl,--version-script=${CMAKE_SOURCE_DIR}/keymint/exports.map
     -Wl,--gc-sections)
-endif()
