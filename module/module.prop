@@ -1,6 +1,6 @@
 id=teesim
 name=TEESimulator
-version=v0.1.0
-versionCode=1
+version=${REPLACEMEVER}
+versionCode=${REPLACEMEVERCODE}
 author=JingMatrix
 description=Redirects key attestation for selected apps to an in-process reference KeyMint trusted application.

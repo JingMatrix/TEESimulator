@@ -1,7 +1,19 @@
-allow keystore adb_data_file dir search
-allow keystore adb_data_file file { read open getattr map }
-allow keystore ksu fd use
-allow ksu keystore fd use
-allow keystore ksu unix_dgram_socket { read write sendto }
-allow ksu keystore unix_dgram_socket { read write sendto connectto }
-allow keystore self unix_dgram_socket { create bind connect getopt setopt read write }
+# The interceptor runs in the keystore domain (keystore on Android 10/11, keystore2
+# on 12+) and binds an abstract unix socket; the root control daemon connects to it
+# to push the resolved config. Grant the keystore side the socket-server permissions.
+#
+# The daemon runs in the root manager's own already-privileged domain, which carries
+# connectto, but that domain name differs per manager — so the connectto rules below
+# are best-effort and may need adjustment on a given setup (DESIGN open question Q1).
+# If the socket path proves unworkable on some manager, the daemon can fall back to a
+# file the lib watches instead.
+allow keystore self unix_stream_socket { create bind listen accept getopt setopt read write shutdown }
+allow su keystore unix_stream_socket connectto
+allow magisk keystore unix_stream_socket connectto
+
+# The `inject` binary attaches to the keystore process with PTRACE_ATTACH (it runs
+# in the crash_dump domain), and keystore then dlopen()s the interceptor .so that
+# lives under /data/adb (adb_data_file). Both are required for injection to work on
+# an enforcing-SELinux device.
+allow crash_dump keystore process *
+allow keystore adb_data_file file *

@@ -1,0 +1,20 @@
+#!/system/bin/sh
+# Launches the Kotlin control daemon under app_process.
+#
+#   $1 = MODDIR (the module directory holding classes.dex and $ABI/inject + libs)
+
+MODDIR=$1
+
+if [ -f "$MODDIR/classes.dex" ]; then
+  CLASSPATH="$MODDIR/classes.dex"
+elif [ -f "$MODDIR/service.apk" ]; then
+  CLASSPATH="$MODDIR/service.apk"
+else
+  echo "teesim: neither classes.dex nor service.apk in $MODDIR" >&2
+  exit 1
+fi
+
+# The trailing "$MODDIR" is args[0] to App.main, telling the daemon where the inject
+# binary and native libraries live.
+exec /system/bin/app_process -Djava.class.path="$CLASSPATH" "$MODDIR" \
+  --nice-name=teesim org.matrix.teesim.App "$MODDIR"
