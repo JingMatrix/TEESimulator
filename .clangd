@@ -1,0 +1,4 @@
+# Point clangd at the compile database produced by scripts/gen-compile-commands.sh,
+# which configures every C++ target (injector, keymint, keystore) in one place.
+CompileFlags:
+  CompilationDatabase: build/compdb
