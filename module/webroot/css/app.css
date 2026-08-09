@@ -1,0 +1,398 @@
+/* Component + layout classes. Colours come only from theme.css tokens — no
+ * hardcoded colours here. Built mobile-first for a phone webview: a fixed bottom
+ * nav, one scrolling screen at a time, generous spacing, ≥44px touch targets, and
+ * overlays (dialogs / sheets / drill-ins) that slide over everything. Safe areas
+ * are handled by the fixed bars and by the body padding in theme.css. */
+
+:root {
+  --topbar-h: 52px;
+  --nav-h: 60px;
+  --maxw: 720px;
+  --radius: 14px;
+  --radius-sm: 10px;
+}
+
+/* --- top bar ------------------------------------------------------------- */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: var(--topbar-h); padding: 8px 16px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.topbar-title { font-size: 17px; font-weight: 700; }
+
+.healthpill {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--chip); border-radius: 999px; padding: 5px 12px;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+}
+.healthpill-label { white-space: nowrap; }
+
+/* --- screens (one visible at a time) ------------------------------------ */
+#screens { display: block; }
+.screen {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 14px; padding-bottom: calc(var(--nav-h) + 20px);
+  max-width: var(--maxw); margin: 0 auto;
+  min-height: calc(100dvh - var(--topbar-h));
+}
+
+/* --- bottom navigation -------------------------------------------------- */
+.bottomnav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 15;
+  display: flex; justify-content: center; gap: 2px;
+  background: var(--card); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.navitem {
+  position: relative;
+  flex: 1 1 0; max-width: 140px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  min-height: var(--nav-h); padding: 6px 4px;
+  border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.navitem.active { color: var(--accent); }
+.navitem:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.navicon { width: 24px; height: 24px; }
+.navlabel { line-height: 1; }
+.badge {
+  position: absolute; top: 8px; left: 50%; margin-left: 6px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--warn); box-shadow: 0 0 0 2px var(--card);
+}
+
+/* --- panel heads (each controller paints its own) ----------------------- */
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
+.panel-title { margin: 0; font-size: 20px; font-weight: 700; }
+.panel-actions { display: flex; gap: 8px; }
+
+/* --- cards & rows ------------------------------------------------------- */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.card h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.card h3 { margin: 0; font-size: 14px; }
+.card.empty { align-items: flex-start; }
+
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.status { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--ok); }
+.dot.off { background: var(--off); }
+.dot.warn { background: var(--warn); }
+
+/* --- summary list (profiles) -------------------------------------------- */
+.list { display: flex; flex-direction: column; gap: 10px; }
+.list-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; min-height: 60px; font: inherit; color: var(--fg); cursor: pointer;
+}
+.list-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.list-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.list-title { font-weight: 700; font-size: 15px; }
+.list-chevron { flex: none; width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); }
+
+/* --- chips -------------------------------------------------------------- */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
+.chip.good { color: var(--ok); font-weight: 600; }
+.chip.warn { color: var(--warn); font-weight: 600; }
+.chip.mono { font-family: ui-monospace, monospace; }
+.chip.small { padding: 1px 7px; font-size: 11px; }
+.chip.clickable { border: 0; font: inherit; font-size: 12px; color: var(--fg); cursor: pointer; min-height: 44px; }
+.chip.clickable.selected { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.chip.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chip.removable { padding-right: 4px; }
+.chip-x { position: relative; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 6px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; }
+/* Keep the ✕ glyph visually compact but expand its tap target to 44px. The overlay
+ * is part of the button, so taps in the padded ring still hit it, without enlarging
+ * the chip's layout box. */
+.chip-x::after { content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); min-width: 44px; min-height: 44px; }
+
+.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 700; background: var(--chip); color: var(--fg); }
+.pill.warn { background: var(--warn); color: var(--accent-fg); }
+
+/* --- forms -------------------------------------------------------------- */
+.group { border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.group legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 13px; font-weight: 600; }
+.field-help { color: var(--muted); font-size: 12px; margin: 0; }
+
+.input {
+  width: 100%; min-width: 0; min-height: 44px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--fg);
+  border-radius: var(--radius-sm); padding: 10px 12px; font: inherit;
+}
+.input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.input.invalid { border-color: var(--danger); }
+select.input { appearance: none; }
+input[type="file"].input { padding: 8px 10px; }
+
+.patch { display: flex; flex-direction: column; gap: 6px; }
+.quickpicks { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* Extra separation above the "add package" row so it reads as an action distinct
+ * from the app badges above it. */
+.add-row { display: flex; gap: 8px; margin-top: 12px; }
+.add-row .input { flex: 1; }
+.applist { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.err { color: var(--danger); font-size: 12px; }
+.banner { background: var(--chip); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.banner.error { border-color: var(--danger); }
+.banner.error > div:first-child { color: var(--danger); font-weight: 600; }
+
+.save-bar { flex-direction: row; align-items: center; justify-content: space-between; }
+
+/* --- buttons ------------------------------------------------------------ */
+.btn { border: 0; border-radius: var(--radius-sm); min-height: 44px; padding: 10px 16px; font: inherit; font-weight: 600; background: var(--chip); color: var(--fg); cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.danger { background: var(--danger); color: var(--danger-fg); }
+.btn.ghost { background: transparent; border: 1px solid var(--line); }
+.btn.danger.ghost { color: var(--danger); background: transparent; border: 1px solid var(--danger); }
+/* "small" stays visually light via the smaller font and tighter horizontal
+ * padding, but keeps a full 44px hit height for the touch-target minimum. */
+.btn.small { min-height: 44px; padding: 6px 12px; font-size: 13px; }
+.btn.block { width: 100%; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.active { box-shadow: inset 0 0 0 2px var(--accent); }
+
+.iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; flex: none;
+  border: 0; background: transparent; color: var(--fg); cursor: pointer; border-radius: 10px;
+}
+.iconbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.chevron-left { width: 11px; height: 11px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); }
+.x-mark { position: relative; width: 16px; height: 16px; }
+.x-mark::before, .x-mark::after { content: ""; position: absolute; top: 50%; left: 0; width: 100%; height: 2px; background: currentColor; }
+.x-mark::before { transform: rotate(45deg); }
+.x-mark::after { transform: rotate(-45deg); }
+
+/* --- keys --------------------------------------------------------------- */
+/* The keys panel: a search card (filter box + selection menu) above a separate list card. */
+.filter-field { position: relative; display: flex; align-items: center; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 6px 0 12px; }
+.filter-field:focus-within { border-color: var(--accent); }
+.filter-input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 11px 0; color: var(--fg); font: inherit; outline: none; }
+.filter-menu-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 7px; }
+.filter-menu-btn:hover, .filter-menu-btn[aria-expanded="true"] { color: var(--accent); background: var(--accent-weak, rgba(120, 150, 255, 0.12)); }
+.sel-icon { position: relative; width: 16px; height: 16px; border: 1.5px solid currentColor; border-radius: 3px; }
+.sel-icon::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.selmenu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.selmenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 41; min-width: 190px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 6px; }
+.selmenu button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: transparent; color: var(--fg); cursor: pointer; border-radius: 6px; font: inherit; }
+.selmenu button:hover { background: var(--accent-weak, rgba(120, 150, 255, 0.12)); }
+.keypanel { padding: 16px; }
+.keyempty { margin: 0; }
+.keylist { list-style: none; margin: 0; padding: 0; }
+.keyrow { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); }
+.keyrow:first-child { border-top: 0; padding-top: 0; }
+.keyrow.selected { background: var(--accent-weak, rgba(120, 150, 255, 0.10)); border-radius: 8px; }
+.keycheck { flex: none; display: flex; align-items: center; }
+.keymeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.keyalias { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.keybtns { display: flex; gap: 6px; flex: none; }
+.code { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; font-family: ui-monospace, monospace; font-size: 12px; margin: 0; white-space: pre; }
+
+/* --- keyboxes ----------------------------------------------------------- */
+.kb-list { list-style: none; margin: 0; padding: 16px; }
+/* align-items:flex-start so a name that wraps to two lines sits level with the
+ * top of the Rename/Delete buttons rather than dragging them down its centre. */
+.kb-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); }
+.kb-row:first-child { border-top: 0; padding-top: 0; }
+/* The name is the inspect trigger: take the free space, wrap anywhere so a long
+ * filename never overflows or shoves the buttons off-screen, and stay left-aligned. */
+/* The keybox name doubles as the inspect trigger: a plain clickable filename, not a
+ * link-styled button — no underline, normal colour, just wraps and highlights on hover. */
+.kb-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left; border: 0; background: transparent; padding: 0; cursor: pointer; color: var(--fg); }
+.kb-icon { flex: none; width: 20px; height: 20px; border-radius: 5px; background: var(--accent-weak, rgba(120, 150, 255, 0.14)); position: relative; }
+.kb-icon::before { content: ""; position: absolute; inset: 5px; border: 1.5px solid var(--accent); border-radius: 2px; }
+.kb-file { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.kb-name:hover .kb-file { color: var(--accent); }
+.kb-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.keybtns { flex: none; }
+
+/* --- disclosure --------------------------------------------------------- */
+/* flex:none keeps this from being a shrinkable flex item: inside a flex column
+ * (the editor drill-body, the System update card) `overflow:hidden` would drop its
+ * automatic min-size to 0, so an overflowing column collapses it to its borders and
+ * clips the header away. Pin it to its content height and let the column scroll. */
+.disclosure { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
+.disclosure-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  min-height: 48px; padding: 12px 14px; border: 0; background: var(--card);
+  font: inherit; font-weight: 600; color: var(--fg); cursor: pointer; text-align: left;
+}
+.disclosure-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.disclosure-summary { display: inline-flex; align-items: center; gap: 8px; }
+.count-tag { color: var(--muted); font-size: 12px; font-weight: 500; }
+.disclosure-chevron { flex: none; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform .15s; }
+.disclosure-head.open .disclosure-chevron { transform: rotate(-135deg); }
+.disclosure-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 14px; }
+
+/* --- segmented control -------------------------------------------------- */
+.segmented { display: inline-flex; background: var(--chip); border-radius: var(--radius-sm); padding: 3px; gap: 3px; align-self: flex-start; }
+.seg { min-height: 44px; padding: 6px 18px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; }
+.seg.on { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.seg:disabled { opacity: .6; cursor: default; }
+.seg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* --- system: update ----------------------------------------------------- */
+.update-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.update-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.update-actions .btn { flex: none; }
+.update-links { display: flex; gap: 16px; flex-wrap: wrap; }
+.notes { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Rendered Markdown for the release-notes body (see js/ui/markdown.js). */
+.notes.md { white-space: normal; display: flex; flex-direction: column; gap: 10px; }
+.md-p { margin: 0; overflow-wrap: anywhere; }
+.md-h { font-weight: 600; margin: 2px 0; overflow-wrap: anywhere; }
+.md-h1 { font-size: 15px; }
+.md-h2 { font-size: 14px; }
+.md-h3 { font-size: 13px; color: var(--muted); }
+.md-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+.md-list li { overflow-wrap: anywhere; }
+.md-code { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 1px 5px; font-family: ui-monospace, monospace; font-size: .92em; word-break: break-all; }
+.md-table-wrap { overflow-x: auto; }
+.md-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+.md-table th { background: var(--bg); font-weight: 600; }
+
+/* Pull-to-refresh (see js/ui/pull-refresh.js): a spinner that rides down from under the sticky
+   topbar as the screen is dragged. `overscroll-behavior` stops the WebView's own pull-to-refresh
+   from firing underneath it. */
+html, body { overscroll-behavior-y: contain; }
+.ptr { position: fixed; top: calc(var(--topbar-h) + 8px); left: 50%; z-index: 9; opacity: 0; pointer-events: none; transform: translateX(-50%); transition: transform .2s ease, opacity .2s ease; }
+.ptr-spin { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); background: var(--card); box-shadow: 0 1px 5px rgba(0, 0, 0, .18); transition: transform .15s; }
+.ptr.ready .ptr-spin { transform: scale(1.12); }
+.ptr.busy .ptr-spin { animation: ptr-rot .7s linear infinite; }
+@keyframes ptr-rot { to { transform: rotate(360deg); } }
+.asset-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.asset-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.spinner { width: 14px; height: 14px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* --- misc --------------------------------------------------------------- */
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.mono { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+
+/* --- toast (repositioned above the bottom nav) -------------------------- */
+.toast {
+  position: fixed; left: 50%; bottom: calc(var(--nav-h) + 16px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px;
+  font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50; max-width: 90%;
+}
+.toast.show { opacity: .95; }
+
+/* --- overlays: shared --------------------------------------------------- */
+.overlay { position: fixed; inset: 0; z-index: 40; }
+.overlay-modal { background: rgba(0, 0, 0, .45); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.overlay-sheet { background: rgba(0, 0, 0, .45); display: flex; align-items: flex-end; justify-content: center; }
+
+/* modal dialog (confirm / prompt) */
+.modal { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; max-width: 360px; width: 100%; display: flex; flex-direction: column; gap: 16px; }
+.modal-msg { margin: 0; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* bottom sheet (keybox import) */
+.sheet {
+  width: 100%; max-width: var(--maxw); max-height: 88dvh; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--line); border-bottom: 0;
+  border-radius: 18px 18px 0 0; padding: 16px 16px calc(20px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 14px;
+}
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sheet-head h2 { margin: 0; font-size: 17px; }
+
+/* full-screen drill-in (profile editor, key inspect). openOverlay wraps the view's
+ * content node once; that wrapper becomes the filling flex column so the header and
+ * footer stay put while only the body scrolls. */
+.drill {
+  position: fixed; inset: 0; background: var(--bg);
+  display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+}
+.drill > * { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.drill-head {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  min-height: var(--topbar-h); padding: 8px 12px;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.drill-title { margin: 0; font-size: 18px; font-weight: 700; }
+.drill-title:focus-visible { outline: none; }
+.drill-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 16px; width: 100%;
+}
+.drill-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: none;
+  padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bg);
+}
+
+/* --- logs --------------------------------------------------------------- */
+.logs { position: relative; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.logs-head { gap: 10px; }
+.logs-tools { display: flex; gap: 6px; }
+.logs-msg { color: var(--muted); font-size: 12px; }
+.logs-msg.off { color: var(--danger); }
+.logs-pane {
+  margin: 0; padding: 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); flex: 1; min-height: 240px; overflow: auto; overflow-wrap: anywhere;
+  white-space: pre-wrap; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.logline { color: var(--fg); }
+.logline.lv-v, .logline.lv-d { color: var(--muted); }
+.logline.lv-w { color: var(--warn); }
+.logline.lv-e, .logline.lv-f { color: var(--danger); }
+.logs-tools { flex-wrap: wrap; }
+/* Floating jump-to-top/bottom button over the log pane. Its chevron flips with .up/.down. */
+.logs-fab {
+  position: absolute; right: 18px; bottom: 18px; width: 44px; height: 44px; z-index: 5;
+  border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.logs-fab:active { transform: scale(0.94); }
+.fab-chevron { width: 9px; height: 9px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; }
+.logs-fab.down .fab-chevron { transform: translateY(-2px) rotate(45deg); }
+.logs-fab.up .fab-chevron { transform: translateY(2px) rotate(-135deg); }
+
+/* --- sheets: extra breathing room above the primary/reset action -------- */
+.sheet-submit { margin-top: 8px; }
+
+/* --- key/value rows (harvest dump, keybox cert fields) ------------------ */
+.kv-list { display: flex; flex-direction: column; gap: 8px; }
+.kv { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.kv-label { color: var(--muted); font-size: 12px; flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.kv-val { text-align: right; font-size: 13px; word-break: break-word; }
+.kv-stack { flex-direction: column; align-items: stretch; gap: 4px; }
+.kv-stack .kv-label { justify-content: flex-start; }
+.kv-hex { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; color: var(--fg); text-align: left; }
+/* A captured value the simulation will override: dimmed + struck so it's clear it isn't
+ * what gets attested (the real value shows in the Fabricated group below). */
+.kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--muted); text-decoration: line-through; }
+.kv-replaced .kv-label { color: var(--warn); }
+
+/* --- keybox inspector --------------------------------------------------- */
+.kbi-key { gap: 12px; }
+.kbi-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.kbi-cert { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.kbi-key .kbi-cert:first-of-type { border-top: 0; padding-top: 0; }
+
+/* --- stored-key provenance lines ---------------------------------------- */
+.kmeta { color: var(--muted); font-size: 12px; word-break: break-word; }
+.kmeta b { color: var(--fg); font-weight: 600; }
+
+/* --- inline link-styled button + field resolution hints ----------------- */
+.linklike { border: 0; background: transparent; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.editor-note { margin: 0; }
+.resolve-hint.missing { color: var(--warn); }

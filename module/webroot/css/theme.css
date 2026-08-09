@@ -1,0 +1,74 @@
+/* Design tokens + a minimal reset. No component rules live here.
+ *
+ * Light palette on bare :root. Dark is defined twice on purpose: under
+ * prefers-color-scheme (guarded so an explicit light choice wins) and under an
+ * explicit [data-theme="dark"] (so a future toggle wins in both directions).
+ * The palette values are lifted verbatim from the original monolithic UI. */
+
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --fg: #16181d;
+  --muted: #667085;
+  --line: #e3e6ea;
+  --accent: #3b7dd8;
+  --accent-fg: #fff;
+  --ok: #1a8f4c;
+  --off: #c0392b;
+  --danger: #c0392b;
+  --danger-fg: #fff;
+  --warn: #c9821a;
+  --chip: #eef1f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14161a;
+    --card: #1d2026;
+    --fg: #e6e8ec;
+    --muted: #9aa3b0;
+    --line: #2a2e36;
+    --accent: #5b9bf0;
+    --accent-fg: #0b1220;
+    --ok: #35c46e;
+    --off: #e05a4b;
+    --danger: #e05a4b;
+    --danger-fg: #fff;
+    --warn: #e6a94d;
+    --chip: #262b33;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #14161a;
+  --card: #1d2026;
+  --fg: #e6e8ec;
+  --muted: #9aa3b0;
+  --line: #2a2e36;
+  --accent: #5b9bf0;
+  --accent-fg: #0b1220;
+  --ok: #35c46e;
+  --off: #e05a4b;
+  --danger: #e05a4b;
+  --danger-fg: #fff;
+  --warn: #e6a94d;
+  --chip: #262b33;
+}
+
+* { box-sizing: border-box; }
+
+/* A component may set display on an element that also carries [hidden] (e.g. the
+ * flex .screen panels app.js toggles). Keep [hidden] authoritative so a hidden
+ * panel truly collapses — this is also what makes offsetParent null there, which
+ * is how the status/logs pollers self-pause when their panel is off screen. */
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 -apple-system, Roboto, "Segoe UI", sans-serif;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}

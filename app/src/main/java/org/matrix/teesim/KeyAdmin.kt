@@ -35,7 +35,7 @@ import org.json.JSONObject
  * token, so other apps on the device can't drive it.
  *
  * Contract (all responses application/json; send header `X-Teesim-Token: <token>`): GET /status ->
- * { ok, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
+ * { ok, version, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
  * cert{...}} ] } GET /keys/db -> { ok, available, apiLevel, keys:[ {id, alias, uid, package, state,
  * created?, keybox?, keyAlgorithm?} ] } (the keys THIS MODULE minted for target apps, from keystore2's DB
  * on API >= 31; empty + available=false on 10/11 where there is no such database) POST
@@ -169,6 +169,7 @@ object KeyAdmin {
 
     private fun status(): JSONObject {
         val o = JSONObject().put("ok", true)
+        o.put("version", Updater.currentVersion())
         harvest?.let { o.put("harvest", Harvester.toJson(it)) }
         o.put(
             "lib",

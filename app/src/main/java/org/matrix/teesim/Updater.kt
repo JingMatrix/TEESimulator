@@ -36,7 +36,7 @@ object Updater {
     }
 
     /** The installed module's version name, e.g. "v4.0 (17-abc1234-debug)", from its module.prop. */
-    private fun currentVersion(): String {
+    fun currentVersion(): String {
         for (p in
             listOf(
                 "/data/adb/modules/teesim/module.prop",
