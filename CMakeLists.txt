@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(teesim LANGUAGES CXX)
+project(teesim LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,10 +9,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # low min-SDK; the symbols we use are present on the devices we target.
 add_compile_definitions(__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__)
 
-# External inputs. The library links the platform BoringSSL and libbinder_ndk,
-# resolved at runtime inside keystore2; at build time it links copies for the
-# target ABI (pulled from a device) and BoringSSL headers for the Rust bindings.
-set(DEVICE_LIB_DIR "" CACHE PATH "Directory holding the target ABI's libbinder_ndk.so and libcrypto.so")
+# External inputs. libbinder_ndk and liblog come from the NDK sysroot; BoringSSL is
+# resolved at runtime inside keystore2, so only its headers (for the Rust bindings)
+# are needed at build time. The build depends on no device, so any ABI cross-builds.
 set(BORINGSSL_DIR "${CMAKE_SOURCE_DIR}/third_party/boringssl" CACHE PATH "BoringSSL source directory containing include/")
 set(ANDROID_API_LEVEL "34" CACHE STRING "Android platform level for the Rust build")
 
@@ -82,10 +81,27 @@ add_custom_command(
     OUTPUT ${RUST_A}
     COMMAND ${CMAKE_COMMAND} -E env
             ABI=${ANDROID_ABI} API=${ANDROID_API_LEVEL} NDK_HOME=${ANDROID_NDK}
-            BORINGSSL=${BORINGSSL_DIR} LIBDIR=${DEVICE_LIB_DIR}
+            BORINGSSL=${BORINGSSL_DIR}
             bash ${CMAKE_SOURCE_DIR}/rust/build.sh
     VERBATIM USES_TERMINAL)
 add_custom_target(rust_ta DEPENDS ${RUST_A})
+
+# --- Build-time stub for the platform BoringSSL -----------------------------
+# The TA calls BoringSSL, which lives inside keystore2 and is not part of the NDK.
+# Link a stub libcrypto.so of empty functions so the interceptor gets a NEEDED
+# entry with the right SONAME; keystore2's real libcrypto provides the symbols at
+# runtime. The stub is a build artifact and is never shipped. libcrypto.syms lists
+# the symbols we reference; a new BoringSSL call absent from it fails the link.
+set(CRYPTO_STUB_C ${CMAKE_BINARY_DIR}/libcrypto_stub.c)
+file(STRINGS ${CMAKE_SOURCE_DIR}/keymint/libcrypto.syms _crypto_syms)
+set(_stub_body "")
+foreach(_s ${_crypto_syms})
+  string(APPEND _stub_body "void ${_s}(void){}\n")
+endforeach()
+file(WRITE ${CRYPTO_STUB_C} "${_stub_body}")
+add_library(crypto_stub SHARED ${CRYPTO_STUB_C})
+set_target_properties(crypto_stub PROPERTIES OUTPUT_NAME crypto)
+target_link_options(crypto_stub PRIVATE -nostdlib -Wl,-soname,libcrypto.so)
 
 # --- The injected interceptor library ---------------------------------------
 add_library(teesim_keymint SHARED
@@ -93,9 +109,13 @@ add_library(teesim_keymint SHARED
 add_dependencies(teesim_keymint rust_ta)
 target_include_directories(teesim_keymint PRIVATE
     keymint injector/include rust/teesim-km/include ${LSPLT_JNI}/include)
-target_link_directories(teesim_keymint PRIVATE ${DEVICE_LIB_DIR})
-target_link_libraries(teesim_keymint PRIVATE keymint_aidl lsplt ${RUST_A} binder_ndk crypto log)
+# libbinder_ndk and liblog come from the NDK sysroot; libcrypto from the stub above.
+# All three are shadowed at runtime by the copies keystore2 has loaded.
+target_link_libraries(teesim_keymint PRIVATE keymint_aidl lsplt ${RUST_A} crypto_stub binder_ndk log)
 target_link_options(teesim_keymint PRIVATE
     -static-libstdc++
+    # Binder/log calls newer than the min-SDK are absent from the NDK stub; let them
+    # stay undefined here and resolve at runtime against keystore2's own libraries.
+    -Wl,-z,undefs
     -Wl,--version-script=${CMAKE_SOURCE_DIR}/keymint/exports.map
     -Wl,--gc-sections)

@@ -7,7 +7,9 @@ publish = false
 description = "In-process KeyMint TA (kmr-ta) and C ABI for the native interceptor."
 
 [lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
+# A static library only: it is linked into the interceptor's shared object, which
+# resolves BoringSSL at runtime inside keystore2, so nothing here links libcrypto.
+crate-type = ["staticlib"]
 
 [dependencies]
 kmr-ta = { path = "../../third_party/keymint/ta" }
