@@ -31,6 +31,7 @@ STAGE=$BUILD/module
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp module/module.prop module/service.sh module/customize.sh \
    module/sepolicy.rule module/target.txt "$STAGE/"
+cp -r module/webroot "$STAGE/"
 
 for ABI in $ABIS; do
   B=$BUILD/$ABI

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TEESimulator</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --fg: #16181d; --muted: #667085;
+    --line: #e3e6ea; --accent: #3b7dd8; --accent-fg: #fff;
+    --ok: #1a8f4c; --off: #c0392b; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --card: #1d2026; --fg: #e6e8ec; --muted: #9aa3b0;
+      --line: #2a2e36; --accent: #5b9bf0; --accent-fg: #0b1220; --chip: #262b33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, Roboto, "Segoe UI", sans-serif;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { padding: 22px 18px 8px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  main { padding: 12px; display: flex; flex-direction: column; gap: 12px; max-width: 720px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.off { background: var(--off); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  li .pkg { flex: 1; font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+  .add { display: flex; gap: 8px; margin-top: 10px; }
+  input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line);
+    color: var(--fg); border-radius: 10px; padding: 10px 12px; font: inherit; }
+  button { border: 0; border-radius: 10px; padding: 10px 14px; font: inherit; font-weight: 600;
+    background: var(--chip); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-fg); }
+  button.icon { padding: 6px 10px; background: transparent; color: var(--muted); font-size: 18px; }
+  button:disabled { opacity: .5; }
+  .actions { display: flex; gap: 10px; }
+  .actions button { flex: 1; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: 999px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TEESimulator</h1>
+  <div class="sub">Key attestation for selected apps</div>
+</header>
+<main>
+  <section class="card">
+    <h2>Status</h2>
+    <div class="row"><span>Interceptor</span><span class="status"><span id="dot" class="dot"></span><span id="state">…</span></span></div>
+    <div class="row"><span>keystore2</span><span id="kspid" class="sub">…</span></div>
+    <div class="row"><span>Keybox</span><span id="keybox" class="chips"></span></div>
+  </section>
+
+  <section class="card">
+    <h2>Target apps</h2>
+    <ul id="list"><li class="empty">Loading…</li></ul>
+    <div class="add">
+      <input id="pkg" type="text" placeholder="com.example.app" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button id="addBtn">Add</button>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button id="saveBtn" class="primary">Save</button>
+    <button id="applyBtn">Save &amp; apply</button>
+  </div>
+</main>
+<div id="toast" class="toast"></div>
+
+<script>
+const DIR = "/data/adb/teesim";
+const TARGETS = DIR + "/target.txt";
+let pkgs = [];
+let dirty = false;
+
+// KernelSU / APatch WebUI bridge: run a root shell command, resolve its output.
+function sh(cmd) {
+  return new Promise((resolve) => {
+    if (!window.ksu || !ksu.exec) { resolve({ errno: -1, stdout: "", stderr: "no ksu" }); return; }
+    const cb = "cb_" + Math.random().toString(36).slice(2);
+    window[cb] = (errno, stdout, stderr) => { delete window[cb]; resolve({ errno, stdout, stderr }); };
+    ksu.exec(cmd, "{}", cb);
+  });
+}
+const b64 = (s) => btoa(unescape(encodeURIComponent(s)));
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+function render() {
+  const ul = document.getElementById("list");
+  ul.innerHTML = "";
+  if (!pkgs.length) { ul.innerHTML = '<li class="empty">No targets. Every key goes to the real hardware.</li>'; return; }
+  pkgs.forEach((p, i) => {
+    const li = document.createElement("li");
+    const span = document.createElement("span"); span.className = "pkg"; span.textContent = p;
+    const del = document.createElement("button"); del.className = "icon"; del.textContent = "✕";
+    del.onclick = () => { pkgs.splice(i, 1); dirty = true; render(); };
+    li.append(span, del); ul.appendChild(li);
+  });
+}
+
+function addPkg() {
+  const input = document.getElementById("pkg");
+  const v = input.value.trim();
+  if (!v) return;
+  if (!pkgs.includes(v)) { pkgs.push(v); dirty = true; render(); }
+  input.value = "";
+}
+
+async function save() {
+  const body = pkgs.join("\n") + (pkgs.length ? "\n" : "");
+  const r = await sh(`echo ${b64(body)} | base64 -d > ${TARGETS} && chmod 0644 ${TARGETS}`);
+  if (r.errno === 0) { dirty = false; toast("Saved"); } else { toast("Save failed"); }
+  return r.errno === 0;
+}
+
+async function apply() {
+  if (dirty && !(await save())) return;
+  await sh("kill $(pidof keystore2)");
+  toast("Applied — keystore2 restarting");
+  setTimeout(loadStatus, 2500);
+}
+
+async function loadTargets() {
+  const r = await sh(`cat ${TARGETS} 2>/dev/null`);
+  pkgs = r.stdout.split("\n").map(l => l.trim())
+    .filter(l => l && l[0] !== "#" && l[0] !== "[")
+    .map(l => (l.endsWith("!") || l.endsWith("?")) ? l.slice(0, -1) : l);
+  render();
+}
+
+async function loadStatus() {
+  const pid = (await sh("pidof keystore2")).stdout.trim();
+  document.getElementById("kspid").textContent = pid ? ("pid " + pid) : "not running";
+  const active = pid && (await sh(`grep -ql libteesim_keymint /proc/${pid}/maps`)).errno === 0;
+  document.getElementById("dot").className = "dot " + (active ? "ok" : "off");
+  document.getElementById("state").textContent = active ? "Active" : "Inactive";
+
+  const kb = document.getElementById("keybox");
+  const present = (await sh(`test -f ${DIR}/keybox.xml`)).errno === 0;
+  kb.innerHTML = "";
+  if (!present) { kb.innerHTML = '<span class="chip">missing</span>'; return; }
+  const algos = (await sh(`grep -o 'algorithm="[a-z]*"' ${DIR}/keybox.xml | sed 's/.*"\\(.*\\)"/\\1/' | sort -u`)).stdout.trim().split("\n").filter(Boolean);
+  (algos.length ? algos : ["present"]).forEach(a => {
+    const c = document.createElement("span"); c.className = "chip"; c.textContent = a; kb.appendChild(c);
+  });
+}
+
+document.getElementById("addBtn").onclick = addPkg;
+document.getElementById("pkg").addEventListener("keydown", e => { if (e.key === "Enter") addPkg(); });
+document.getElementById("saveBtn").onclick = save;
+document.getElementById("applyBtn").onclick = apply;
+loadTargets();
+loadStatus();
+</script>
+</body>
+</html>
