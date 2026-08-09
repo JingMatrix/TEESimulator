@@ -1,0 +1,659 @@
+package org.matrix.teesim
+
+import android.content.Context
+import android.os.Build
+import android.os.IBinder
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.lang.reflect.InvocationTargetException
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import java.security.spec.ECGenParameterSpec
+import java.util.Base64
+import org.bouncycastle.asn1.ASN1Boolean
+import org.bouncycastle.asn1.ASN1Encodable
+import org.bouncycastle.asn1.ASN1Enumerated
+import org.bouncycastle.asn1.ASN1Integer
+import org.bouncycastle.asn1.ASN1Null
+import org.bouncycastle.asn1.ASN1OctetString
+import org.bouncycastle.asn1.ASN1Sequence
+import org.bouncycastle.asn1.ASN1Set
+import org.bouncycastle.asn1.ASN1TaggedObject
+import org.bouncycastle.asn1.x509.Extension
+import org.bouncycastle.cert.X509CertificateHolder
+import org.json.JSONObject
+
+/**
+ * Harvests real attestation parameters from the device TEE by generating a throwaway attested EC
+ * key and parsing the leaf's KeyDescription extension (OID 1.3.6.1.4.1.11129.2.1.17). Extends the
+ * main-branch harvest with deviceLocked, verifiedBootState and the attestation/keymaster security
+ * levels.
+ *
+ * verifiedBootKey/verifiedBootHash feed KeyMint's key-encryption-key derivation, so they are frozen
+ * on the first successful harvest and never overwritten with a different value (that would orphan
+ * every stored key). The full record is cached to [Const.harvestedFile].
+ */
+object Harvester {
+
+    private const val OID = "1.3.6.1.4.1.11129.2.1.17"
+    private const val CHECK_ALIAS = "TEESimulator_AttestationCheck"
+
+    // KeyDescription SEQUENCE field indices.
+    private const val KD_ATTEST_VERSION = 0
+    private const val KD_ATTEST_SECLEVEL = 1
+    private const val KD_KEYMASTER_VERSION = 2
+    private const val KD_KEYMASTER_SECLEVEL = 3
+    private const val KD_SOFTWARE_ENFORCED = 6
+    private const val KD_TEE_ENFORCED = 7
+
+    // RootOfTrust SEQUENCE field indices.
+    private const val ROT_VERIFIED_BOOT_KEY = 0
+    private const val ROT_DEVICE_LOCKED = 1
+    private const val ROT_VERIFIED_BOOT_STATE = 2
+    private const val ROT_VERIFIED_BOOT_HASH = 3
+
+    // AuthorizationList context tags.
+    private const val TAG_ROOT_OF_TRUST = 704
+    private const val TAG_OS_VERSION = 705
+    private const val TAG_OS_PATCHLEVEL = 706
+    private const val TAG_VENDOR_PATCHLEVEL = 718
+    private const val TAG_BOOT_PATCHLEVEL = 719
+    private const val TAG_MODULE_HASH = 724
+
+    // Attestation-ID tags (device properties). Captured so we can provision them back,
+    // letting an app's device-ID attestation request succeed against the real values.
+    private const val TAG_ATTESTATION_ID_BRAND = 710
+    private const val TAG_ATTESTATION_ID_DEVICE = 711
+    private const val TAG_ATTESTATION_ID_PRODUCT = 712
+    private const val TAG_ATTESTATION_ID_SERIAL = 713
+    private const val TAG_ATTESTATION_ID_IMEI = 714
+    private const val TAG_ATTESTATION_ID_MEID = 715
+    private const val TAG_ATTESTATION_ID_MANUFACTURER = 716
+    private const val TAG_ATTESTATION_ID_MODEL = 717
+    private const val TAG_ATTESTATION_ID_SECOND_IMEI = 723
+
+    /** One harvested (or fallback) device-identity record. */
+    data class Record(
+        val harvestFailed: Boolean,
+        val verifiedBootKey: ByteArray, // 32 bytes, frozen
+        val verifiedBootHash: ByteArray, // 32 bytes, frozen
+        val deviceLocked: Boolean,
+        val verifiedBootState: Int, // 0 Verified,1 SelfSigned,2 Unverified,3 Failed
+        val attestationSecurityLevel: Int, // 0 SW,1 TEE,2 SB
+        val keymasterSecurityLevel: Int,
+        val attestationVersion: Int,
+        val keymasterVersion: Int,
+        val osVersion: Int?, // encoded major*10000+minor*100+sub
+        val osPatchLevel: Int?, // YYYYMM
+        val vendorPatchLevel: Int?, // YYYYMMDD
+        val bootPatchLevel: Int?, // YYYYMMDD
+        val moduleHash: ByteArray?,
+        // Device-identity values captured from the attested leaf (empty when the TEE
+        // does not provision that id). Provisioned back so ID attestation can succeed.
+        val brand: String,
+        val device: String,
+        val product: String,
+        val manufacturer: String,
+        val model: String,
+        val serial: String,
+        val imei: String,
+        val meid: String,
+        val imei2: String,
+        // JSON field names whose value we synthesize (fabricate) for attestation, mapped to
+        // the display value we override them to. The record itself keeps the RAW captured
+        // values; this map lets the WebUI show the overrides separately and honestly.
+        val fabricated: Map<String, String>,
+        val harvestedAt: Long,
+    )
+
+    /**
+     * Load the frozen record if present, attempt a fresh harvest, merge (preserving the frozen boot
+     * key/hash), persist, and return the effective record.
+     */
+    fun run(context: Context): Record {
+        val existing = loadPersisted()
+        val fresh = tryHarvest()
+
+        val effective =
+            when {
+                // A prior good harvest exists: keep its frozen boot key/hash forever.
+                existing != null && !existing.harvestFailed -> {
+                    if (fresh != null && !fresh.harvestFailed) {
+                        // Refresh volatile fields but freeze verifiedBoot* — unless a
+                        // stale all-zero value was frozen before the zero-reject fix,
+                        // in which case adopt the fresh (guaranteed non-zero) one.
+                        fresh.copy(
+                            verifiedBootKey =
+                                if (isReal(existing.verifiedBootKey)) existing.verifiedBootKey
+                                else fresh.verifiedBootKey,
+                            verifiedBootHash =
+                                if (isReal(existing.verifiedBootHash)) existing.verifiedBootHash
+                                else fresh.verifiedBootHash,
+                            fabricated =
+                                fresh.fabricated.filterKeys { k ->
+                                    !(k == "verifiedBootKey" && isReal(existing.verifiedBootKey)) &&
+                                        !(k == "verifiedBootHash" && isReal(existing.verifiedBootHash))
+                                },
+                        )
+                    } else {
+                        existing
+                    }
+                }
+                // No frozen record yet.
+                fresh != null && !fresh.harvestFailed -> fresh
+                // Harvest failed and nothing frozen: fabricate a stable fallback.
+                else -> existing?.takeIf { !it.harvestFailed } ?: fallback()
+            }
+
+        val enriched = supplementDeviceIds(effective)
+        persist(enriched)
+        SystemLogger.info(
+            "Harvest complete: failed=${enriched.harvestFailed} " +
+                "bootKey=${effective.verifiedBootKey.toHex()} " +
+                "locked=${effective.deviceLocked} vbState=${effective.verifiedBootState} " +
+                "attestSecLevel=${effective.attestationSecurityLevel} " +
+                "os=${effective.osVersion} osPatch=${effective.osPatchLevel} " +
+                "vendorPatch=${enriched.vendorPatchLevel} bootPatch=${enriched.bootPatchLevel}"
+        )
+        return enriched
+    }
+
+    // A system package name to present as the caller for IPhoneSubInfo. The legacy getDeviceId* path
+    // returns the real IMEI for any package (unlike getImei*, which validates it against the caller uid).
+    private const val TELEPHONY_CALLER_PKG = "android"
+
+    /**
+     * Fill in the device ids that device-properties attestation does not carry — IMEI, MEID, serial — so
+     * the reference TA's ID check passes when an app requests the device's true values.
+     *
+     * The bare app_process never initialized the telephony framework (so `TelephonyManager.getImei()`
+     * hits a null service registerer), and `getImei()`/`getImeiForSlot()` additionally enforce a
+     * "package belongs to caller uid" check we can't satisfy as root (uid 0). So we go straight to the
+     * `IPhoneSubInfo` binder and use the legacy `getDeviceId*` calls, which return the real IMEI
+     * regardless of the calling package — confirmed on-device. Serial comes from `Build.getSerial()`
+     * when permitted, otherwise the `ro.serialno` property.
+     */
+    private fun supplementDeviceIds(r: Record): Record {
+        val imei = r.imei.ifBlank { deviceIdForPhone(0) }
+        var imei2 = r.imei2.ifBlank { deviceIdForPhone(1) }
+        if (imei2.isNotBlank() && imei2 == imei) imei2 = "" // single-SIM: slot 1 mirrors slot 0
+        val meid = r.meid.ifBlank { safeId("getMeidForSubscriber(0)") { phoneSubInfoId("getMeidForSubscriber", 0) } }
+        val serial =
+            r.serial.ifBlank { safeId("Build.getSerial()") { Build.getSerial() } }
+                .ifBlank { DeviceProps.prop("ro.serialno", "") }
+        SystemLogger.info(
+            "Harvest telephony IDs: imei='$imei' secondImei='$imei2' meid='$meid' serial='$serial'"
+        )
+        return r.copy(imei = imei, imei2 = imei2, meid = meid, serial = serial)
+    }
+
+    /** The IMEI for a SIM slot, read via IPhoneSubInfo.getDeviceIdForPhone (works even for uid 0). */
+    private fun deviceIdForPhone(slot: Int): String =
+        safeId("getDeviceIdForPhone($slot)") { phoneSubInfoId("getDeviceIdForPhone", slot) }
+
+    @Volatile private var phoneSubInfo: Any? = null
+
+    /**
+     * Invoke a String-returning IPhoneSubInfo method (e.g. getDeviceIdForPhone, getMeidForSubscriber)
+     * for a SIM slot. The service is reached straight through ServiceManager — no TelephonyManager, no
+     * framework init needed — and any String parameters (callingPackage/featureId) are filled with a
+     * system package name. All by reflection, since IPhoneSubInfo is a hidden interface.
+     */
+    private fun phoneSubInfoId(methodName: String, slot: Int): String? {
+        val svc =
+            phoneSubInfo
+                ?: run {
+                    val sm = Class.forName("android.os.ServiceManager")
+                    val binder =
+                        sm.getMethod("getService", String::class.java).invoke(null, "iphonesubinfo")
+                            as? IBinder ?: return null
+                    val stub = Class.forName("com.android.internal.telephony.IPhoneSubInfo\$Stub")
+                    stub.getMethod("asInterface", IBinder::class.java).invoke(null, binder).also {
+                        phoneSubInfo = it
+                    }
+                }
+        val method =
+            Class.forName("com.android.internal.telephony.IPhoneSubInfo").methods.firstOrNull {
+                it.name == methodName && it.parameterTypes.firstOrNull() == Int::class.javaPrimitiveType
+            } ?: return null
+        val args: List<Any?> =
+            method.parameterTypes.map { t ->
+                when (t) {
+                    Int::class.javaPrimitiveType -> slot
+                    String::class.java -> TELEPHONY_CALLER_PKG
+                    else -> return null
+                }
+            }
+        return method.invoke(svc, *args.toTypedArray()) as? String
+    }
+
+    /** A device id read that never throws or returns a placeholder — "" on any failure, logged. */
+    private inline fun safeId(what: String, block: () -> String?): String =
+        try {
+            val v = block()?.takeIf { it.isNotBlank() && !it.equals("null", true) } ?: ""
+            if (v.isBlank()) SystemLogger.info("Harvest telephony: $what returned empty")
+            v
+        } catch (e: Exception) {
+            val cause = (e as? InvocationTargetException)?.targetException ?: e
+            SystemLogger.warning("Harvest telephony: $what failed: ${cause.javaClass.simpleName}: ${cause.message}")
+            ""
+        }
+
+    // --- live harvest -----------------------------------------------------------
+
+    private fun tryHarvest(): Record? {
+        val leaf = generateAndFetchLeaf() ?: return null
+        return try {
+            parse(leaf)
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to parse harvested attestation", e)
+            null
+        }
+    }
+
+    /**
+     * One harvested leaf: try a device-properties attestation first (so we capture the real
+     * brand/model/… ids), fall back to a plain attestation if the TEE rejects that, and return null
+     * only when both fail — which [run] then reports as a broken TEE.
+     */
+    private fun generateAndFetchLeaf(): X509Certificate? =
+        tryLeaf(withDeviceIds = true) ?: tryLeaf(withDeviceIds = false)
+
+    private fun tryLeaf(withDeviceIds: Boolean): X509Certificate? {
+        return try {
+            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val gen =
+                KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
+            val challenge = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            val builder =
+                KeyGenParameterSpec.Builder(CHECK_ALIAS, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setAttestationChallenge(challenge)
+            if (withDeviceIds && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setDevicePropertiesAttestationIncluded(true)
+            }
+            gen.initialize(builder.build())
+            gen.generateKeyPair()
+
+            val chain = ks.getCertificateChain(CHECK_ALIAS)
+            ks.deleteEntry(CHECK_ALIAS) // always clean up
+            if (chain.isNullOrEmpty()) {
+                if (!withDeviceIds) SystemLogger.warning("Harvest: empty certificate chain (no working TEE?)")
+                null
+            } else {
+                chain[0] as X509Certificate
+            }
+        } catch (e: Exception) {
+            if (withDeviceIds) {
+                SystemLogger.info("Harvest: device-properties attestation failed; retrying plain (${e.message})")
+            } else {
+                SystemLogger.warning("Harvest: attested key generation failed (no working TEE?)", e)
+            }
+            try {
+                KeyStore.getInstance("AndroidKeyStore")
+                    .apply { load(null) }
+                    .deleteEntry(CHECK_ALIAS)
+            } catch (ignored: Exception) {}
+            null
+        }
+    }
+
+    private fun parse(leaf: X509Certificate): Record {
+        val holder = X509CertificateHolder(leaf.encoded)
+        val ext: Extension =
+            holder.getExtension(org.bouncycastle.asn1.ASN1ObjectIdentifier(OID))
+                ?: throw IllegalStateException("no attestation extension in leaf")
+
+        val kd = ASN1Sequence.getInstance(ext.extnValue.octets)
+        val fields = kd.toArray()
+
+        val attestVersion = ASN1Integer.getInstance(fields[KD_ATTEST_VERSION]).positiveValue.toInt()
+        val attestSecLevel = ASN1Enumerated.getInstance(fields[KD_ATTEST_SECLEVEL]).value.toInt()
+        val keymasterVersion =
+            ASN1Integer.getInstance(fields[KD_KEYMASTER_VERSION]).positiveValue.toInt()
+        val keymasterSecLevel =
+            ASN1Enumerated.getInstance(fields[KD_KEYMASTER_SECLEVEL]).value.toInt()
+
+        var verifiedBootKey: ByteArray? = null
+        var verifiedBootHash: ByteArray? = null
+        var deviceLocked = true
+        var verifiedBootState = 0
+        var osVersion: Int? = null
+        var osPatchLevel: Int? = null
+        var vendorPatchLevel: Int? = null
+        var bootPatchLevel: Int? = null
+        var moduleHash: ByteArray? = null
+
+        // moduleHash may live in softwareEnforced.
+        val sw = ASN1Sequence.getInstance(fields[KD_SOFTWARE_ENFORCED])
+        moduleHash =
+            sw.toArray()
+                .firstOrNull { (it as? ASN1TaggedObject)?.tagNo == TAG_MODULE_HASH }
+                ?.let { ASN1OctetString.getInstance((it as ASN1TaggedObject).baseObject).octets }
+
+        val tee = ASN1Sequence.getInstance(fields[KD_TEE_ENFORCED])
+        tee.forEach { element ->
+            val tagged = element as ASN1TaggedObject
+            when (tagged.tagNo) {
+                TAG_ROOT_OF_TRUST -> {
+                    val rot = ASN1Sequence.getInstance(tagged.baseObject.toASN1Primitive())
+                    if (rot.size() >= 4) {
+                        verifiedBootKey =
+                            ASN1OctetString.getInstance(rot.getObjectAt(ROT_VERIFIED_BOOT_KEY))
+                                .octets
+                        deviceLocked =
+                            ASN1Boolean.getInstance(rot.getObjectAt(ROT_DEVICE_LOCKED)).isTrue
+                        verifiedBootState =
+                            ASN1Enumerated.getInstance(rot.getObjectAt(ROT_VERIFIED_BOOT_STATE))
+                                .value
+                                .toInt()
+                        verifiedBootHash =
+                            ASN1OctetString.getInstance(rot.getObjectAt(ROT_VERIFIED_BOOT_HASH))
+                                .octets
+                    }
+                }
+                TAG_OS_VERSION -> osVersion = intOf(tagged)
+                TAG_OS_PATCHLEVEL -> osPatchLevel = intOf(tagged)
+                TAG_VENDOR_PATCHLEVEL -> vendorPatchLevel = intOf(tagged)
+                TAG_BOOT_PATCHLEVEL -> bootPatchLevel = intOf(tagged)
+            }
+        }
+
+        val fab = mutableMapOf<String, String>()
+        // Always attest a locked, Verified device (an unlocked / unverified state fails
+        // attestation by construction). The record keeps the RAW captured values; these two
+        // are fabricated only when the device's real value differs — a genuinely locked,
+        // Verified device reports them captured, so the map stays empty for them.
+        if (!deviceLocked) fab["deviceLocked"] = "true"
+        if (verifiedBootState != 0) fab["verifiedBootState"] = "Verified (0)"
+
+        // Device-identity ids parsed per tag. An empty value means the tag was ABSENT from the leaf —
+        // device-properties attestation omits imei/meid/serial — not a parse failure.
+        val brand = idFrom(sw, tee, TAG_ATTESTATION_ID_BRAND)
+        val device = idFrom(sw, tee, TAG_ATTESTATION_ID_DEVICE)
+        val product = idFrom(sw, tee, TAG_ATTESTATION_ID_PRODUCT)
+        val manufacturer = idFrom(sw, tee, TAG_ATTESTATION_ID_MANUFACTURER)
+        val model = idFrom(sw, tee, TAG_ATTESTATION_ID_MODEL)
+        val serial = idFrom(sw, tee, TAG_ATTESTATION_ID_SERIAL)
+        val imei = idFrom(sw, tee, TAG_ATTESTATION_ID_IMEI)
+        val meid = idFrom(sw, tee, TAG_ATTESTATION_ID_MEID)
+        val imei2 = idFrom(sw, tee, TAG_ATTESTATION_ID_SECOND_IMEI)
+        SystemLogger.info("Harvest: device reports locked=$deviceLocked vbState=$verifiedBootState; attesting locked/Verified")
+        // The whole KeyDescription decoded onto one line — every field, and every key parameter in the
+        // softwareEnforced/teeEnforced authorization lists, as tag-and-value. This is the ground truth
+        // to check a captured id (e.g. the IMEI tag) against, independent of the per-field parsing above.
+        SystemLogger.info(
+            "Harvest leaf KeyDescription: " + kd.joinToString(separator = ", ") { formatAsn1Primitive(it) }
+        )
+        return Record(
+            harvestFailed = false,
+            verifiedBootKey =
+                resolveBoot(verifiedBootKey, "ro.boot.vbmeta.public_key_digest", ::fallbackBootKey, fab, "verifiedBootKey"),
+            verifiedBootHash =
+                resolveBoot(verifiedBootHash, "ro.boot.vbmeta.digest", ::fallbackBootHash, fab, "verifiedBootHash"),
+            deviceLocked = deviceLocked,
+            verifiedBootState = verifiedBootState,
+            attestationSecurityLevel = attestSecLevel,
+            keymasterSecurityLevel = keymasterSecLevel,
+            attestationVersion = attestVersion,
+            keymasterVersion = keymasterVersion,
+            osVersion = osVersion,
+            osPatchLevel = osPatchLevel,
+            vendorPatchLevel = vendorPatchLevel,
+            bootPatchLevel = bootPatchLevel,
+            moduleHash = moduleHash,
+            brand = brand,
+            device = device,
+            product = product,
+            manufacturer = manufacturer,
+            model = model,
+            serial = serial,
+            imei = imei,
+            meid = meid,
+            imei2 = imei2,
+            fabricated = fab,
+            harvestedAt = System.currentTimeMillis(),
+        )
+    }
+
+    private fun intOf(t: ASN1TaggedObject): Int =
+        ASN1Integer.getInstance(t.baseObject.toASN1Primitive()).positiveValue.toInt()
+
+    /**
+     * Recursively formats any ASN.1 value into one concise, readable token: integers/enumerated as
+     * their number, an octet string as "text" when printable else #hex, a tagged object as
+     * [TAG n]<inner>, a sequence as [ … ], a set as { … }. Applied over a KeyDescription it renders
+     * the entire authorization list — every key parameter — on a single log line.
+     */
+    private fun formatAsn1Primitive(obj: ASN1Encodable?): String {
+        return when (val primitive = obj?.toASN1Primitive()) {
+            null -> "NULL"
+            is ASN1Integer -> primitive.value.toString()
+            is ASN1Enumerated -> primitive.value.toString()
+            is ASN1Boolean -> primitive.isTrue.toString()
+            is ASN1Null -> "NULL"
+            is ASN1OctetString -> {
+                val bytes = primitive.octets
+                when {
+                    bytes.isEmpty() -> "\"\""
+                    bytes.all { it >= 32 && it < 127 } -> "\"${String(bytes, Charsets.UTF_8)}\""
+                    else -> "#" + bytes.toHex()
+                }
+            }
+            is ASN1TaggedObject -> "[TAG ${primitive.tagNo}]${formatAsn1Primitive(primitive.baseObject)}"
+            is ASN1Sequence ->
+                primitive.map { formatAsn1Primitive(it) }.joinToString(prefix = "[", postfix = "]", separator = ", ")
+            is ASN1Set ->
+                primitive.map { formatAsn1Primitive(it) }.joinToString(prefix = "{", postfix = "}", separator = ", ")
+            else -> primitive.toString()
+        }
+    }
+
+    /** The UTF-8 value of an attestation-ID tag, searching both enforced lists, or "". */
+    private fun idFrom(sw: ASN1Sequence, tee: ASN1Sequence, tag: Int): String {
+        for (seq in listOf(sw, tee)) {
+            val el = seq.toArray().firstOrNull { (it as? ASN1TaggedObject)?.tagNo == tag } ?: continue
+            return try {
+                String(
+                    ASN1OctetString.getInstance((el as ASN1TaggedObject).baseObject).octets,
+                    Charsets.UTF_8,
+                )
+            } catch (e: Exception) {
+                ""
+            }
+        }
+        return ""
+    }
+
+    /** A device-identity value from a system property, falling back to the Build constant. */
+    private fun buildId(prop: String, fallback: String?): String =
+        DeviceProps.prop(prop, "").ifBlank { fallback ?: "" }
+
+    /**
+     * Resolve a verified-boot value: prefer a real, non-zero 32-byte value from the
+     * attested leaf; else the device's vbmeta digest property; else a deterministic
+     * stable fallback. Never all-zeros — that is what an unlocked device reports and
+     * it fails attestation.
+     */
+    private fun resolveBoot(
+        harvested: ByteArray?,
+        prop: String,
+        fallback: () -> ByteArray,
+        fabricated: MutableMap<String, String>,
+        name: String,
+    ): ByteArray {
+        if (isReal(harvested)) return harvested!!
+        hexBytes(DeviceProps.prop(prop, ""))?.let {
+            return it
+        }
+        val synthesized = fallback()
+        fabricated[name] = synthesized.toHex()
+        return synthesized
+    }
+
+    /** A usable boot value: exactly 32 bytes and not all zero. */
+    private fun isReal(v: ByteArray?): Boolean = v != null && v.size == 32 && v.any { it.toInt() != 0 }
+
+    /** Parse 64 hex chars into 32 non-zero bytes, or null. */
+    private fun hexBytes(s: String): ByteArray? {
+        val h = s.trim().removePrefix("0x")
+        if (h.length != 64 || h.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return null
+        val out =
+            ByteArray(32) { ((h[it * 2].digitToInt(16) shl 4) or h[it * 2 + 1].digitToInt(16)).toByte() }
+        return if (out.any { it.toInt() != 0 }) out else null
+    }
+
+    // --- fallback (no working TEE) ---------------------------------------------
+
+    private fun fallback(): Record {
+        SystemLogger.warning("Harvest failed; using fixed non-zero boot key + Build.VERSION props")
+        val osVersion = DeviceProps.deviceOsVersion()
+        val osPatchLevel = DeviceProps.toYyyymm(DeviceProps.systemSecurityPatch())
+        val vendorPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
+        val bootPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
+        return Record(
+            harvestFailed = true,
+            verifiedBootKey = fallbackBootKey(),
+            verifiedBootHash = fallbackBootHash(),
+            deviceLocked = true,
+            verifiedBootState = 0, // Verified
+            attestationSecurityLevel = Const.SECLEVEL_TEE,
+            keymasterSecurityLevel = Const.SECLEVEL_TEE,
+            attestationVersion = 300,
+            keymasterVersion = 300,
+            osVersion = osVersion,
+            osPatchLevel = osPatchLevel,
+            vendorPatchLevel = vendorPatchLevel,
+            bootPatchLevel = bootPatchLevel,
+            moduleHash = null,
+            brand = buildId("ro.product.brand", Build.BRAND),
+            device = buildId("ro.product.device", Build.DEVICE),
+            product = buildId("ro.product.name", Build.PRODUCT),
+            manufacturer = buildId("ro.product.manufacturer", Build.MANUFACTURER),
+            model = buildId("ro.product.model", Build.MODEL),
+            serial = DeviceProps.prop("ro.serialno", ""),
+            imei = "",
+            meid = "",
+            imei2 = "",
+            // No working TEE: every attestation-critical value is synthesized.
+            fabricated =
+                mapOf(
+                    "deviceLocked" to "true",
+                    "verifiedBootState" to "Verified (0)",
+                    "verifiedBootKey" to fallbackBootKey().toHex(),
+                    "verifiedBootHash" to fallbackBootHash().toHex(),
+                    "osVersion" to osVersion.toString(),
+                    "osPatchLevel" to osPatchLevel.toString(),
+                    "vendorPatchLevel" to vendorPatchLevel.toString(),
+                    "bootPatchLevel" to bootPatchLevel.toString(),
+                ),
+            harvestedAt = System.currentTimeMillis(),
+        )
+    }
+
+    // Deterministic, non-zero, stable across runs so the fallback KEK is also stable.
+    private fun fallbackBootKey(): ByteArray = sha256("TEESimulator/verified_boot_key")
+
+    private fun fallbackBootHash(): ByteArray = sha256("TEESimulator/verified_boot_hash")
+
+    private fun sha256(s: String): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
+
+    // --- persistence ------------------------------------------------------------
+
+    private fun loadPersisted(): Record? {
+        val f = Const.harvestedFile
+        if (!f.exists()) return null
+        return try {
+            fromJson(JSONObject(f.readText()))
+        } catch (e: Exception) {
+            SystemLogger.warning("Could not read harvested.json; ignoring", e)
+            null
+        }
+    }
+
+    private fun persist(r: Record) {
+        try {
+            Const.harvestedFile.parentFile?.mkdirs()
+            Const.harvestedFile.writeText(toJson(r).toString(2))
+        } catch (e: Exception) {
+            SystemLogger.error("Failed to write harvested.json", e)
+        }
+    }
+
+    private val b64 = Base64.getEncoder()
+    private val b64d = Base64.getDecoder()
+
+    fun toJson(r: Record): JSONObject =
+        JSONObject().apply {
+            put("version", 1)
+            put("harvestFailed", r.harvestFailed)
+            put("frozen", !r.harvestFailed)
+            put("verifiedBootKey", b64.encodeToString(r.verifiedBootKey))
+            put("verifiedBootHash", b64.encodeToString(r.verifiedBootHash))
+            put("deviceLocked", r.deviceLocked)
+            put("verifiedBootState", r.verifiedBootState)
+            put("attestationSecurityLevel", r.attestationSecurityLevel)
+            put("keymasterSecurityLevel", r.keymasterSecurityLevel)
+            put("attestationVersion", r.attestationVersion)
+            put("keymasterVersion", r.keymasterVersion)
+            put("osVersion", r.osVersion ?: JSONObject.NULL)
+            put("osPatchLevel", r.osPatchLevel ?: JSONObject.NULL)
+            put("vendorPatchLevel", r.vendorPatchLevel ?: JSONObject.NULL)
+            put("bootPatchLevel", r.bootPatchLevel ?: JSONObject.NULL)
+            put("moduleHash", r.moduleHash?.let { b64.encodeToString(it) } ?: JSONObject.NULL)
+            put("brand", r.brand)
+            put("device", r.device)
+            put("product", r.product)
+            put("manufacturer", r.manufacturer)
+            put("model", r.model)
+            put("serial", r.serial)
+            put("imei", r.imei)
+            put("meid", r.meid)
+            put("imei2", r.imei2)
+            put("fabricated", JSONObject(r.fabricated as Map<*, *>))
+            put("harvestedAt", r.harvestedAt)
+        }
+
+    private fun fromJson(o: JSONObject): Record =
+        Record(
+            harvestFailed = o.optBoolean("harvestFailed", false),
+            verifiedBootKey = b64d.decode(o.getString("verifiedBootKey")),
+            verifiedBootHash = b64d.decode(o.getString("verifiedBootHash")),
+            deviceLocked = o.optBoolean("deviceLocked", true),
+            verifiedBootState = o.optInt("verifiedBootState", 0),
+            attestationSecurityLevel = o.optInt("attestationSecurityLevel", Const.SECLEVEL_TEE),
+            keymasterSecurityLevel = o.optInt("keymasterSecurityLevel", Const.SECLEVEL_TEE),
+            attestationVersion = o.optInt("attestationVersion", 300),
+            keymasterVersion = o.optInt("keymasterVersion", 300),
+            osVersion = o.optIntOrNull("osVersion"),
+            osPatchLevel = o.optIntOrNull("osPatchLevel"),
+            vendorPatchLevel = o.optIntOrNull("vendorPatchLevel"),
+            bootPatchLevel = o.optIntOrNull("bootPatchLevel"),
+            moduleHash = o.optStringOrNull("moduleHash")?.let { b64d.decode(it) },
+            brand = o.optString("brand", ""),
+            device = o.optString("device", ""),
+            product = o.optString("product", ""),
+            manufacturer = o.optString("manufacturer", ""),
+            model = o.optString("model", ""),
+            serial = o.optString("serial", ""),
+            imei = o.optString("imei", ""),
+            meid = o.optString("meid", ""),
+            imei2 = o.optString("imei2", ""),
+            fabricated =
+                o.optJSONObject("fabricated")?.let { obj ->
+                    obj.keys().asSequence().associateWith { obj.getString(it) }
+                } ?: emptyMap(),
+            harvestedAt = o.optLong("harvestedAt", System.currentTimeMillis()),
+        )
+
+    private fun JSONObject.optIntOrNull(k: String): Int? =
+        if (isNull(k) || !has(k)) null else optInt(k)
+
+    private fun JSONObject.optStringOrNull(k: String): String? =
+        if (isNull(k) || !has(k)) null else optString(k)
+}
