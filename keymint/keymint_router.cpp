@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "control.h"
 #include "logging.hpp"
 #include "teesim_km.h"
 
@@ -37,18 +38,64 @@ constexpr uint32_t kTagBignum = 0x80000000u;
 constexpr uint32_t kTagBytes = 0x90000000u;
 constexpr uint32_t kTagUlongRep = 0xA0000000u;
 
-::Ta* g_ta = nullptr;
+// A TA is reference-counted so an in-flight operation keeps its profile's TA
+// alive even if a config reload swaps or drops that profile underneath it.
+using TaPtr = std::shared_ptr<::Ta>;
+TaPtr WrapTa(::Ta* ta) {
+  return TaPtr(ta, [](::Ta* t) {
+    if (t) teesim_km_destroy(t);
+  });
+}
 
-// Targeting configuration.
+// A configured profile: its TA and the package names routed to it.
+struct Profile {
+  std::string id;
+  TaPtr ta;
+  std::vector<std::string> packages;
+};
+
+// Live routing, swapped atomically by teesim_cfg_commit under g_cfg_mu.
 std::mutex g_cfg_mu;
-bool g_target_all = false;
-std::vector<std::string> g_targets;
+std::vector<Profile> g_profiles;
+TaPtr g_default_ta;  // serves ops on our blobs; any profile's TA decrypts them
+
+// Staging state built up by teesim_cfg_begin/add_profile before the swap.
+std::vector<Profile> g_staging;
+std::vector<uint8_t> g_stage_vb_key;
+std::vector<uint8_t> g_stage_vb_hash;
+bool g_stage_locked = true;
+int32_t g_stage_vb_state = 0;
 
 // RAII guard: mark the current thread as forwarding to the real HAL.
 struct ForwardGuard {
   ForwardGuard() { teesim_hook_set_forwarding(true); }
   ~ForwardGuard() { teesim_hook_set_forwarding(false); }
 };
+
+// The profile TA whose packages match this request's ATTESTATION_APPLICATION_ID,
+// or null if the request is not for any target app.
+TaPtr ProfileForRequest(const std::vector<KeyParameter>& params) {
+  std::lock_guard<std::mutex> lk(g_cfg_mu);
+  if (g_profiles.empty()) return nullptr;
+  for (const auto& p : params) {
+    if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
+    if (p.value.getTag() != KeyParameterValue::blob) continue;
+    const auto& id = p.value.get<KeyParameterValue::blob>();
+    std::string hay(id.begin(), id.end());
+    for (const auto& prof : g_profiles) {
+      for (const auto& pkg : prof.packages) {
+        if (hay.find(pkg) != std::string::npos) return prof.ta;
+      }
+    }
+  }
+  return nullptr;
+}
+
+// The TA used for operations on an existing blob of ours (begin/upgrade/etc.).
+TaPtr DefaultTa() {
+  std::lock_guard<std::mutex> lk(g_cfg_mu);
+  return g_default_ta;
+}
 
 // --- AIDL KeyParameter <-> flat KmParam --------------------------------------
 
@@ -209,38 +256,20 @@ bool IsOurs(const std::vector<uint8_t>& blob) {
   return teesim_km_is_marked(blob.data(), blob.size());
 }
 
-// Decide whether a generate/import request is for a target app, by matching the
-// configured package names inside the ATTESTATION_APPLICATION_ID value. A request
-// with no attestation application id (i.e. no attestation) is never a target.
-bool IsTargetRequest(const std::vector<KeyParameter>& params) {
-  std::lock_guard<std::mutex> lk(g_cfg_mu);
-  if (g_target_all) return true;
-  if (g_targets.empty()) return false;
-  for (const auto& p : params) {
-    if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
-    if (p.value.getTag() != KeyParameterValue::blob) continue;
-    const auto& id = p.value.get<KeyParameterValue::blob>();
-    std::string hay(id.begin(), id.end());
-    for (const auto& t : g_targets) {
-      if (hay.find(t) != std::string::npos) return true;
-    }
-  }
-  return false;
-}
-
 // --- IKeyMintOperation -------------------------------------------------------
 
 class TeesimKeyMintOperation : public BnKeyMintOperation {
  public:
-  explicit TeesimKeyMintOperation(int64_t op_handle) : op_handle_(op_handle) {}
+  TeesimKeyMintOperation(TaPtr ta, int64_t op_handle)
+      : ta_(std::move(ta)), op_handle_(op_handle) {}
   ~TeesimKeyMintOperation() override {
-    if (!finished_) teesim_km_abort(g_ta, op_handle_);
+    if (!finished_) teesim_km_abort(ta_.get(), op_handle_);
   }
 
   ndk::ScopedAStatus updateAad(const std::vector<uint8_t>& input,
                                const std::optional<HardwareAuthToken>&,
                                const std::optional<secureclock::TimeStampToken>&) override {
-    return Status(teesim_km_update_aad(g_ta, op_handle_, input.data(), input.size()));
+    return Status(teesim_km_update_aad(ta_.get(), op_handle_, input.data(), input.size()));
   }
 
   ndk::ScopedAStatus update(const std::vector<uint8_t>& input,
@@ -249,7 +278,7 @@ class TeesimKeyMintOperation : public BnKeyMintOperation {
                             std::vector<uint8_t>* out) override {
     uint8_t* buf = nullptr;
     size_t len = 0;
-    int32_t rc = teesim_km_update(g_ta, op_handle_, input.data(), input.size(), &buf, &len);
+    int32_t rc = teesim_km_update(ta_.get(), op_handle_, input.data(), input.size(), &buf, &len);
     if (rc != 0) return Status(rc);
     out->assign(buf, buf + len);
     teesim_km_free_buf(buf, len);
@@ -268,7 +297,8 @@ class TeesimKeyMintOperation : public BnKeyMintOperation {
     size_t sig_len = signature ? signature->size() : 0;
     uint8_t* buf = nullptr;
     size_t len = 0;
-    int32_t rc = teesim_km_finish(g_ta, op_handle_, in_ptr, in_len, sig_ptr, sig_len, &buf, &len);
+    int32_t rc =
+        teesim_km_finish(ta_.get(), op_handle_, in_ptr, in_len, sig_ptr, sig_len, &buf, &len);
     finished_ = true;
     if (rc != 0) return Status(rc);
     out->assign(buf, buf + len);
@@ -278,10 +308,11 @@ class TeesimKeyMintOperation : public BnKeyMintOperation {
 
   ndk::ScopedAStatus abort() override {
     finished_ = true;
-    return Status(teesim_km_abort(g_ta, op_handle_));
+    return Status(teesim_km_abort(ta_.get(), op_handle_));
   }
 
  private:
+  TaPtr ta_;
   int64_t op_handle_;
   bool finished_ = false;
 };
@@ -309,30 +340,58 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   ndk::ScopedAStatus generateKey(const std::vector<KeyParameter>& keyParams,
                                  const std::optional<AttestationKey>& attestationKey,
                                  KeyCreationResult* out) override {
-    if (real_ && !IsTargetRequest(keyParams)) {
-      LOGI("generateKey: forwarding to real HAL (not a target)");
-      ForwardGuard g;
-      return real_->generateKey(keyParams, attestationKey, out);
+    TaPtr ta = ProfileForRequest(keyParams);
+    if (!ta) {
+      if (real_) {
+        LOGI("generateKey: forwarding to real HAL (not a target)");
+        ForwardGuard g;
+        return real_->generateKey(keyParams, attestationKey, out);
+      }
+      return Status(-100);
+    }
+    // A supplied attest key we did not mint is a real-hardware blob our TA cannot parse;
+    // forward the whole request so the real HAL attests it, rather than feeding a foreign
+    // blob to the TA (which fails as InvalidKeyBlob).
+    if (attestationKey && !IsOurs(attestationKey->keyBlob)) {
+      if (real_) {
+        LOGI("generateKey: attest key is not ours; forwarding to real HAL");
+        ForwardGuard g;
+        return real_->generateKey(keyParams, attestationKey, out);
+      }
+      return Status(-100);
     }
     LOGI("generateKey: simulating for target app");
-    return Simulate(keyParams, attestationKey, out);
+    return Simulate(ta.get(), keyParams, attestationKey, out);
   }
 
   ndk::ScopedAStatus importKey(const std::vector<KeyParameter>& keyParams, KeyFormat keyFormat,
                                const std::vector<uint8_t>& keyData,
                                const std::optional<AttestationKey>& attestationKey,
                                KeyCreationResult* out) override {
-    if (real_ && !IsTargetRequest(keyParams)) {
-      ForwardGuard g;
-      return real_->importKey(keyParams, keyFormat, keyData, attestationKey, out);
+    TaPtr ta = ProfileForRequest(keyParams);
+    if (!ta) {
+      if (real_) {
+        ForwardGuard g;
+        return real_->importKey(keyParams, keyFormat, keyData, attestationKey, out);
+      }
+      return Status(-100);
+    }
+    // As in generateKey: a foreign attest key can't be used by our TA — forward instead.
+    if (attestationKey && !IsOurs(attestationKey->keyBlob)) {
+      if (real_) {
+        LOGI("importKey: attest key is not ours; forwarding to real HAL");
+        ForwardGuard g;
+        return real_->importKey(keyParams, keyFormat, keyData, attestationKey, out);
+      }
+      return Status(-100);
     }
     auto km = ToKmVec(keyParams);
     auto ak = MakeAttestKey(attestationKey);
     TsCreationResult* res = nullptr;
-    int32_t rc = teesim_km_import_key(g_ta, km.data(), km.size(), static_cast<int32_t>(keyFormat),
-                                      keyData.data(), keyData.size(), ak.blob, ak.blob_len,
-                                      ak.params.data(), ak.params.size(), ak.issuer, ak.issuer_len,
-                                      &res);
+    int32_t rc = teesim_km_import_key(ta.get(), km.data(), km.size(), static_cast<int32_t>(level_),
+                                      static_cast<int32_t>(keyFormat), keyData.data(), keyData.size(),
+                                      ak.blob, ak.blob_len, ak.params.data(), ak.params.size(),
+                                      ak.issuer, ak.issuer_len, &res);
     if (rc != 0) return Status(rc);
     FillCreationResult(res, out);
     teesim_km_free_result(res);
@@ -343,13 +402,18 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                            const std::vector<KeyParameter>& params,
                            const std::optional<HardwareAuthToken>& authToken,
                            BeginResult* out) override {
-    if (real_ && !IsOurs(keyBlob)) {
-      ForwardGuard g;
-      return real_->begin(purpose, keyBlob, params, authToken, out);
+    if (!IsOurs(keyBlob)) {
+      if (real_) {
+        ForwardGuard g;
+        return real_->begin(purpose, keyBlob, params, authToken, out);
+      }
+      return Status(-100);
     }
+    TaPtr ta = DefaultTa();
+    if (!ta) return Status(-100);
     auto km = ToKmVec(params);
     TsBeginResult* res = nullptr;
-    int32_t rc = teesim_km_begin(g_ta, static_cast<int32_t>(purpose), keyBlob.data(),
+    int32_t rc = teesim_km_begin(ta.get(), static_cast<int32_t>(purpose), keyBlob.data(),
                                  keyBlob.size(), km.data(), km.size(), &res);
     if (rc != 0) return Status(rc);
     out->challenge = teesim_km_begin_challenge(res);
@@ -362,29 +426,39 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     }
     int64_t op_handle = teesim_km_begin_op_handle(res);
     teesim_km_free_begin(res);
-    out->operation = ndk::SharedRefBase::make<TeesimKeyMintOperation>(op_handle);
+    out->operation = ndk::SharedRefBase::make<TeesimKeyMintOperation>(ta, op_handle);
     return ndk::ScopedAStatus::ok();
   }
 
   ndk::ScopedAStatus deleteKey(const std::vector<uint8_t>& keyBlob) override {
-    if (real_ && !IsOurs(keyBlob)) {
-      ForwardGuard g;
-      return real_->deleteKey(keyBlob);
+    if (!IsOurs(keyBlob)) {
+      if (real_) {
+        ForwardGuard g;
+        return real_->deleteKey(keyBlob);
+      }
+      return ndk::ScopedAStatus::ok();
     }
-    return Status(teesim_km_delete_key(g_ta, keyBlob.data(), keyBlob.size()));
+    TaPtr ta = DefaultTa();
+    if (!ta) return ndk::ScopedAStatus::ok();
+    return Status(teesim_km_delete_key(ta.get(), keyBlob.data(), keyBlob.size()));
   }
 
   ndk::ScopedAStatus upgradeKey(const std::vector<uint8_t>& keyBlobToUpgrade,
                                 const std::vector<KeyParameter>& upgradeParams,
                                 std::vector<uint8_t>* out) override {
-    if (real_ && !IsOurs(keyBlobToUpgrade)) {
-      ForwardGuard g;
-      return real_->upgradeKey(keyBlobToUpgrade, upgradeParams, out);
+    if (!IsOurs(keyBlobToUpgrade)) {
+      if (real_) {
+        ForwardGuard g;
+        return real_->upgradeKey(keyBlobToUpgrade, upgradeParams, out);
+      }
+      return Status(-100);
     }
+    TaPtr ta = DefaultTa();
+    if (!ta) return Status(-100);
     auto km = ToKmVec(upgradeParams);
     uint8_t* buf = nullptr;
     size_t len = 0;
-    int32_t rc = teesim_km_upgrade_key(g_ta, keyBlobToUpgrade.data(), keyBlobToUpgrade.size(),
+    int32_t rc = teesim_km_upgrade_key(ta.get(), keyBlobToUpgrade.data(), keyBlobToUpgrade.size(),
                                        km.data(), km.size(), &buf, &len);
     if (rc != 0) return Status(rc);
     out->assign(buf, buf + len);
@@ -396,12 +470,17 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                            const std::vector<uint8_t>& appId,
                                            const std::vector<uint8_t>& appData,
                                            std::vector<KeyCharacteristics>* out) override {
-    if (real_ && !IsOurs(keyBlob)) {
-      ForwardGuard g;
-      return real_->getKeyCharacteristics(keyBlob, appId, appData, out);
+    if (!IsOurs(keyBlob)) {
+      if (real_) {
+        ForwardGuard g;
+        return real_->getKeyCharacteristics(keyBlob, appId, appData, out);
+      }
+      return Status(-100);
     }
+    TaPtr ta = DefaultTa();
+    if (!ta) return Status(-100);
     TsCharacteristics* res = nullptr;
-    int32_t rc = teesim_km_get_key_characteristics(g_ta, keyBlob.data(), keyBlob.size(),
+    int32_t rc = teesim_km_get_key_characteristics(ta.get(), keyBlob.data(), keyBlob.size(),
                                                    appId.data(), appId.size(), appData.data(),
                                                    appData.size(), &res);
     if (rc != 0) return Status(rc);
@@ -500,15 +579,15 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     return a;
   }
 
-  ndk::ScopedAStatus Simulate(const std::vector<KeyParameter>& keyParams,
+  ndk::ScopedAStatus Simulate(::Ta* ta, const std::vector<KeyParameter>& keyParams,
                               const std::optional<AttestationKey>& attestationKey,
                               KeyCreationResult* out) {
     auto km = ToKmVec(keyParams);
     auto ak = MakeAttestKey(attestationKey);
     TsCreationResult* res = nullptr;
-    int32_t rc = teesim_km_generate_key(g_ta, km.data(), km.size(), ak.blob, ak.blob_len,
-                                        ak.params.data(), ak.params.size(), ak.issuer,
-                                        ak.issuer_len, &res);
+    int32_t rc = teesim_km_generate_key(ta, km.data(), km.size(), static_cast<int32_t>(level_),
+                                        ak.blob, ak.blob_len, ak.params.data(), ak.params.size(),
+                                        ak.issuer, ak.issuer_len, &res);
     if (rc != 0) return Status(rc);
     FillCreationResult(res, out);
     teesim_km_free_result(res);
@@ -523,29 +602,68 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
 
 // --- C entry points ----------------------------------------------------------
 
-extern "C" bool teesim_router_init(const char* keybox_xml, size_t len) {
-  if (g_ta) return true;
-  g_ta = teesim_km_init(reinterpret_cast<const uint8_t*>(keybox_xml), len);
-  return g_ta != nullptr;
+extern "C" const char* teesim_hook_name(void) { return "keymint"; }
+
+// Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
+// the control thread before the swap; only teesim_cfg_commit touches live tables.
+extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
+  g_staging.clear();
+  g_stage_vb_key.assign(boot->verified_boot_key,
+                        boot->verified_boot_key + boot->verified_boot_key_len);
+  g_stage_vb_hash.assign(boot->verified_boot_hash,
+                         boot->verified_boot_hash + boot->verified_boot_hash_len);
+  g_stage_locked = boot->device_locked;
+  g_stage_vb_state = boot->verified_boot_state;
 }
 
-extern "C" void teesim_router_configure(bool target_all, const char* const* pkgs, int n) {
-  std::lock_guard<std::mutex> lk(g_cfg_mu);
-  g_target_all = target_all;
-  g_targets.clear();
-  for (int i = 0; i < n && pkgs; ++i) {
-    if (pkgs[i]) g_targets.emplace_back(pkgs[i]);
+extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
+  ::Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
+                               p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
+                               g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
+                               g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state, p->ids);
+  if (!ta) {
+    LOGE("keymint: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
+    return false;
   }
+  Profile prof;
+  prof.id = p->id ? p->id : "";
+  prof.ta = WrapTa(ta);
+  for (int i = 0; i < p->n_packages && p->packages; ++i) {
+    if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
+  }
+  g_staging.push_back(std::move(prof));
+  return true;
+}
+
+extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err_len*/) {
+  std::lock_guard<std::mutex> lk(g_cfg_mu);
+  g_profiles = std::move(g_staging);
+  g_staging.clear();
+  g_default_ta = g_profiles.empty() ? nullptr : g_profiles.front().ta;
+  return static_cast<int>(g_profiles.size());
 }
 
 // Create a local device wrapping the real HAL binder (may be null). Returns an
 // AIBinder* whose ownership passes to the caller (release with AIBinder_decStrong).
+//
+// `security_level` is only a fallback: the device's real level is derived here
+// from the wrapped HAL's own getHardwareInfo(), so we report StrongBox only when a
+// real StrongBox HAL exists. This runs once per proxy (the caller caches the
+// result), and the ForwardGuard keeps this getHardwareInfo from looping back
+// through the interceptor. Any failure leaves the passed fallback in place.
 extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* real_binder) {
   std::shared_ptr<IKeyMintDevice> real;
   if (real_binder) {
     ndk::SpAIBinder sp(real_binder);
     AIBinder_incStrong(real_binder);  // keep our own reference
     real = IKeyMintDevice::fromBinder(sp);
+  }
+  if (real) {
+    ForwardGuard g;
+    KeyMintHardwareInfo hw;
+    if (real->getHardwareInfo(&hw).isOk()) {
+      security_level = static_cast<int32_t>(hw.securityLevel);
+    }
   }
   auto dev = ndk::SharedRefBase::make<TeesimKeyMintDevice>(
       static_cast<SecurityLevel>(security_level), std::move(real));

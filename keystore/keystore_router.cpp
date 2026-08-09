@@ -27,10 +27,12 @@
 #include <ctime>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <vector>
 
+#include "control.h"
 #include "logging.hpp"
 #include "teesim_km.h"
 
@@ -79,32 +81,73 @@ struct PendingKey {
   std::vector<KmParam> params;  // key parameters from generateKey
 };
 
-Ta* g_ta = nullptr;
+// A TA is reference-counted so an in-flight operation keeps its profile's TA
+// alive even if a config reload swaps or drops that profile underneath it.
+using TaPtr = std::shared_ptr<Ta>;
+TaPtr WrapTa(Ta* ta) {
+  return TaPtr(ta, [](Ta* t) {
+    if (t) teesim_km_destroy(t);
+  });
+}
+
+// A configured profile: its TA and the target uids, each mapped to its package
+// name (needed to synthesise the attestation application id).
+struct Profile {
+  std::string id;
+  TaPtr ta;
+  std::map<int, std::string> uids;  // uid -> package name
+};
+
+// Live routing, swapped atomically by teesim_cfg_commit under g_cfg_mutex.
+std::mutex g_cfg_mutex;
+std::vector<Profile> g_profiles;
+TaPtr g_default_ta;  // serves ops on our blobs; any profile's TA decrypts them
+
+// Staging state built up by teesim_cfg_begin/add_profile before the swap.
+std::vector<Profile> g_staging;
+std::vector<uint8_t> g_stage_vb_key;
+std::vector<uint8_t> g_stage_vb_hash;
+bool g_stage_locked = true;
+int32_t g_stage_vb_state = 0;
+
 std::mutex g_keys_mutex;
 std::map<std::string, PendingKey> g_keys;
 
 // An in-flight crypto operation. The token returned to the caller identifies the
-// TA operation handle for the follow-up update/finish/abort calls.
+// TA operation handle and the TA it runs on, for follow-up update/finish/abort.
 class OpToken : public BBinder {};
 struct Operation {
   sp<IBinder> token;  // keeps the token binder alive while the operation runs
   int64_t op_handle;
+  TaPtr ta;
 };
 std::mutex g_ops_mutex;
 std::map<IBinder*, Operation> g_ops;
 
-std::mutex g_targets_mutex;
-std::map<int, std::string> g_target_uids;  // uid -> package name
-
-bool IsTarget(int uid) {
-  std::lock_guard<std::mutex> lk(g_targets_mutex);
-  return g_target_uids.count(uid) > 0;
+// The profile TA serving this uid, or null if the uid is not a target.
+TaPtr ProfileForUid(int uid) {
+  std::lock_guard<std::mutex> lk(g_cfg_mutex);
+  for (const auto& prof : g_profiles) {
+    if (prof.uids.count(uid)) return prof.ta;
+  }
+  return nullptr;
 }
 
+// The TA used for operations on an existing blob of ours.
+TaPtr DefaultTa() {
+  std::lock_guard<std::mutex> lk(g_cfg_mutex);
+  return g_default_ta;
+}
+
+bool IsTarget(int uid) { return ProfileForUid(uid) != nullptr; }
+
 std::string PackageForUid(int uid) {
-  std::lock_guard<std::mutex> lk(g_targets_mutex);
-  auto it = g_target_uids.find(uid);
-  return it == g_target_uids.end() ? std::string() : it->second;
+  std::lock_guard<std::mutex> lk(g_cfg_mutex);
+  for (const auto& prof : g_profiles) {
+    auto it = prof.uids.find(uid);
+    if (it != prof.uids.end()) return it->second;
+  }
+  return std::string();
 }
 
 // AttestationApplicationId ::= SEQUENCE { packages SET OF SEQUENCE { name
@@ -378,14 +421,19 @@ void AddRequiredTags(std::vector<KmParam>& params, int uid,
 // caller supplies (the challenge). Returns a result the caller must free, or null.
 TsCreationResult* ImportKey(const PendingKey& k, int uid, const std::vector<KmParam>& extra,
                             bool with_attestation) {
+  TaPtr ta = ProfileForUid(uid);
+  if (!ta) ta = DefaultTa();
+  if (!ta) return nullptr;
   std::vector<KmParam> params = k.params;
   params.insert(params.end(), extra.begin(), extra.end());
   std::vector<uint8_t> app_id;
   AddRequiredTags(params, uid, app_id, with_attestation);
   TsCreationResult* res = nullptr;
-  int32_t rc = teesim_km_import_key(g_ta, params.data(), params.size(), KEY_FORMAT_PKCS8,
-                                    k.pkcs8.data(), k.pkcs8.size(), nullptr, 0, nullptr, 0,
-                                    nullptr, 0, &res);
+  // The legacy Keystore HAL path has no wrapped KeyMint HAL to derive a level
+  // from, so -1 keeps the TA's configured default security level.
+  int32_t rc = teesim_km_import_key(ta.get(), params.data(), params.size(), /*security_level=*/-1,
+                                    KEY_FORMAT_PKCS8, k.pkcs8.data(), k.pkcs8.size(), nullptr, 0,
+                                    nullptr, 0, nullptr, 0, &res);
   if (rc != 0 || !res) {
     LOGE("keystore: TA import_key failed rc=%d", rc);
     return nullptr;
@@ -581,8 +629,11 @@ bool HandleBegin(int uid, Parcel& in, Parcel* reply) {
     blob = it->second.ta_blob;
   }
 
+  TaPtr ta = ProfileForUid(uid);
+  if (!ta) ta = DefaultTa();
+  if (!ta) return false;
   TsBeginResult* res = nullptr;
-  int32_t rc = teesim_km_begin(g_ta, purpose, blob.data(), blob.size(), op_params.data(),
+  int32_t rc = teesim_km_begin(ta.get(), purpose, blob.data(), blob.size(), op_params.data(),
                                op_params.size(), &res);
   if (rc != 0 || !res) {
     LOGE("keystore: TA begin failed rc=%d", rc);
@@ -594,7 +645,7 @@ bool HandleBegin(int uid, Parcel& in, Parcel* reply) {
   sp<IBinder> token = sp<OpToken>::make();
   {
     std::lock_guard<std::mutex> lk(g_ops_mutex);
-    g_ops[token.get()] = {token, op_handle};
+    g_ops[token.get()] = {token, op_handle, ta};
   }
   LOGI("keystore: begin purpose=%d alias=%s", purpose, String8(alias).c_str());
 
@@ -605,12 +656,13 @@ bool HandleBegin(int uid, Parcel& in, Parcel* reply) {
   return true;
 }
 
-// Look up the TA operation handle for a token the caller passes back.
-bool OpHandleFor(const sp<IBinder>& token, int64_t* op_handle, bool erase) {
+// Look up the TA operation handle and its TA for a token the caller passes back.
+bool OpFor(const sp<IBinder>& token, int64_t* op_handle, TaPtr* ta, bool erase) {
   std::lock_guard<std::mutex> lk(g_ops_mutex);
   auto it = g_ops.find(token.get());
   if (it == g_ops.end()) return false;
   *op_handle = it->second.op_handle;
+  *ta = it->second.ta;
   if (erase) g_ops.erase(it);
   return true;
 }
@@ -632,11 +684,12 @@ bool HandleUpdate(int /*uid*/, Parcel& in, Parcel* reply) {
   std::vector<uint8_t> input = ReadByteArray(in);
 
   int64_t op_handle = 0;
-  if (!OpHandleFor(token, &op_handle, /*erase=*/false)) return false;  // not ours; forward
+  TaPtr ta;
+  if (!OpFor(token, &op_handle, &ta, /*erase=*/false)) return false;  // not ours; forward
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_update(g_ta, op_handle, input.data(), input.size(), &out, &out_len);
+  int32_t rc = teesim_km_update(ta.get(), op_handle, input.data(), input.size(), &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
     output.assign(out, out + out_len);
@@ -658,11 +711,12 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   std::vector<uint8_t> signature = ReadByteArray(in);          // supplied for verify
 
   int64_t op_handle = 0;
-  if (!OpHandleFor(token, &op_handle, /*erase=*/true)) return false;  // not ours; forward
+  TaPtr ta;
+  if (!OpFor(token, &op_handle, &ta, /*erase=*/true)) return false;  // not ours; forward
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_finish(g_ta, op_handle, nullptr, 0, signature.data(), signature.size(),
+  int32_t rc = teesim_km_finish(ta.get(), op_handle, nullptr, 0, signature.data(), signature.size(),
                                 &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
@@ -682,8 +736,9 @@ bool HandleAbort(int /*uid*/, Parcel& in, Parcel* reply) {
   sp<IBinder> cb = in.readStrongBinder();
   sp<IBinder> token = in.readStrongBinder();
   int64_t op_handle = 0;
-  if (!OpHandleFor(token, &op_handle, /*erase=*/true)) return false;  // not ours; forward
-  teesim_km_abort(g_ta, op_handle);
+  TaPtr ta;
+  if (!OpFor(token, &op_handle, &ta, /*erase=*/true)) return false;  // not ours; forward
+  teesim_km_abort(ta.get(), op_handle);
 
   static const String16 kCb("android.security.keystore.IKeystoreResponseCallback");
   InvokeCallback(cb, kCb, [](Parcel& p) { WriteKeystoreResponse(p, KS_NO_ERROR); });
@@ -693,11 +748,49 @@ bool HandleAbort(int /*uid*/, Parcel& in, Parcel* reply) {
 
 }  // namespace
 
-// Provide the TA the router uses; ownership stays with the caller.
-extern "C" void teesim_ks_set_ta(Ta* ta) { g_ta = ta; }
-extern "C" void teesim_ks_add_target(int uid, const char* pkg) {
-  std::lock_guard<std::mutex> lk(g_targets_mutex);
-  g_target_uids[uid] = pkg ? pkg : "";
+extern "C" const char* teesim_hook_name(void) { return "keystore1"; }
+
+// Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
+// the control thread; only teesim_cfg_commit touches the live routing tables.
+extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
+  g_staging.clear();
+  g_stage_vb_key.assign(boot->verified_boot_key,
+                        boot->verified_boot_key + boot->verified_boot_key_len);
+  g_stage_vb_hash.assign(boot->verified_boot_hash,
+                         boot->verified_boot_hash + boot->verified_boot_hash_len);
+  g_stage_locked = boot->device_locked;
+  g_stage_vb_state = boot->verified_boot_state;
+}
+
+extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
+  Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
+                             p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
+                             g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
+                             g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state, p->ids);
+  if (!ta) {
+    LOGE("keystore: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
+    return false;
+  }
+  Profile prof;
+  prof.id = p->id ? p->id : "";
+  prof.ta = WrapTa(ta);
+  // uids[] is aligned 1:1 with packages[]; -1 marks a package that is not installed.
+  for (int i = 0; i < p->n_uids && p->uids; ++i) {
+    if (p->uids[i] < 0) continue;
+    const char* pkg =
+        (i < p->n_packages && p->packages && p->packages[i]) ? p->packages[i] : "";
+    prof.uids[p->uids[i]] = pkg;
+  }
+  g_staging.push_back(std::move(prof));
+  return true;
+}
+
+extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err_len*/) {
+  std::lock_guard<std::mutex> lk(g_cfg_mutex);
+  g_profiles = std::move(g_staging);
+  g_staging.clear();
+  g_default_ta = g_profiles.empty() ? nullptr : g_profiles.front().ta;
+  return static_cast<int>(g_profiles.size());
 }
 
 // The interception handler installed for the keystore service binder.
@@ -716,8 +809,6 @@ extern "C" bool teesim_ks_handle(uint32_t code, const Parcel& data, Parcel* repl
     default:
       return false;
   }
-  if (!g_ta) return false;
-
   int uid = IPCThreadState::self()->getCallingUid();
   if (!IsTarget(uid)) return false;
   Reader r(data);
