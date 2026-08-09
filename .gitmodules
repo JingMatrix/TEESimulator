@@ -1,3 +1,6 @@
 [submodule "third_party/lsplt"]
 	path = third_party/lsplt
 	url = https://github.com/JingMatrix/LSPlt
+[submodule "third_party/keymint"]
+	path = third_party/keymint
+	url = https://android.googlesource.com/platform/system/keymint

@@ -1,0 +1,22 @@
+# Cargo is used only to build the glue crate for Android with cargo-ndk; the
+# reference implementation under third_party/keymint keeps its own Soong build.
+# The kmr-* crates depend on each other with crates.io wildcard versions and rely
+# on the containing workspace to redirect those to the submodule.
+
+[workspace]
+resolver = "2"
+members = ["teesim-km"]
+
+[patch.crates-io]
+kmr-common = { path = "../third_party/keymint/common" }
+kmr-derive = { path = "../third_party/keymint/derive" }
+kmr-wire = { path = "../third_party/keymint/wire" }
+kmr-ta = { path = "../third_party/keymint/ta" }
+kmr-tests = { path = "../third_party/keymint/tests" }
+kmr-crypto-boring = { path = "../third_party/keymint/boringssl" }
+
+[profile.release]
+panic = "unwind"
+opt-level = "z"
+lto = true
+strip = true

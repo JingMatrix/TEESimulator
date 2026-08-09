@@ -1,0 +1,24 @@
+diff --git a/ta/src/lib.rs b/ta/src/lib.rs
+index a0efe49..7f9b165 100644
+--- a/ta/src/lib.rs
++++ b/ta/src/lib.rs
+@@ -353,6 +353,19 @@ impl KeyMintTa {
+         self.hw_info.security_level == SecurityLevel::Strongbox
+     }
+ 
++    /// Return the hardware security level reported in attestation records and key
++    /// characteristics.
++    pub fn security_level(&self) -> SecurityLevel {
++        self.hw_info.security_level
++    }
++
++    /// Override the hardware security level reported in attestation records and
++    /// key characteristics. Lets a single generateKey/importKey attest at the
++    /// security level of the HAL it was requested through.
++    pub fn set_security_level(&mut self, security_level: SecurityLevel) {
++        self.hw_info.security_level = security_level;
++    }
++
+     /// Indicate whether the current device has secure storage available.
+     fn secure_storage_available(&self) -> kmr_common::tag::SecureStorage {
+         if self.dev.sdd_mgr.is_some() {

@@ -1,0 +1,25 @@
+[package]
+name = "teesim-km"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "In-process KeyMint TA (kmr-ta) and C ABI for the native interceptor."
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+kmr-ta = { path = "../../third_party/keymint/ta" }
+kmr-common = { path = "../../third_party/keymint/common" }
+kmr-wire = { path = "../../third_party/keymint/wire" }
+kmr-crypto-boring = { path = "../../third_party/keymint/boringssl" }
+
+# openssl-sys generates the BoringSSL FFI from the platform headers at build time.
+openssl-sys = { version = "0.9.117", features = ["bindgen"] }
+
+log = "0.4"
+libc = "0.2"
+
+roxmltree = "0.20"
+base64 = "0.22"

@@ -1,0 +1,41 @@
+--- a/boringssl/src/hmac.rs	2026-08-09 11:44:49.265559019 +0200
++++ b/boringssl/src/hmac.rs	2026-08-09 11:44:49.288820375 +0200
+@@ -43,10 +43,9 @@
+         }
+ 
+         let digest = digest_into_openssl_ffi(digest)?;
+-        #[cfg(soong)]
++        // openssl-sys binds HMAC_Init_ex's key length as size_t against BoringSSL,
++        // matching the Soong bssl-sys binding, so no narrowing cast is needed.
+         let key_len = key.0.len();
+-        #[cfg(not(soong))]
+-        let key_len = key.0.len() as i32;
+ 
+         // Safety: `op.ctx` is known non-null and valid, as is the result of
+         // `digest_into_openssl_ffi()`.  `key_len` is length of `key.0`, which is a valid `Vec<u8>`.
+--- a/boringssl/src/aes_cmac.rs	2026-08-09 11:44:49.265559019 +0200
++++ b/boringssl/src/aes_cmac.rs	2026-08-09 11:44:49.290820358 +0200
+@@ -17,6 +17,7 @@
+ use crate::{malloc_err, openssl_last_err};
+ use alloc::boxed::Box;
+ use alloc::vec::Vec;
++#[cfg(soong)]
+ use bssl_sys as ffi;
+ use kmr_common::{crypto, crypto::OpaqueOr, explicit, km_err, vec_try, Error};
+ use log::error;
+--- a/boringssl/src/lib.rs	2026-08-09 11:44:49.265559019 +0200
++++ b/boringssl/src/lib.rs	2026-08-09 11:44:49.292820341 +0200
+@@ -23,10 +23,9 @@
+ use log::error;
+ use openssl::hash::MessageDigest;
+ 
+-#[cfg(soong)]
+-// There is no OpenSSL CMAC API that is available in both BoringSSL for Android (which has `cmac.h`
+-// functions but not `EVP_PKEY_CMAC` functionality) and in tip OpenSSL (which has `EVP_PKEY_CMAC`
+-// functionality but which has removed `cmac.h`).  So only build AES-CMAC for Android.
++// AES-CMAC uses BoringSSL's cmac.h. It is available whenever we link against
++// BoringSSL (Soong's bssl-sys, or openssl-sys bound to the platform BoringSSL);
++// upstream tip OpenSSL removed cmac.h and is not a supported target here.
+ pub mod aes_cmac;
+ 
+ pub mod aes;
