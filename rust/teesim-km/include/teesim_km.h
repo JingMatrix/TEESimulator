@@ -30,9 +30,39 @@ typedef struct {
   size_t blob_len;
 } KmParam;
 
+// Device-ID values a profile vouches for; each is a byte span (NULL/0 = unset).
+// Passed to teesim_km_init_ex. If every field is unset, device-ID attestation is
+// declined, exactly as on a device that was never provisioned with IDs.
+typedef struct {
+  const uint8_t *brand;        size_t brand_len;
+  const uint8_t *device;       size_t device_len;
+  const uint8_t *product;      size_t product_len;
+  const uint8_t *serial;       size_t serial_len;
+  const uint8_t *imei;         size_t imei_len;
+  const uint8_t *imei2;        size_t imei2_len;
+  const uint8_t *meid;         size_t meid_len;
+  const uint8_t *manufacturer; size_t manufacturer_len;
+  const uint8_t *model;        size_t model_len;
+} TsDeviceIds;
+
 // --- lifecycle ---------------------------------------------------------------
 
+// Build a TA with the historical default identity (used before any daemon push).
 Ta *teesim_km_init(const uint8_t *keybox_ptr, size_t keybox_len);
+
+// Build a TA from a fully resolved profile: keybox + security level + patch/OS
+// levels + device-wide verified-boot fields + optional device IDs. Integer
+// encodings match KeyMint: os_version = major*10000+minor*100+sub; os_patchlevel
+// = YYYYMM; vendor/boot patchlevel = YYYYMMDD. security_level: 0 Software, 1 TEE,
+// 2 StrongBox. verified_boot_state: 0 Verified, 1 SelfSigned, 2 Unverified,
+// 3 Failed. `ids` may be NULL. Returns null on failure (e.g. a bad keybox).
+Ta *teesim_km_init_ex(const uint8_t *keybox_ptr, size_t keybox_len,
+                      int32_t security_level, uint32_t os_version,
+                      uint32_t os_patchlevel, uint32_t vendor_patchlevel,
+                      uint32_t boot_patchlevel, const uint8_t *vb_key,
+                      size_t vb_key_len, const uint8_t *vb_hash, size_t vb_hash_len,
+                      bool device_locked, int32_t verified_boot_state,
+                      const TsDeviceIds *ids);
 void teesim_km_destroy(Ta *handle);
 bool teesim_km_is_marked(const uint8_t *blob_ptr, size_t blob_len);
 
@@ -43,18 +73,23 @@ void teesim_km_free_buf(uint8_t *ptr, size_t len);
 
 // --- generateKey / importKey -------------------------------------------------
 
+// `security_level` is the level of the real HAL the request came through (0
+// Software, 1 TrustedEnvironment, 2 StrongBox); the attestation record and key
+// characteristics are emitted at that level, overriding the TA's default. A value
+// outside that set keeps the TA's configured default.
 int32_t teesim_km_generate_key(Ta *ta, const KmParam *params, size_t n_params,
-                               const uint8_t *ak_blob, size_t ak_blob_len,
-                               const KmParam *ak_params, size_t ak_n_params,
-                               const uint8_t *ak_issuer, size_t ak_issuer_len,
-                               TsCreationResult **out);
+                               int32_t security_level, const uint8_t *ak_blob,
+                               size_t ak_blob_len, const KmParam *ak_params,
+                               size_t ak_n_params, const uint8_t *ak_issuer,
+                               size_t ak_issuer_len, TsCreationResult **out);
 
 int32_t teesim_km_import_key(Ta *ta, const KmParam *params, size_t n_params,
-                             int32_t key_format, const uint8_t *key_data,
-                             size_t key_data_len, const uint8_t *ak_blob,
-                             size_t ak_blob_len, const KmParam *ak_params,
-                             size_t ak_n_params, const uint8_t *ak_issuer,
-                             size_t ak_issuer_len, TsCreationResult **out);
+                             int32_t security_level, int32_t key_format,
+                             const uint8_t *key_data, size_t key_data_len,
+                             const uint8_t *ak_blob, size_t ak_blob_len,
+                             const KmParam *ak_params, size_t ak_n_params,
+                             const uint8_t *ak_issuer, size_t ak_issuer_len,
+                             TsCreationResult **out);
 
 void teesim_km_result_key_blob(const TsCreationResult *res, const uint8_t **ptr, size_t *len);
 size_t teesim_km_result_num_certs(const TsCreationResult *res);

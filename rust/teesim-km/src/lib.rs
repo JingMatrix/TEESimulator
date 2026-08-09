@@ -19,10 +19,13 @@ use kmr_crypto_boring::{
     aes::BoringAes, aes_cmac::BoringAesCmac, des::BoringDes, ec::BoringEc, eq::BoringEq,
     hmac::BoringHmac, rng::BoringRng, rsa::BoringRsa, sha256::BoringSha256,
 };
-use kmr_ta::device::{BootloaderDone, Implementation, TrustedPresenceUnsupported};
+use kmr_ta::device::{
+    BootloaderDone, Implementation, RetrieveAttestationIds, TrustedPresenceUnsupported,
+};
 use kmr_ta::{HalInfo, HardwareInfo, KeyMintTa, RpcInfo, RpcInfoV3};
 use kmr_wire::keymint::{BootInfo, SecurityLevel, VerifiedBootState};
 use kmr_wire::rpc::MINIMUM_SUPPORTED_KEYS_IN_CSR;
+use kmr_wire::types::AttestationIdInfo;
 
 /// Prefix stamped on every key blob produced by this TA. It lets the interceptor
 /// route later operations: a blob that starts with this marker belongs to us and
@@ -58,18 +61,76 @@ pub struct Ta {
     inner: KeyMintTa,
 }
 
-impl Ta {
-    /// Build a TA that attests with the keys from `keybox_xml`.
-    ///
-    /// `set_boot_info` is fed constant values so that the key-encryption keys the
-    /// TA derives are reproducible across reboots; without that, blobs stored in
-    /// keystore2's database would fail to decrypt after a restart.
-    pub fn new(keybox_xml: &str) -> Result<Self, String> {
-        let sign_info = attest::CertSignInfo::new(keybox_xml)?;
+/// Everything beyond the crypto backend that shapes a profile's attestation
+/// records. The daemon resolves all of it and the interceptor hands it to
+/// `Ta::new_ex`. The verified-boot fields feed KeyMint's key-encryption-key
+/// derivation as well as the record's root of trust, so they are device-wide and
+/// frozen — the daemon sends the device's real, unchanging values, which keeps
+/// stored blobs decryptable across reboots and across profiles.
+pub struct TaConfig<'a> {
+    /// Contents of the profile's keybox.xml.
+    pub keybox_xml: &'a str,
+    /// 0 Software, 1 TrustedEnvironment, 2 StrongBox.
+    pub security_level: i32,
+    /// OS version, encoded `major*10000 + minor*100 + sub`.
+    pub os_version: u32,
+    /// System patch level, `YYYYMM`.
+    pub os_patchlevel: u32,
+    /// Vendor patch level, `YYYYMMDD`.
+    pub vendor_patchlevel: u32,
+    /// Boot patch level, `YYYYMMDD`.
+    pub boot_patchlevel: u32,
+    /// Verified-boot key digest (device-wide; feeds the KEK — keep it frozen).
+    pub verified_boot_key: Vec<u8>,
+    /// Verified-boot hash (device-wide).
+    pub verified_boot_hash: Vec<u8>,
+    /// Whether the bootloader reports the device locked.
+    pub device_boot_locked: bool,
+    /// 0 Verified, 1 SelfSigned, 2 Unverified, 3 Failed.
+    pub verified_boot_state: i32,
+    /// Device-ID values to vouch for, or `None` to decline ID attestation.
+    pub attestation_ids: Option<AttestationIdInfo>,
+}
 
+impl<'a> TaConfig<'a> {
+    /// The historical hard-coded identity, used when no daemon has pushed config
+    /// yet (and by the plain `teesim_km_init` entry point). A zeroed root of trust
+    /// is a placeholder; a configured profile supplies the device's real values.
+    pub fn defaults(keybox_xml: &'a str) -> Self {
+        TaConfig {
+            keybox_xml,
+            security_level: SecurityLevel::TrustedEnvironment as i32,
+            os_version: 160000,
+            os_patchlevel: 202508,
+            vendor_patchlevel: 20250805,
+            boot_patchlevel: 20240101,
+            verified_boot_key: vec![0u8; 32],
+            verified_boot_hash: vec![0u8; 32],
+            device_boot_locked: true,
+            verified_boot_state: VerifiedBootState::Verified as i32,
+            attestation_ids: None,
+        }
+    }
+}
+
+impl Ta {
+    /// Build a TA with the historical defaults, attesting with `keybox_xml`.
+    pub fn new(keybox_xml: &str) -> Result<Self, String> {
+        Self::new_ex(TaConfig::defaults(keybox_xml))
+    }
+
+    /// Build a TA from a fully resolved profile configuration.
+    pub fn new_ex(cfg: TaConfig) -> Result<Self, String> {
+        let sign_info = attest::CertSignInfo::new(cfg.keybox_xml)?;
+
+        let security_level = match cfg.security_level {
+            0 => SecurityLevel::Software,
+            2 => SecurityLevel::Strongbox,
+            _ => SecurityLevel::TrustedEnvironment,
+        };
         let hw_info = HardwareInfo {
             version_number: 1,
-            security_level: SecurityLevel::TrustedEnvironment,
+            security_level,
             impl_name: "TEESimulator KeyMint",
             author_name: "TEESimulator",
             unique_id: "TEESimulator KeyMint TA",
@@ -81,11 +142,15 @@ impl Ta {
             supported_num_of_keys_in_csr: MINIMUM_SUPPORTED_KEYS_IN_CSR,
         };
 
+        // Device-ID attestation is offered only when the profile supplies IDs.
+        let attest_ids: Option<Box<dyn RetrieveAttestationIds>> = cfg
+            .attestation_ids
+            .map(|ids| Box::new(device::AttestIds(ids)) as Box<dyn RetrieveAttestationIds>);
+
         let dev = Implementation {
             keys: Box::new(device::Keys),
             sign_info: Some(Box::new(sign_info)),
-            // Attestation IDs are not populated.
-            attest_ids: None,
+            attest_ids,
             // Rollback-resistant keys are declined (no secure-deletion store).
             sdd_mgr: None,
             bootloader: Box::new(BootloaderDone),
@@ -97,23 +162,30 @@ impl Ta {
 
         let mut inner = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info), crypto_impls(), dev);
 
-        // A constant root of trust keeps the derived key-encryption keys stable
-        // across restarts, so blobs kept in keystore2's database stay usable.
+        let verified_boot_state = match cfg.verified_boot_state {
+            1 => VerifiedBootState::SelfSigned,
+            2 => VerifiedBootState::Unverified,
+            3 => VerifiedBootState::Failed,
+            _ => VerifiedBootState::Verified,
+        };
+        // These fields double as the attestation record's root of trust and as
+        // inputs to the KEK derivation. The daemon supplies the device's real,
+        // frozen values, so the KEK stays stable across reboots and every profile
+        // derives the same one (blobs are cross-decryptable).
         inner
             .set_boot_info(BootInfo {
-                verified_boot_key: vec![0u8; 32],
-                device_boot_locked: true,
-                verified_boot_state: VerifiedBootState::Verified,
-                verified_boot_hash: vec![0u8; 32],
-                boot_patchlevel: 20240101,
+                verified_boot_key: cfg.verified_boot_key,
+                device_boot_locked: cfg.device_boot_locked,
+                verified_boot_state,
+                verified_boot_hash: cfg.verified_boot_hash,
+                boot_patchlevel: cfg.boot_patchlevel,
             })
             .map_err(|e| format!("set_boot_info: {e:?}"))?;
 
-        // OS and patch levels reported in attestation records.
         inner.set_hal_info(HalInfo {
-            os_version: 160000,
-            os_patchlevel: 202508,
-            vendor_patchlevel: 20250805,
+            os_version: cfg.os_version,
+            os_patchlevel: cfg.os_patchlevel,
+            vendor_patchlevel: cfg.vendor_patchlevel,
         });
 
         Ok(Ta { inner })

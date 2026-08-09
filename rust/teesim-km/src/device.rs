@@ -6,7 +6,10 @@
 
 use kmr_common::crypto::{self, Hkdf};
 use kmr_common::{km_err, Error};
-use kmr_ta::device::{DiceInfo, RetrieveKeyMaterial, RetrieveRpcArtifacts, RpcV2Req};
+use kmr_ta::device::{
+    DiceInfo, RetrieveAttestationIds, RetrieveKeyMaterial, RetrieveRpcArtifacts, RpcV2Req,
+};
+use kmr_wire::types::AttestationIdInfo;
 
 /// Fixed root key material.
 pub struct Keys;
@@ -64,5 +67,20 @@ impl RetrieveRpcArtifacts for NoRpc {
         _rpc_v2: Option<RpcV2Req>,
     ) -> Result<Vec<u8>, Error> {
         Err(km_err!(Unimplemented, "remote provisioning is not supported"))
+    }
+}
+
+/// Device-ID attestation values for a profile. `get` hands back a clone; the TA
+/// vouches for exactly these when an app requests device-ID attestation.
+/// `destroy_all` is a no-op — provisioned IDs are never wiped.
+pub struct AttestIds(pub AttestationIdInfo);
+
+impl RetrieveAttestationIds for AttestIds {
+    fn get(&self) -> Result<AttestationIdInfo, Error> {
+        Ok(self.0.clone())
+    }
+
+    fn destroy_all(&mut self) -> Result<(), Error> {
+        Ok(())
     }
 }
