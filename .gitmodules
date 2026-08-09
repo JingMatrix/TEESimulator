@@ -10,3 +10,7 @@
 [submodule "third_party/frameworks-native"]
 	path = third_party/frameworks-native
 	url = https://android.googlesource.com/platform/frameworks/native
+[submodule "third_party/boringssl"]
+	path = third_party/boringssl
+	url = https://boringssl.googlesource.com/boringssl
+	shallow = true

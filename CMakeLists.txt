@@ -13,7 +13,7 @@ add_compile_definitions(__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__)
 # resolved at runtime inside keystore2; at build time it links copies for the
 # target ABI (pulled from a device) and BoringSSL headers for the Rust bindings.
 set(DEVICE_LIB_DIR "" CACHE PATH "Directory holding the target ABI's libbinder_ndk.so and libcrypto.so")
-set(BORINGSSL_DIR "" CACHE PATH "BoringSSL source directory containing include/")
+set(BORINGSSL_DIR "${CMAKE_SOURCE_DIR}/third_party/boringssl" CACHE PATH "BoringSSL source directory containing include/")
 set(ANDROID_API_LEVEL "34" CACHE STRING "Android platform level for the Rust build")
 
 # --- LSPlt: memory-map scanning and PLT/GOT hooking -------------------------
