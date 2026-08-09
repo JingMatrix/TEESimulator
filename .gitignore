@@ -1,0 +1,6 @@
+/build/
+/out/
+**/target/
+Cargo.lock
+compile_commands.json
+.cxx/
