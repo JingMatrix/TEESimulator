@@ -86,22 +86,27 @@ add_custom_command(
     VERBATIM USES_TERMINAL)
 add_custom_target(rust_ta DEPENDS ${RUST_A})
 
-# --- Build-time stub for the platform BoringSSL -----------------------------
-# The TA calls BoringSSL, which lives inside keystore2 and is not part of the NDK.
-# Link a stub libcrypto.so of empty functions so the interceptor gets a NEEDED
-# entry with the right SONAME; keystore2's real libcrypto provides the symbols at
-# runtime. The stub is a build artifact and is never shipped. libcrypto.syms lists
-# the symbols we reference; a new BoringSSL call absent from it fails the link.
-set(CRYPTO_STUB_C ${CMAKE_BINARY_DIR}/libcrypto_stub.c)
-file(STRINGS ${CMAKE_SOURCE_DIR}/keymint/libcrypto.syms _crypto_syms)
-set(_stub_body "")
-foreach(_s ${_crypto_syms})
-  string(APPEND _stub_body "void ${_s}(void){}\n")
-endforeach()
-file(WRITE ${CRYPTO_STUB_C} "${_stub_body}")
-add_library(crypto_stub SHARED ${CRYPTO_STUB_C})
-set_target_properties(crypto_stub PROPERTIES OUTPUT_NAME crypto)
-target_link_options(crypto_stub PRIVATE -nostdlib -Wl,-soname,libcrypto.so)
+# --- How the TA reaches BoringSSL -------------------------------------------
+# On keystore2 (Android 12+) BoringSSL lives in the host process, so we link only
+# a stub libcrypto.so (empty functions with the right SONAME) and let the host's
+# real libcrypto provide the symbols at runtime. On Android 10 the host's libcrypto
+# is too old, so CRYPTO_STATIC_LIB bundles a modern static BoringSSL instead.
+set(CRYPTO_STATIC_LIB "" CACHE FILEPATH "Static libcrypto.a to bundle; empty = resolve libcrypto at runtime via a stub")
+if(CRYPTO_STATIC_LIB)
+  set(CRYPTO_LINK ${CRYPTO_STATIC_LIB})
+else()
+  set(CRYPTO_STUB_C ${CMAKE_BINARY_DIR}/libcrypto_stub.c)
+  file(STRINGS ${CMAKE_SOURCE_DIR}/keymint/libcrypto.syms _crypto_syms)
+  set(_stub_body "")
+  foreach(_s ${_crypto_syms})
+    string(APPEND _stub_body "void ${_s}(void){}\n")
+  endforeach()
+  file(WRITE ${CRYPTO_STUB_C} "${_stub_body}")
+  add_library(crypto_stub SHARED ${CRYPTO_STUB_C})
+  set_target_properties(crypto_stub PROPERTIES OUTPUT_NAME crypto)
+  target_link_options(crypto_stub PRIVATE -nostdlib -Wl,-soname,libcrypto.so)
+  set(CRYPTO_LINK crypto_stub)
+endif()
 
 # --- The injected interceptor library ---------------------------------------
 add_library(teesim_keymint SHARED
@@ -109,9 +114,9 @@ add_library(teesim_keymint SHARED
 add_dependencies(teesim_keymint rust_ta)
 target_include_directories(teesim_keymint PRIVATE
     keymint injector/include rust/teesim-km/include ${LSPLT_JNI}/include)
-# libbinder_ndk and liblog come from the NDK sysroot; libcrypto from the stub above.
-# All three are shadowed at runtime by the copies keystore2 has loaded.
-target_link_libraries(teesim_keymint PRIVATE keymint_aidl lsplt ${RUST_A} crypto_stub binder_ndk log)
+# libbinder_ndk and liblog come from the NDK sysroot; libcrypto is either the
+# runtime stub (shadowed by the host's copy) or a bundled static BoringSSL.
+target_link_libraries(teesim_keymint PRIVATE keymint_aidl lsplt ${RUST_A} ${CRYPTO_LINK} binder_ndk log)
 target_link_options(teesim_keymint PRIVATE
     -static-libstdc++
     # Binder/log calls newer than the min-SDK are absent from the NDK stub; let them
@@ -119,3 +124,45 @@ target_link_options(teesim_keymint PRIVATE
     -Wl,-z,undefs
     -Wl,--version-script=${CMAKE_SOURCE_DIR}/keymint/exports.map
     -Wl,--gc-sections)
+
+# --- Legacy keystore interceptor (Android 10/11) ----------------------------
+# Apps reach the keystore daemon over the C++ libbinder, which is not in the NDK.
+# Link stub libbinder/libutils (empty definitions carrying the right C++ ABI and
+# SONAMEs) so the device's real libraries provide the implementations at runtime.
+# Built only when a static BoringSSL is supplied: on Android 10/11 the TA's crypto
+# is bundled (CRYPTO_STATIC_LIB) rather than resolved from the host's older libcrypto.
+# The platform libbinder exports BBinder's vtable but not its RTTI typeinfo, so
+# anything deriving from BBinder must be built without RTTI (and, to match, without
+# exceptions) or it fails to load.
+if(CRYPTO_STATIC_LIB)
+set(AOSP ${CMAKE_SOURCE_DIR}/keystore/aosp)
+set(BINDER_CXX_FLAGS -fno-rtti -fno-exceptions)
+add_library(utils_stub SHARED ${AOSP}/stub_utils.cpp)
+set_target_properties(utils_stub PROPERTIES OUTPUT_NAME utils)
+target_include_directories(utils_stub PRIVATE ${AOSP}/include)
+target_compile_definitions(utils_stub PRIVATE BINDER_DISABLE_NATIVE_HANDLE)
+target_compile_options(utils_stub PRIVATE ${BINDER_CXX_FLAGS})
+
+add_library(binder_stub SHARED ${AOSP}/stub_binder.cpp)
+set_target_properties(binder_stub PROPERTIES OUTPUT_NAME binder)
+target_include_directories(binder_stub PRIVATE ${AOSP}/include)
+target_compile_definitions(binder_stub PRIVATE BINDER_DISABLE_NATIVE_HANDLE)
+target_compile_options(binder_stub PRIVATE ${BINDER_CXX_FLAGS})
+target_link_libraries(binder_stub PRIVATE utils_stub)
+
+add_library(teesim_keystore SHARED
+    keystore/binder_interceptor.cpp keystore/keystore_router.cpp keystore/keystore_entry.cpp)
+add_dependencies(teesim_keystore rust_ta)
+target_include_directories(teesim_keystore PRIVATE
+    keystore ${AOSP}/include injector/include ${LSPLT_JNI}/include
+    rust/teesim-km/include ${BORINGSSL_DIR}/include)
+target_compile_definitions(teesim_keystore PRIVATE BINDER_DISABLE_NATIVE_HANDLE)
+target_compile_options(teesim_keystore PRIVATE ${BINDER_CXX_FLAGS})
+target_link_libraries(teesim_keystore PRIVATE
+    binder_stub utils_stub lsplt log ${RUST_A} ${CRYPTO_STATIC_LIB})
+target_link_options(teesim_keystore PRIVATE
+    -static-libstdc++
+    -Wl,-z,undefs
+    -Wl,--version-script=${CMAKE_SOURCE_DIR}/keymint/exports.map
+    -Wl,--gc-sections)
+endif()

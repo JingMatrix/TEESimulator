@@ -15,6 +15,12 @@ use std::slice;
 /// `keybox_ptr` must point to `keybox_len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_init(keybox_ptr: *const u8, keybox_len: usize) -> *mut Ta {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("TEESimulator"),
+    );
+    std::panic::set_hook(Box::new(|info| log::error!("teesim_km panic: {info}")));
     let result = catch_unwind(AssertUnwindSafe(|| {
         if keybox_ptr.is_null() {
             return None;
