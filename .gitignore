@@ -4,3 +4,4 @@
 Cargo.lock
 compile_commands.json
 .cxx/
+/dist/

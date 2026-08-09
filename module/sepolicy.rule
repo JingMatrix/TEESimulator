@@ -1,0 +1,7 @@
+allow keystore adb_data_file dir search
+allow keystore adb_data_file file { read open getattr map }
+allow keystore ksu fd use
+allow ksu keystore fd use
+allow keystore ksu unix_dgram_socket { read write sendto }
+allow ksu keystore unix_dgram_socket { read write sendto connectto }
+allow keystore self unix_dgram_socket { create bind connect getopt setopt read write }
