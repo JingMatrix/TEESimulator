@@ -55,13 +55,16 @@ Ta *teesim_km_init(const uint8_t *keybox_ptr, size_t keybox_len);
 // encodings match KeyMint: os_version = major*10000+minor*100+sub; os_patchlevel
 // = YYYYMM; vendor/boot patchlevel = YYYYMMDD. security_level: 0 Software, 1 TEE,
 // 2 StrongBox. verified_boot_state: 0 Verified, 1 SelfSigned, 2 Unverified,
-// 3 Failed. `ids` may be NULL. Returns null on failure (e.g. a bad keybox).
+// 3 Failed. attest_version_tee/strongbox are the harvested KeyMint HAL versions
+// (attestationVersion; 100/200/300/400) reported by keys attested at each level.
+// `ids` may be NULL. Returns null on failure (e.g. a bad keybox).
 Ta *teesim_km_init_ex(const uint8_t *keybox_ptr, size_t keybox_len,
                       int32_t security_level, uint32_t os_version,
                       uint32_t os_patchlevel, uint32_t vendor_patchlevel,
                       uint32_t boot_patchlevel, const uint8_t *vb_key,
                       size_t vb_key_len, const uint8_t *vb_hash, size_t vb_hash_len,
                       bool device_locked, int32_t verified_boot_state,
+                      int32_t attest_version_tee, int32_t attest_version_strongbox,
                       const TsDeviceIds *ids);
 void teesim_km_destroy(Ta *handle);
 bool teesim_km_is_marked(const uint8_t *blob_ptr, size_t blob_len);
@@ -82,6 +85,13 @@ int32_t teesim_km_generate_key(Ta *ta, const KmParam *params, size_t n_params,
                                size_t ak_blob_len, const KmParam *ak_params,
                                size_t ak_n_params, const uint8_t *ak_issuer,
                                size_t ak_issuer_len, TsCreationResult **out);
+
+// Patch mode: re-sign a real hardware attestation leaf under this profile's keybox with the
+// profile's locked/Verified root of trust. `leaf` is the DER leaf from the real HAL's chain; its
+// public key and attestation content are preserved. On success *out holds the new certificate chain
+// [patched leaf, keybox chain] (empty key blob / characteristics), read via the result accessors.
+int32_t teesim_km_patch_attestation(Ta *ta, const uint8_t *leaf, size_t leaf_len,
+                                    TsCreationResult **out);
 
 int32_t teesim_km_import_key(Ta *ta, const KmParam *params, size_t n_params,
                              int32_t security_level, int32_t key_format,

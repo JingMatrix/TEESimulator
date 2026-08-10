@@ -62,23 +62,28 @@ impl Ta {
         Rsp::from_cbor_value(resp_value).map_err(|e| local(format!("{e:?}")))
     }
 
-    /// Apply a per-request attestation security level to the inner TA for the
-    /// duration of one generateKey/importKey, returning the previous level to
-    /// restore afterwards. The attestation record's `attestationSecurityLevel` /
-    /// `keymasterSecurityLevel` and the KeyCharacteristics `securityLevel` all
-    /// follow `hw_info.security_level`, so overriding it makes them reflect the
-    /// HAL the request came through. A level outside the known set leaves the TA's
-    /// configured default in place (encoding: 0 Software, 1 TrustedEnvironment,
-    /// 2 StrongBox).
-    fn override_security_level(&mut self, security_level: i32) -> Option<SecurityLevel> {
+    /// Apply a per-request attestation identity — security level and KeyMint HAL version — to the
+    /// inner TA for the duration of one generateKey/importKey, returning the previous pair to restore
+    /// afterwards. The record's `attestationSecurityLevel` / `keymasterSecurityLevel` and the
+    /// KeyCharacteristics `securityLevel` follow `hw_info.security_level`; its `attestationVersion` /
+    /// `keymintVersion` follow the TA's `aidl_version`. Overriding both makes the record reflect the
+    /// real HAL the request came through: `security_level` picks the level (0 Software, 1
+    /// TrustedEnvironment, 2 StrongBox) and the version harvested at that level (StrongBox falling
+    /// back to the TEE version). A level outside the known set leaves the TA's defaults in place.
+    fn override_attestation_identity(&mut self, security_level: i32) -> Option<(SecurityLevel, i32)> {
         let level = match security_level {
             0 => SecurityLevel::Software,
             1 => SecurityLevel::TrustedEnvironment,
             2 => SecurityLevel::Strongbox,
             _ => return None,
         };
-        let prev = self.inner.security_level();
+        let prev = (self.inner.security_level(), self.inner.aidl_version());
         self.inner.set_security_level(level);
+        let version = match level {
+            SecurityLevel::Strongbox => self.attest_version_strongbox,
+            _ => self.attest_version_tee,
+        };
+        self.inner.set_aidl_version(version);
         Some(prev)
     }
 
@@ -91,11 +96,12 @@ impl Ta {
         attestation_key: Option<AttestationKey>,
         security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
-        let restore = self.override_security_level(security_level);
+        let restore = self.override_attestation_identity(security_level);
         let resp: Result<GenerateKeyResponse, OpError> =
             self.perform(GenerateKeyRequest { key_params, attestation_key });
-        if let Some(prev) = restore {
-            self.inner.set_security_level(prev);
+        if let Some((level, version)) = restore {
+            self.inner.set_security_level(level);
+            self.inner.set_aidl_version(version);
         }
         Ok(marked_result(resp?.ret))
     }
@@ -111,11 +117,12 @@ impl Ta {
         attestation_key: Option<AttestationKey>,
         security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
-        let restore = self.override_security_level(security_level);
+        let restore = self.override_attestation_identity(security_level);
         let resp: Result<ImportKeyResponse, OpError> =
             self.perform(ImportKeyRequest { key_params, key_format, key_data, attestation_key });
-        if let Some(prev) = restore {
-            self.inner.set_security_level(prev);
+        if let Some((level, version)) = restore {
+            self.inner.set_security_level(level);
+            self.inner.set_aidl_version(version);
         }
         Ok(marked_result(resp?.ret))
     }

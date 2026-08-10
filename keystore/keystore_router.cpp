@@ -109,6 +109,8 @@ std::vector<uint8_t> g_stage_vb_key;
 std::vector<uint8_t> g_stage_vb_hash;
 bool g_stage_locked = true;
 int32_t g_stage_vb_state = 0;
+int32_t g_stage_attest_version_tee = 400;
+int32_t g_stage_attest_version_strongbox = 400;
 
 std::mutex g_keys_mutex;
 std::map<std::string, PendingKey> g_keys;
@@ -760,13 +762,16 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
                          boot->verified_boot_hash + boot->verified_boot_hash_len);
   g_stage_locked = boot->device_locked;
   g_stage_vb_state = boot->verified_boot_state;
+  g_stage_attest_version_tee = boot->attest_version_tee;
+  g_stage_attest_version_strongbox = boot->attest_version_strongbox;
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
                              p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
                              g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
-                             g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state, p->ids);
+                             g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state,
+                             g_stage_attest_version_tee, g_stage_attest_version_strongbox, p->ids);
   if (!ta) {
     LOGE("keystore: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
     return false;

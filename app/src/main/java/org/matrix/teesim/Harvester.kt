@@ -88,6 +88,9 @@ object Harvester {
         // When a TrustedEnvironment is present StrongBox is always OFFERED regardless; this only
         // decides whether StrongBox keys can be patched (real hardware) or must be generated.
         val strongBoxAvailable: Boolean,
+        // KeyMint HAL version (attestationVersion) probed at StrongBox; the TEE value when StrongBox
+        // has no real hardware. Keys attested at StrongBox report this instead of the TEE version.
+        val strongBoxAttestationVersion: Int,
         val attestationVersion: Int,
         val keymasterVersion: Int,
         val osVersion: Int?, // encoded major*10000+minor*100+sub
@@ -288,24 +291,37 @@ object Harvester {
     private fun tryHarvest(): Record? {
         val leaf = generateAndFetchLeaf() ?: return null
         return try {
-            parse(leaf).copy(strongBoxAvailable = probeStrongBox())
+            val rec = parse(leaf)
+            val sb = probeStrongBox()
+            rec.copy(
+                strongBoxAvailable = sb.available,
+                // Fall back to the TEE version when StrongBox has no real hardware to harvest.
+                strongBoxAttestationVersion = sb.attestationVersion ?: rec.attestationVersion,
+            )
         } catch (e: Exception) {
             SystemLogger.error("Failed to parse harvested attestation", e)
             null
         }
     }
 
+    /** Outcome of the StrongBox probe: whether it works and, if so, its harvested HAL version. */
+    private data class StrongBoxProbe(val available: Boolean, val attestationVersion: Int?)
+
     /**
-     * Whether the device can produce a StrongBox-backed attested key, probed once by generating a
-     * throwaway StrongBox key. A device with a TrustedEnvironment but a broken/absent StrongBox
-     * (e.g. an unlocked dev unit) reports false — the resolver still offers StrongBox, but routes
-     * such keys through generation rather than patch.
+     * Probe StrongBox once by generating a throwaway StrongBox-backed attested key, capturing whether
+     * it works and the attestationVersion it reports. A device with a TrustedEnvironment but a
+     * broken/absent StrongBox (e.g. an unlocked dev unit) reports unavailable — the resolver still
+     * offers StrongBox, but routes such keys through generation (at the TEE version) rather than patch.
      */
-    private fun probeStrongBox(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
-        val ok = tryLeaf(withDeviceIds = false, strongBox = true) != null
-        SystemLogger.info("Harvest: StrongBox-backed key generation available = $ok")
-        return ok
+    private fun probeStrongBox(): StrongBoxProbe {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return StrongBoxProbe(false, null)
+        val leaf = tryLeaf(withDeviceIds = false, strongBox = true)
+        val version = leaf?.let { runCatching { parse(it).attestationVersion }.getOrNull() }
+        val available = leaf != null
+        SystemLogger.info(
+            "Harvest: StrongBox-backed key generation available = $available (attestationVersion=$version)"
+        )
+        return StrongBoxProbe(available, version)
     }
 
     /**
@@ -457,6 +473,7 @@ object Harvester {
             attestationSecurityLevel = attestSecLevel,
             keymasterSecurityLevel = keymasterSecLevel,
             strongBoxAvailable = false, // set by tryHarvest's probe via copy()
+            strongBoxAttestationVersion = attestVersion, // replaced by the StrongBox probe in tryHarvest
             attestationVersion = attestVersion,
             keymasterVersion = keymasterVersion,
             osVersion = osVersion,
@@ -582,6 +599,7 @@ object Harvester {
             attestationSecurityLevel = Const.SECLEVEL_TEE,
             keymasterSecurityLevel = Const.SECLEVEL_TEE,
             strongBoxAvailable = false, // no working TEE ⇒ no StrongBox either
+            strongBoxAttestationVersion = 300,
             attestationVersion = 300,
             keymasterVersion = 300,
             osVersion = osVersion,
@@ -659,6 +677,7 @@ object Harvester {
             put("attestationSecurityLevel", r.attestationSecurityLevel)
             put("keymasterSecurityLevel", r.keymasterSecurityLevel)
             put("strongBoxAvailable", r.strongBoxAvailable)
+            put("strongBoxAttestationVersion", r.strongBoxAttestationVersion)
             put("attestationVersion", r.attestationVersion)
             put("keymasterVersion", r.keymasterVersion)
             put("osVersion", r.osVersion ?: JSONObject.NULL)
@@ -689,6 +708,8 @@ object Harvester {
             attestationSecurityLevel = o.optInt("attestationSecurityLevel", Const.SECLEVEL_TEE),
             keymasterSecurityLevel = o.optInt("keymasterSecurityLevel", Const.SECLEVEL_TEE),
             strongBoxAvailable = o.optBoolean("strongBoxAvailable", false),
+            strongBoxAttestationVersion =
+                o.optInt("strongBoxAttestationVersion", o.optInt("attestationVersion", 300)),
             attestationVersion = o.optInt("attestationVersion", 300),
             keymasterVersion = o.optInt("keymasterVersion", 300),
             osVersion = o.optIntOrNull("osVersion"),

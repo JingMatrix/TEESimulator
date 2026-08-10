@@ -47,17 +47,20 @@ TaPtr WrapTa(::Ta* ta) {
   });
 }
 
-// A configured profile: its TA and the package names routed to it.
+// A configured profile: its TA, the package names routed to it, and whether it patches the real
+// hardware attestation (patch mode) or mints the whole key in the TA (generation mode).
 struct Profile {
   std::string id;
   TaPtr ta;
   std::vector<std::string> packages;
+  bool patch_mode = false;
 };
 
 // Live routing, swapped atomically by teesim_cfg_commit under g_cfg_mu.
 std::mutex g_cfg_mu;
 std::vector<Profile> g_profiles;
 TaPtr g_default_ta;  // serves ops on our blobs; any profile's TA decrypts them
+bool g_strongbox_ok = false;  // device can patch real StrongBox keys; else StrongBox forces generation
 
 // Staging state built up by teesim_cfg_begin/add_profile before the swap.
 std::vector<Profile> g_staging;
@@ -65,6 +68,9 @@ std::vector<uint8_t> g_stage_vb_key;
 std::vector<uint8_t> g_stage_vb_hash;
 bool g_stage_locked = true;
 int32_t g_stage_vb_state = 0;
+bool g_stage_strongbox_ok = false;
+int32_t g_stage_attest_version_tee = 400;
+int32_t g_stage_attest_version_strongbox = 400;
 
 // RAII guard: mark the current thread as forwarding to the real HAL.
 struct ForwardGuard {
@@ -72,11 +78,16 @@ struct ForwardGuard {
   ~ForwardGuard() { teesim_hook_set_forwarding(false); }
 };
 
-// The profile TA whose packages match this request's ATTESTATION_APPLICATION_ID,
-// or null if the request is not for any target app.
-TaPtr ProfileForRequest(const std::vector<KeyParameter>& params) {
+// The profile matched to this request by its ATTESTATION_APPLICATION_ID: the TA to serve it with and
+// whether that profile is in patch mode. `ta` is null when the request is not for any target app.
+struct RequestTarget {
+  TaPtr ta;
+  bool patch_mode = false;
+};
+
+RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params) {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
-  if (g_profiles.empty()) return nullptr;
+  if (g_profiles.empty()) return {};
   for (const auto& p : params) {
     if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
     if (p.value.getTag() != KeyParameterValue::blob) continue;
@@ -84,11 +95,11 @@ TaPtr ProfileForRequest(const std::vector<KeyParameter>& params) {
     std::string hay(id.begin(), id.end());
     for (const auto& prof : g_profiles) {
       for (const auto& pkg : prof.packages) {
-        if (hay.find(pkg) != std::string::npos) return prof.ta;
+        if (hay.find(pkg) != std::string::npos) return {prof.ta, prof.patch_mode};
       }
     }
   }
-  return nullptr;
+  return {};
 }
 
 // The TA used for operations on an existing blob of ours (begin/upgrade/etc.).
@@ -340,8 +351,8 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   ndk::ScopedAStatus generateKey(const std::vector<KeyParameter>& keyParams,
                                  const std::optional<AttestationKey>& attestationKey,
                                  KeyCreationResult* out) override {
-    TaPtr ta = ProfileForRequest(keyParams);
-    if (!ta) {
+    RequestTarget t = ProfileForRequest(keyParams);
+    if (!t.ta) {
       if (real_) {
         LOGI("generateKey: forwarding to real HAL (not a target)");
         ForwardGuard g;
@@ -360,15 +371,24 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
+    // Patch mode: let the real hardware generate the key and attest it, then keep its blob and only
+    // re-sign the attestation under the keybox with a patched root of trust. It needs working hardware
+    // at this level to forward to — a StrongBox that cannot attest (g_strongbox_ok=false), or no real
+    // HAL at all, falls back to generation.
+    if (t.patch_mode && real_ && (level_ != SecurityLevel::STRONGBOX || g_strongbox_ok)) {
+      LOGI("generateKey: patch mode (re-signing real hardware attestation) for target app");
+      return PatchAttest(t.ta.get(), keyParams, out);
+    }
     LOGI("generateKey: simulating for target app");
-    return Simulate(ta.get(), keyParams, attestationKey, out);
+    return Simulate(t.ta.get(), keyParams, attestationKey, out);
   }
 
   ndk::ScopedAStatus importKey(const std::vector<KeyParameter>& keyParams, KeyFormat keyFormat,
                                const std::vector<uint8_t>& keyData,
                                const std::optional<AttestationKey>& attestationKey,
                                KeyCreationResult* out) override {
-    TaPtr ta = ProfileForRequest(keyParams);
+    RequestTarget t = ProfileForRequest(keyParams);
+    TaPtr ta = t.ta;
     if (!ta) {
       if (real_) {
         ForwardGuard g;
@@ -534,7 +554,12 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   ndk::ScopedAStatus deviceLocked(bool passwordOnly,
                                   const std::optional<secureclock::TimeStampToken>& tst) override {
     ForwardGuard g;
+    // deviceLocked is deprecated in the AIDL but still part of the interface we implement, so we
+    // relay it verbatim; suppress the deprecation warning for the one forwarding call.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     return real_ ? real_->deviceLocked(passwordOnly, tst) : ndk::ScopedAStatus::ok();
+#pragma clang diagnostic pop
   }
   ndk::ScopedAStatus earlyBootEnded() override {
     ForwardGuard g;
@@ -579,6 +604,48 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     return a;
   }
 
+  // Patch mode: the real hardware generates and attests the key; we keep its genuine, hardware-backed
+  // key blob and re-sign only the attestation chain under the keybox, with the root of trust patched
+  // to locked/Verified. The kept blob is unmarked, so later operations on the key forward to the real
+  // HAL. Falls back to generation if the real HAL declines or returns no attestation to re-sign.
+  ndk::ScopedAStatus PatchAttest(::Ta* ta, const std::vector<KeyParameter>& keyParams,
+                                 KeyCreationResult* out) {
+    KeyCreationResult real;
+    {
+      ForwardGuard g;
+      auto st = real_->generateKey(keyParams, std::nullopt, &real);
+      if (!st.isOk()) {
+        LOGW("patch: real generateKey failed (%d); generating instead", st.getServiceSpecificError());
+        return Simulate(ta, keyParams, std::nullopt, out);
+      }
+    }
+    if (real.certificateChain.empty()) {
+      LOGW("patch: real attestation returned no certificates; generating instead");
+      return Simulate(ta, keyParams, std::nullopt, out);
+    }
+    const auto& leaf = real.certificateChain.front().encodedCertificate;
+    TsCreationResult* res = nullptr;
+    int32_t rc = teesim_km_patch_attestation(ta, leaf.data(), leaf.size(), &res);
+    if (rc != 0) {
+      LOGW("patch: re-signing the real attestation failed (%d); generating instead", rc);
+      return Simulate(ta, keyParams, std::nullopt, out);
+    }
+    // Keep the real hardware key blob and characteristics; swap in the keybox-rooted, RoT-patched
+    // chain we just built.
+    out->keyBlob = real.keyBlob;
+    out->keyCharacteristics = std::move(real.keyCharacteristics);
+    size_t n = teesim_km_result_num_certs(res);
+    out->certificateChain.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+      const uint8_t* c = nullptr;
+      size_t clen = 0;
+      teesim_km_result_cert(res, i, &c, &clen);
+      out->certificateChain[i].encodedCertificate.assign(c, c + clen);
+    }
+    teesim_km_free_result(res);
+    return ndk::ScopedAStatus::ok();
+  }
+
   ndk::ScopedAStatus Simulate(::Ta* ta, const std::vector<KeyParameter>& keyParams,
                               const std::optional<AttestationKey>& attestationKey,
                               KeyCreationResult* out) {
@@ -614,13 +681,17 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
                          boot->verified_boot_hash + boot->verified_boot_hash_len);
   g_stage_locked = boot->device_locked;
   g_stage_vb_state = boot->verified_boot_state;
+  g_stage_strongbox_ok = boot->strongbox_available;
+  g_stage_attest_version_tee = boot->attest_version_tee;
+  g_stage_attest_version_strongbox = boot->attest_version_strongbox;
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   ::Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
                                p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
                                g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
-                               g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state, p->ids);
+                               g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state,
+                               g_stage_attest_version_tee, g_stage_attest_version_strongbox, p->ids);
   if (!ta) {
     LOGE("keymint: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
     return false;
@@ -628,6 +699,7 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   Profile prof;
   prof.id = p->id ? p->id : "";
   prof.ta = WrapTa(ta);
+  prof.patch_mode = p->mode && std::string(p->mode) == "patch";
   for (int i = 0; i < p->n_packages && p->packages; ++i) {
     if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
   }
@@ -640,6 +712,7 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
   g_profiles = std::move(g_staging);
   g_staging.clear();
   g_default_ta = g_profiles.empty() ? nullptr : g_profiles.front().ta;
+  g_strongbox_ok = g_stage_strongbox_ok;
   return static_cast<int>(g_profiles.size());
 }
 

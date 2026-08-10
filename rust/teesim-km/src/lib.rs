@@ -13,6 +13,7 @@ pub mod capi;
 mod device;
 pub mod ffi;
 mod ops;
+mod resign;
 
 use kmr_common::crypto;
 use kmr_crypto_boring::{
@@ -59,6 +60,17 @@ fn crypto_impls() -> crypto::Implementation {
 /// The in-process TA plus the state the router needs around it.
 pub struct Ta {
     inner: KeyMintTa,
+    /// Retained copy of the keybox signing keys. kmr-ta owns its own copy for generation but does
+    /// not expose it, and patch mode needs it to re-sign a real attestation leaf under the keybox.
+    sign_info: attest::CertSignInfo,
+    /// The profile's root of trust (locked/Verified) as a DER `RootOfTrust` SEQUENCE, spliced into a
+    /// real leaf's attestation extension in patch mode. Identical to what generation emits.
+    patch_rot: Vec<u8>,
+    /// KeyMint HAL versions harvested at each level. The per-request override (see
+    /// `override_attestation_identity`) sets the record's attestation/keymint version to match the
+    /// HAL the request came through, so a generated key claims the real device's version.
+    attest_version_tee: i32,
+    attest_version_strongbox: i32,
 }
 
 /// Everything beyond the crypto backend that shapes a profile's attestation
@@ -88,6 +100,12 @@ pub struct TaConfig<'a> {
     pub device_boot_locked: bool,
     /// 0 Verified, 1 SelfSigned, 2 Unverified, 3 Failed.
     pub verified_boot_state: i32,
+    /// KeyMint HAL version harvested at TrustedEnvironment (attestationVersion; 100/200/300/400),
+    /// reported by keys attested at that level.
+    pub attest_version_tee: i32,
+    /// KeyMint HAL version harvested at StrongBox; falls back to the TEE value when StrongBox is
+    /// unavailable (a broken StrongBox is still offered, served by generation at the TEE version).
+    pub attest_version_strongbox: i32,
     /// Device-ID values to vouch for, or `None` to decline ID attestation.
     pub attestation_ids: Option<AttestationIdInfo>,
 }
@@ -108,6 +126,8 @@ impl<'a> TaConfig<'a> {
             verified_boot_hash: vec![0u8; 32],
             device_boot_locked: true,
             verified_boot_state: VerifiedBootState::Verified as i32,
+            attest_version_tee: 400,
+            attest_version_strongbox: 400,
             attestation_ids: None,
         }
     }
@@ -149,7 +169,7 @@ impl Ta {
 
         let dev = Implementation {
             keys: Box::new(device::Keys),
-            sign_info: Some(Box::new(sign_info)),
+            sign_info: Some(Box::new(sign_info.clone())),
             attest_ids,
             // Rollback-resistant keys are declined (no secure-deletion store).
             sdd_mgr: None,
@@ -168,6 +188,14 @@ impl Ta {
             3 => VerifiedBootState::Failed,
             _ => VerifiedBootState::Verified,
         };
+        // Precompute the root of trust patch mode splices into a real leaf, from the same values the
+        // generation path feeds into kmr-ta's boot info (below), so both modes report it identically.
+        let patch_rot = resign::build_root_of_trust(
+            &cfg.verified_boot_key,
+            cfg.device_boot_locked,
+            cfg.verified_boot_state,
+            &cfg.verified_boot_hash,
+        );
         // These fields double as the attestation record's root of trust and as
         // inputs to the KEK derivation. The daemon supplies the device's real,
         // frozen values, so the KEK stays stable across reboots and every profile
@@ -188,7 +216,13 @@ impl Ta {
             vendor_patchlevel: cfg.vendor_patchlevel,
         });
 
-        Ok(Ta { inner })
+        Ok(Ta {
+            inner,
+            sign_info,
+            patch_rot,
+            attest_version_tee: cfg.attest_version_tee,
+            attest_version_strongbox: cfg.attest_version_strongbox,
+        })
     }
 
     /// Feed a serialized kmr_wire request to the TA and return the serialized
