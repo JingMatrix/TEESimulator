@@ -63,6 +63,31 @@ bool Base64Decode(const std::string &in, std::vector<uint8_t> &out) {
   return true;
 }
 
+// Standard base64 encode, for handing re-signed certificates back to the daemon.
+std::string Base64Encode(const uint8_t *data, size_t len) {
+  static const char kTable[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((len + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 3 <= len; i += 3) {
+    uint32_t n = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) | data[i + 2];
+    out.push_back(kTable[(n >> 18) & 63]);
+    out.push_back(kTable[(n >> 12) & 63]);
+    out.push_back(kTable[(n >> 6) & 63]);
+    out.push_back(kTable[n & 63]);
+  }
+  if (i < len) {
+    bool two = (i + 1 < len);
+    uint32_t n = (uint32_t(data[i]) << 16) | (two ? uint32_t(data[i + 1]) << 8 : 0);
+    out.push_back(kTable[(n >> 18) & 63]);
+    out.push_back(kTable[(n >> 12) & 63]);
+    out.push_back(two ? kTable[(n >> 6) & 63] : '=');
+    out.push_back('=');
+  }
+  return out;
+}
+
 int AndroidApi() {
   char buf[PROP_VALUE_MAX] = {0};
   if (__system_property_get("ro.build.version.sdk", buf) > 0) return atoi(buf);
@@ -281,6 +306,37 @@ void HandleConnection(int fd) {
       WriteFrame(fd, BuildAck(epoch, applied, total));
       LOGI("control: applied config epoch=%llu profiles=%d/%d",
            static_cast<unsigned long long>(epoch), applied, total);
+    } else if (t == "resign") {
+      // Re-sign one existing key's attestation leaf under its profile's keybox. The daemon sends the
+      // leaf and the owning profile id; we return the patched chain (base64 DER per cert) for it to
+      // write back with updateSubcomponent.
+      const tjson::Value *pid = msg.get("profile");
+      const tjson::Value *lb = msg.get("leafB64");
+      std::string profile = pid ? pid->as_string() : std::string();
+      std::vector<uint8_t> leaf;
+      // Accumulate the chain as a JSON array body via the cert sink (captureless -> C callback).
+      struct SinkCtx {
+        std::string certs;
+        bool first = true;
+      } sc;
+      auto sink = [](void *ctx, const uint8_t *der, size_t len) {
+        auto *s = static_cast<SinkCtx *>(ctx);
+        if (!s->first) s->certs += ",";
+        s->first = false;
+        s->certs += '"';
+        s->certs += Base64Encode(der, len);
+        s->certs += '"';
+      };
+      bool ok = false;
+      if (lb && !profile.empty() && Base64Decode(lb->as_string(), leaf) && !leaf.empty()) {
+        ok = teesim_cfg_resign(profile.c_str(), leaf.data(), leaf.size(), sink, &sc);
+      }
+      std::string resp = "{\"type\":\"resigned\",\"ok\":";
+      resp += ok ? "true" : "false";
+      resp += ",\"chainB64\":[";
+      resp += sc.certs;
+      resp += "]}";
+      WriteFrame(fd, resp);
     } else if (t == "ping") {
       const tjson::Value *e = msg.get("epoch");
       std::string pong = "{\"type\":\"pong\",\"epoch\":";

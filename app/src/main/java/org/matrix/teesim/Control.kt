@@ -4,6 +4,11 @@ import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONObject
 
 /**
@@ -19,10 +24,25 @@ object Control {
 
     private const val MAX_FRAME = 8 * 1024 * 1024
 
+    private const val RESIGN_TIMEOUT_MS = 10_000L
+
     private val lock = Object()
     @Volatile private var latest: String? = null
     private var seq = 0L
     @Volatile private var running = false
+
+    // The live connection's output stream, or null when disconnected — used to send resign requests
+    // outside the writer loop (writeFrame is stream-synchronized, so concurrent sends are safe).
+    @Volatile private var activeOut: OutputStream? = null
+    // Responses to the one in-flight resign request. Buffered (size 1) so a reply that arrives before
+    // the sender polls is not lost; the sender drains it before each request.
+    private val resignReplies = LinkedBlockingQueue<JSONObject>(1)
+
+    // Invoked (on [commitExecutor]) after the lib acks a config commit, so the daemon can re-attest
+    // pre-existing keys against the just-committed profile set. Coalesced by [commitPending].
+    @Volatile var onCommitted: (() -> Unit)? = null
+    private val commitExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "teesim-reattest").apply { isDaemon = true } }
+    private val commitPending = AtomicBoolean(false)
 
     @Volatile
     var libHook: String? = null
@@ -87,6 +107,7 @@ object Control {
                 val out = socket.outputStream
                 val inp = socket.inputStream
                 writeFrame(out, "{\"type\":\"hello\",\"role\":\"daemon\",\"protocol\":1}")
+                activeOut = out
 
                 val conn = Conn(socket, out)
                 val writer =
@@ -101,6 +122,7 @@ object Control {
                     }
                 } finally {
                     conn.alive = false
+                    activeOut = null
                     synchronized(lock) { lock.notifyAll() }
                     writer.interrupt()
                 }
@@ -170,12 +192,68 @@ object Control {
                     "control: lib hello hook=$libHook api=$libApi pid=${msg.optInt("keystorePid", 0)}"
                 )
             }
-            "ack" ->
+            "ack" -> {
                 SystemLogger.info(
                     "control: ack epoch=${msg.optLong("epoch")} ok=${msg.optBoolean("ok")} " +
                         "applied=${msg.optInt("profilesApplied")} failed=${msg.optInt("profilesFailed")}"
                 )
+                // The ack means the lib has committed the new profile set — the point at which
+                // pre-existing keys can be re-attested against it. Coalesce bursts of pushes into one
+                // run and never run it on this reader thread (resign responses arrive here).
+                val cb = onCommitted
+                if (cb != null && commitPending.compareAndSet(false, true)) {
+                    commitExecutor.execute {
+                        commitPending.set(false)
+                        try {
+                            cb()
+                        } catch (e: Throwable) {
+                            SystemLogger.warning("control: re-attest run failed: ${e.message}")
+                        }
+                    }
+                }
+            }
+            "resigned" -> {
+                resignReplies.clear()
+                resignReplies.offer(msg)
+            }
             "pong" -> SystemLogger.verbose("control: pong ${msg.optLong("epoch")}")
+        }
+    }
+
+    /**
+     * Ask the lib to re-sign an existing key's attestation [leaf] under profile [profileId]'s keybox,
+     * returning the patched chain (leaf first) or null if there is no live connection, the request
+     * times out, or the lib reports failure. Called from [onCommitted] on [commitExecutor]; the reader
+     * thread delivers the reply, so this must not run on that thread.
+     */
+    fun resign(profileId: String, leaf: ByteArray): List<ByteArray>? {
+        val out = activeOut ?: return null
+        resignReplies.clear()
+        val req =
+            JSONObject()
+                .put("type", "resign")
+                .put("profile", profileId)
+                .put("leafB64", Base64.getEncoder().encodeToString(leaf))
+        try {
+            writeFrame(out, req.toString())
+        } catch (e: Exception) {
+            SystemLogger.warning("control: resign send failed: ${e.message}")
+            return null
+        }
+        val reply =
+            resignReplies.poll(RESIGN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                ?: run {
+                    SystemLogger.warning("control: resign timed out (profile $profileId)")
+                    return null
+                }
+        if (!reply.optBoolean("ok")) return null
+        val arr = reply.optJSONArray("chainB64") ?: return null
+        val dec = Base64.getDecoder()
+        return try {
+            (0 until arr.length()).map { dec.decode(arr.getString(it)) }
+        } catch (e: Exception) {
+            SystemLogger.warning("control: resign reply undecodable: ${e.message}")
+            null
         }
     }
 

@@ -55,7 +55,9 @@ object App {
             // Inject the interceptor and keep it injected across keystore restarts.
             Injector(resolveModuleDir(args)).start()
 
-            // Control channel + initial push, then watch config and packages.
+            // Control channel + initial push, then watch config and packages. After each committed
+            // push the lib acks; that is when pre-existing target keys are re-attested to the keybox.
+            Control.onCommitted = { lastGoodConfig?.let { ReAttest.run(it) } }
             Control.start()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }
