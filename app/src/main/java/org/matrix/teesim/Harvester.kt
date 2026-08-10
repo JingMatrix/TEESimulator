@@ -5,6 +5,9 @@ import android.os.Build
 import android.os.IBinder
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.lang.reflect.InvocationTargetException
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -15,6 +18,7 @@ import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import org.bouncycastle.asn1.ASN1Boolean
 import org.bouncycastle.asn1.ASN1Encodable
+import org.bouncycastle.asn1.ASN1EncodableVector
 import org.bouncycastle.asn1.ASN1Enumerated
 import org.bouncycastle.asn1.ASN1Integer
 import org.bouncycastle.asn1.ASN1Null
@@ -22,6 +26,8 @@ import org.bouncycastle.asn1.ASN1OctetString
 import org.bouncycastle.asn1.ASN1Sequence
 import org.bouncycastle.asn1.ASN1Set
 import org.bouncycastle.asn1.ASN1TaggedObject
+import org.bouncycastle.asn1.DEROctetString
+import org.bouncycastle.asn1.DERSequence
 import org.bouncycastle.asn1.x509.Extension
 import org.bouncycastle.cert.X509CertificateHolder
 import org.json.JSONObject
@@ -183,8 +189,9 @@ object Harvester {
      * hits a null service registerer), and `getImei()`/`getImeiForSlot()` additionally enforce a
      * "package belongs to caller uid" check we can't satisfy as root (uid 0). So we go straight to the
      * `IPhoneSubInfo` binder and use the legacy `getDeviceId*` calls, which return the real IMEI
-     * regardless of the calling package — confirmed on-device. Serial comes from `Build.getSerial()`
-     * when permitted, otherwise the `ro.serialno` property.
+     * regardless of the calling package — confirmed on-device. The serial is read from the `ro.serialno`
+     * property: `Build.getSerial()` enforces the same "package belongs to caller uid" check, which we
+     * can never satisfy as root (uid 0), so it only ever fails here.
      */
     private fun supplementDeviceIds(r: Record): Record {
         // The harvest runs very early at boot, when telephony (the modem/RIL) usually isn't up yet, so
@@ -194,13 +201,19 @@ object Harvester {
         var imei2 = r.imei2.ifBlank { deviceIdForPhone(1) }
         if (imei2.isNotBlank() && imei2 == imei) imei2 = "" // single-SIM: slot 1 mirrors slot 0
         val meid = r.meid.ifBlank { safeId("getMeidForSubscriber(0)") { phoneSubInfoId("getMeidForSubscriber", 0) } }
-        val serial =
-            r.serial.ifBlank { safeId("Build.getSerial()") { Build.getSerial() } }
-                .ifBlank { DeviceProps.prop("ro.serialno", "") }
+        val serial = r.serial.ifBlank { DeviceProps.prop("ro.serialno", "") }
         SystemLogger.info(
             "Harvest telephony IDs: imei='$imei' secondImei='$imei2' meid='$meid' serial='$serial'"
         )
-        return r.copy(imei = imei, imei2 = imei2, meid = meid, serial = serial)
+        // These ids are not carried by device-properties attestation; when the attested leaf had no
+        // value (r.<id> blank) and we supplemented one, it is fabricated rather than captured — record
+        // that so the WebUI shows it honestly. A device that DID attest an id keeps it as captured.
+        val fab = r.fabricated.toMutableMap()
+        if (r.imei.isBlank() && imei.isNotBlank()) fab["imei"] = imei
+        if (r.imei2.isBlank() && imei2.isNotBlank()) fab["imei2"] = imei2
+        if (r.meid.isBlank() && meid.isNotBlank()) fab["meid"] = meid
+        if (r.serial.isBlank() && serial.isNotBlank()) fab["serial"] = serial
+        return r.copy(imei = imei, imei2 = imei2, meid = meid, serial = serial, fabricated = fab)
     }
 
     /**
@@ -399,11 +412,10 @@ object Harvester {
         var osPatchLevel: Int? = null
         var vendorPatchLevel: Int? = null
         var bootPatchLevel: Int? = null
-        var moduleHash: ByteArray? = null
 
-        // moduleHash may live in softwareEnforced.
+        // moduleHash may live in softwareEnforced; captured here, resolved (deduced when absent) below.
         val sw = ASN1Sequence.getInstance(fields[KD_SOFTWARE_ENFORCED])
-        moduleHash =
+        val capturedModuleHash =
             sw.toArray()
                 .firstOrNull { (it as? ASN1TaggedObject)?.tagNo == TAG_MODULE_HASH }
                 ?.let { ASN1OctetString.getInstance((it as ASN1TaggedObject).baseObject).octets }
@@ -443,6 +455,11 @@ object Harvester {
         // Verified device reports them captured, so the map stays empty for them.
         if (!deviceLocked) fab["deviceLocked"] = "true"
         if (verifiedBootState != 0) fab["verifiedBootState"] = "Verified (0)"
+
+        // When the leaf omits MODULE_HASH (older HAL versions do), deduce it from /apex exactly the
+        // way Android's attestation and keystore2 build it, so a key attested with it still verifies.
+        // A deduced value is not captured from our attestation, so it is marked fabricated.
+        val moduleHash = capturedModuleHash ?: computeModuleHash().also { fab["moduleHash"] = it.toHex() }
 
         // Device-identity ids parsed per tag. An empty value means the tag was ABSENT from the leaf —
         // device-properties attestation omits imei/meid/serial — not a parse failure.
@@ -497,6 +514,144 @@ object Harvester {
 
     private fun intOf(t: ASN1TaggedObject): Int =
         ASN1Integer.getInstance(t.baseObject.toASN1Primitive()).positiveValue.toInt()
+
+    // --- module hash deduction --------------------------------------------------
+    // When the harvested leaf omits MODULE_HASH (tag 724) — older HAL versions do, and a failed
+    // harvest has no leaf at all — the reference TA still expects the value Android's attestation
+    // would carry: the SHA-256 over a DER SET OF SEQUENCE{ OCTET_STRING name, INTEGER version } built
+    // from every active APEX/module, the SET's members ordered by the DER encoding of the name alone.
+    // We reproduce that structure byte-for-byte so a key attested with the deduced hash still verifies.
+
+    /** Active APEX packages as (name, version), read from /apex the way apexd exposes them. */
+    private val apexInfos: List<Pair<String, Long>> by lazy {
+        val root = File("/apex")
+        if (!root.exists() || !root.isDirectory) return@lazy emptyList()
+        val results = mutableListOf<Pair<String, Long>>()
+        root.listFiles()?.forEach { file ->
+            if (!file.isDirectory) return@forEach
+            val name = file.name
+            if (name.startsWith(".")) return@forEach // "." / ".."
+            if (name.contains("@")) return@forEach // versioned mount points
+            if (name == "sharedlibs") return@forEach
+            val manifest = File(file, "apex_manifest.pb")
+            if (manifest.exists()) {
+                runCatching {
+                    val bytes = FileInputStream(manifest).use { it.readBytes() }
+                    ApexManifestParser(bytes).parse()?.let { results.add(it) }
+                }
+            }
+        }
+        results.distinctBy { it.first }
+    }
+
+    /**
+     * The moduleHash Android's attestation would report. BouncyCastle's DERSet would re-sort its
+     * members by their whole encoding, but keystore2 orders by the DER-encoded name only, so the SET
+     * is assembled and tagged by hand: sort the SEQUENCE encodings by their name's encoding, then wrap
+     * the concatenation in a DER SET (tag 0x31) and SHA-256 it. Returns 32 zero bytes on any failure.
+     */
+    private fun computeModuleHash(): ByteArray =
+        runCatching {
+            val members =
+                apexInfos.map { (name, version) ->
+                    val nameOctet = DEROctetString(name.toByteArray(Charsets.UTF_8))
+                    val seq =
+                        DERSequence(
+                            ASN1EncodableVector().apply {
+                                add(nameOctet)
+                                add(ASN1Integer(version))
+                            }
+                        )
+                    nameOctet.encoded to seq.encoded
+                }
+            val payload = ByteArrayOutputStream()
+            members
+                .sortedWith { a, b -> compareBytes(a.first, b.first) }
+                .forEach { payload.write(it.second) }
+            MessageDigest.getInstance("SHA-256").digest(derSet(payload.toByteArray()))
+        }
+            .getOrElse {
+                SystemLogger.error("Failed to deduce module hash from /apex", it)
+                ByteArray(32)
+            }
+
+    /** Minimal apex_manifest.pb reader: proto field 1 = name (string), field 2 = version (int64). */
+    private class ApexManifestParser(private val data: ByteArray) {
+        private var pos = 0
+
+        fun parse(): Pair<String, Long>? {
+            var name: String? = null
+            var version: Long? = null
+            while (pos < data.size) {
+                val tag = readVarint()
+                val field = tag ushr 3
+                val wire = (tag and 0x07).toInt()
+                when (field) {
+                    1L -> {
+                        val len = readVarint().toInt()
+                        if (pos + len > data.size) return null
+                        name = String(data, pos, len, Charsets.UTF_8)
+                        pos += len
+                    }
+                    2L -> version = readVarint()
+                    else -> skip(wire)
+                }
+            }
+            return if (name != null && version != null) name to version else null
+        }
+
+        private fun readVarint(): Long {
+            var value = 0L
+            var shift = 0
+            while (pos < data.size) {
+                val b = data[pos++].toInt()
+                value = value or ((b and 0x7F).toLong() shl shift)
+                if (b and 0x80 == 0) return value
+                shift += 7
+            }
+            return value
+        }
+
+        private fun skip(wire: Int) {
+            when (wire) {
+                0 -> readVarint()
+                1 -> pos += 8
+                2 -> pos += readVarint().toInt()
+                5 -> pos += 4
+                else -> throw IllegalStateException("unknown wire type $wire")
+            }
+        }
+    }
+
+    /** Unsigned lexicographic byte comparison — the order DER uses for its SET members. */
+    private fun compareBytes(a: ByteArray, b: ByteArray): Int {
+        val n = minOf(a.size, b.size)
+        for (i in 0 until n) {
+            val d = (a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)
+            if (d != 0) return d
+        }
+        return a.size - b.size
+    }
+
+    /** Wrap an already-ordered concatenation of members in a DER SET (tag 0x31) with a DER length. */
+    private fun derSet(payload: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.write(0x31)
+        if (payload.size < 128) {
+            out.write(payload.size)
+        } else {
+            val lenBytes = ArrayList<Int>()
+            var n = payload.size
+            while (n > 0) {
+                lenBytes.add(n and 0xFF)
+                n = n ushr 8
+            }
+            out.write(0x80 or lenBytes.size)
+            for (i in lenBytes.indices.reversed()) out.write(lenBytes[i])
+        }
+        out.write(payload)
+        return out.toByteArray()
+    }
 
     /**
      * Recursively formats any ASN.1 value into one concise, readable token: integers/enumerated as
@@ -606,13 +761,13 @@ object Harvester {
             osPatchLevel = osPatchLevel,
             vendorPatchLevel = vendorPatchLevel,
             bootPatchLevel = bootPatchLevel,
-            moduleHash = null,
+            moduleHash = computeModuleHash(),
             brand = buildId("ro.product.brand", Build.BRAND),
             device = buildId("ro.product.device", Build.DEVICE),
             product = buildId("ro.product.name", Build.PRODUCT),
             manufacturer = buildId("ro.product.manufacturer", Build.MANUFACTURER),
             model = buildId("ro.product.model", Build.MODEL),
-            serial = DeviceProps.prop("ro.serialno", ""),
+            serial = "",
             imei = "",
             meid = "",
             imei2 = "",
@@ -627,6 +782,7 @@ object Harvester {
                     "osPatchLevel" to osPatchLevel.toString(),
                     "vendorPatchLevel" to vendorPatchLevel.toString(),
                     "bootPatchLevel" to bootPatchLevel.toString(),
+                    "moduleHash" to computeModuleHash().toHex(),
                 ),
             harvestedAt = System.currentTimeMillis(),
         )
