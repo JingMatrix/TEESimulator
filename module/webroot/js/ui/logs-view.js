@@ -1,6 +1,6 @@
 // The Logs panel: a scrollback pane of recent logcat lines under a sticky header with
-// the title and a Filter / Pause / Save toolbar, plus a floating button that jumps the
-// pane to the top or bottom (whichever way it isn't). Filters (min level, a set of
+// the title and a Filter / Pause / Save toolbar, plus two floating buttons pinned to the
+// pane that jump it to the top or the bottom. Filters (min level, a set of
 // selected tags, and a message substring) live in the controller and are applied here;
 // the filter controls themselves open in a bottom sheet built by renderLogFilters. Pure
 // DOM — it renders from controller state and calls back through `actions`. Lines are
@@ -57,29 +57,25 @@ export function renderLogs(mount, state, actions) {
       ]),
       el("span", { class: "logs-msg", "data-role": "msg" }, ""),
       el("pre", { class: "logs-pane", tabindex: "0" }),
-      el("button", { class: "logs-fab down", type: "button", "aria-label": "Scroll to top or bottom" }, [
-        el("span", { class: "fab-chevron", "aria-hidden": "true" }),
+      el("div", { class: "logs-fabs" }, [
+        el("button", { class: "logs-fab", type: "button", "data-scroll": "top", "aria-label": "Scroll to top" }, [
+          el("span", { class: "fab-chevron up", "aria-hidden": "true" }),
+        ]),
+        el("button", { class: "logs-fab", type: "button", "data-scroll": "bottom", "aria-label": "Scroll to bottom" }, [
+          el("span", { class: "fab-chevron down", "aria-hidden": "true" }),
+        ]),
       ]),
     ]);
     shell.querySelector('[data-act="filter"]').addEventListener("click", () => actions.openFilters());
     shell.querySelector('[data-act="pause"]').addEventListener("click", () => actions.togglePause());
-    shell.querySelector('[data-act="save"]').addEventListener("click", () => actions.save());
+    shell.querySelector('[data-act="save"]').addEventListener("click", () => actions.openSaveSheet());
 
-    // Floating scroll button: when the pane is near the bottom it offers "jump to top" (chevron up),
-    // otherwise "jump to bottom" (chevron down). Its direction tracks the scroll position; a tap
-    // scrolls the pane to whichever end it currently points at.
+    // Two floating buttons that jump the log pane to the top or the bottom.
     const paneEl = shell.querySelector(".logs-pane");
-    const fab = shell.querySelector(".logs-fab");
-    const syncFab = () => {
-      const nearBottom = paneEl.scrollHeight - paneEl.scrollTop - paneEl.clientHeight < 40;
-      fab.classList.toggle("up", nearBottom);
-      fab.classList.toggle("down", !nearBottom);
-    };
-    paneEl.addEventListener("scroll", syncFab);
-    fab.addEventListener("click", () => {
-      paneEl.scrollTop = fab.classList.contains("up") ? 0 : paneEl.scrollHeight;
-    });
-    shell._syncFab = syncFab;
+    shell.querySelector('[data-scroll="top"]').addEventListener("click", () =>
+      paneEl.scrollTo({ top: 0, behavior: "smooth" }));
+    shell.querySelector('[data-scroll="bottom"]').addEventListener("click", () =>
+      paneEl.scrollTo({ top: paneEl.scrollHeight, behavior: "smooth" }));
     mount.append(shell);
   }
 
@@ -136,7 +132,6 @@ export function renderLogs(mount, state, actions) {
   while (pane.childElementCount > MAX_SHOWN) pane.removeChild(pane.firstElementChild);
 
   if (!state.paused && atBottom) pane.scrollTop = pane.scrollHeight;
-  if (shell._syncFab) shell._syncFab();
 }
 
 // ---- filter sheet -------------------------------------------------------
@@ -187,5 +182,38 @@ export function renderLogFilters(state, actions) {
     el("div", { class: "field" }, [el("span", { class: "field-label", text: "Tags" }), tagChips]),
     el("div", { class: "field" }, [el("span", { class: "field-label", text: "Message contains" }), textInput]),
     el("button", { class: "btn ghost block sheet-submit", type: "button", text: "Reset filters", onclick: () => actions.reset() }),
+  ]);
+}
+
+// ---- save sheet ---------------------------------------------------------
+// renderSaveSheet(state, actions) -> HTMLElement   (content for the save sheet)
+//   state   = { dir, name }
+//   actions = { save(dir, name), close() }
+// The daemon (root) writes the file, so the folder can be anywhere it can reach. The two
+// inputs are uncontrolled: their live values are read only when Save is clicked, so typing
+// never rebuilds the sheet. The Save click is the gesture that fires the POST.
+export function renderSaveSheet(state, actions) {
+  const { dir = "", name = "" } = state;
+  const dirInput = el("input", {
+    class: "input", type: "text", value: dir, placeholder: "/sdcard/Download",
+    autocapitalize: "off", autocorrect: "off", spellcheck: "false",
+  });
+  const nameInput = el("input", {
+    class: "input", type: "text", value: name, placeholder: "teesim-logs.log",
+    autocapitalize: "off", autocorrect: "off", spellcheck: "false",
+  });
+  return el("div", {}, [
+    el("div", { class: "sheet-head" }, [
+      el("h2", { text: "Save logs" }),
+      el("button", { class: "iconbtn", type: "button", "aria-label": "Close", onclick: () => actions.close() }, [
+        el("span", { class: "x-mark", "aria-hidden": "true" }),
+      ]),
+    ]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Folder" }), dirInput]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Filename" }), nameInput]),
+    el("button", {
+      class: "btn primary block sheet-submit", type: "button", text: "Save",
+      onclick: () => actions.save(dirInput.value, nameInput.value),
+    }),
   ]);
 }

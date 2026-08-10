@@ -6,12 +6,14 @@
 
 import { keyAdmin } from "../data/keyadmin.js";
 import { moduleVersion } from "../data/logs-io.js";
-import { renderLogs, renderLogFilters } from "../ui/logs-view.js";
+import { renderLogs, renderLogFilters, renderSaveSheet } from "../ui/logs-view.js";
 import { toast, clear, openSheet } from "../ui/dom.js";
 
 const POLL_MS = 1500;
 const MAX_FETCH = 500;
 const MAX_KEPT = 4000;
+const SAVE_DIR_KEY = "teesim.logs.dir";
+const DEFAULT_SAVE_DIR = "/sdcard/Download";
 
 // The default export filename: TEESimulator-<version>-<variant>-<timestamp>.log. The module
 // version already embeds the variant, e.g. "v4.0 (17-0375393-debug)"; sanitize it into a
@@ -43,11 +45,13 @@ export function create(mount) {
   let error = null;
   let timer = null;
   let inFlight = false;
-  let moduleVer = ""; // cached at load so Save stays synchronous (an await would kill the gesture)
+  let moduleVer = ""; // cached at load so the default save filename is ready without an await
 
   let filter = { minLevel: "V", tags: new Set(), text: "" };
   let filterHost = null;    // content element inside the filter sheet
   let filterOverlay = null; // { close } while the sheet is open
+  let saveHost = null;      // content element inside the save sheet
+  let saveOverlay = null;   // { close } while the save sheet is open
 
   const filterActive = () => filter.minLevel !== "V" || filter.tags.size > 0 || filter.text !== "";
   const seenTags = () => {
@@ -98,6 +102,41 @@ export function create(mount) {
     if (filterOverlay) filterOverlay.close();
   }
 
+  // ---- save sheet -------------------------------------------------------
+  // The Save button opens this sheet; the sheet's own Save click is the gesture that POSTs
+  // the log text to the daemon, which (as root) writes it to the chosen folder/name and
+  // returns the final path. The folder is remembered in localStorage for next time.
+  function openSaveSheet() {
+    if (!lines.length) { toast("No logs to save"); return; }
+    const dir = localStorage.getItem(SAVE_DIR_KEY) || DEFAULT_SAVE_DIR;
+    const name = defaultLogName(moduleVer);
+    saveHost = document.createElement("div");
+    saveHost.appendChild(renderSaveSheet({ dir, name }, saveActions));
+    saveOverlay = openSheet(saveHost, { label: "Save logs", onClose: () => { saveHost = null; saveOverlay = null; } });
+  }
+
+  const saveActions = {
+    async save(dir, name) {
+      const text = lines.map((l) => l.text).join("\n");
+      if (!text) { toast("No logs to save"); return; }
+      const folder = (dir || "").trim() || DEFAULT_SAVE_DIR;
+      try {
+        const res = await keyAdmin("logsWrite", { dir: folder, name, text });
+        if (res && res.ok) {
+          localStorage.setItem(SAVE_DIR_KEY, folder);
+          toast("Saved to " + res.path);
+          if (saveOverlay) saveOverlay.close();
+        } else {
+          toast("Save failed: " + ((res && res.error) || "unknown error"));
+        }
+      } catch (e) {
+        console.error("[logs.save] write failed:", e);
+        toast("Save failed: " + (e && e.message ? e.message : String(e)));
+      }
+    },
+    close() { if (saveOverlay) saveOverlay.close(); },
+  };
+
   // Level, tag chips, and Reset rebuild the sheet (to repaint the segmented control and
   // the selected chips); focus is on a button then, so no caret is lost. The message
   // input only updates the filter and the pane — rebuilding the sheet would yank the
@@ -122,56 +161,7 @@ export function create(mount) {
       render();
       if (!paused) poll();
     },
-    // Synchronous by design: the download must fire inside the click's user-gesture, or the WebView
-    // silently blocks it and never raises the system Save-As dialog. So no await here — the module
-    // version is prefetched at load(). A Blob URL works over plain http:// (unlike the clipboard API),
-    // and `download` supplies the default filename the dialog opens with (rename + choose location).
-    async save() {
-      const text = lines.map((l) => l.text).join("\n");
-      if (!text) {
-        toast("No logs to save");
-        return;
-      }
-      const name = defaultLogName(moduleVer);
-
-      // Prefer the system "Save As" picker (choose location + rename) via the File System Access
-      // API. It needs a secure context and a user gesture — this WebUI is https and we're inside the
-      // click, and moduleVer is prefetched so nothing awaits before the picker call. Falls back to a
-      // plain download when the API is absent (older WebView). "AbortError" = the user cancelled.
-      if (typeof window.showSaveFilePicker === "function") {
-        try {
-          const handle = await window.showSaveFilePicker({
-            suggestedName: name,
-            types: [{ description: "Log file", accept: { "text/plain": [".log"] } }],
-          });
-          const w = await handle.createWritable();
-          await w.write(text);
-          await w.close();
-          toast("Saved " + name);
-          return;
-        } catch (e) {
-          if (e && e.name === "AbortError") return;
-          console.warn("[logs.save] showSaveFilePicker failed; falling back to download:", e);
-        }
-      }
-
-      // Fallback: hand the file to the browser as a download.
-      console.log("[logs.save] downloading %o (%d bytes)", name, text.length);
-      try {
-        const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
-        toast("Saved " + name);
-      } catch (e) {
-        console.error("[logs.save] failed:", e);
-        toast("Save failed: " + (e && e.message ? e.message : String(e)));
-      }
-    },
+    openSaveSheet() { openSaveSheet(); },
   };
 
   function visible() {
@@ -187,7 +177,7 @@ export function create(mount) {
 
   return {
     load() {
-      // Prefetch the module version for the Save filename so save() needn't await (see save()).
+      // Prefetch the module version so the default save filename is ready without awaiting.
       moduleVersion()
         .then((v) => { moduleVer = v; console.log("[logs] module version prefetched: %o", v); })
         .catch((e) => console.error("[logs] moduleVersion prefetch failed:", e));

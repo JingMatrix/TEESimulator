@@ -104,6 +104,13 @@ export function create(mount) {
       editing ? renderEditor() : renderList();
       return;
     }
+    await persist();
+  }
+
+  // Write the config to disk without the validation gate. A profile removal must persist even when a
+  // DIFFERENT profile is currently invalid — deleting one profile cannot introduce invalidity, and the
+  // whole-config gate in save() would otherwise reject the removal and leave the stale profile on disk.
+  async function persist() {
     const r = await ioSave(config);
     if (r.ok) {
       dirty = false;
@@ -183,6 +190,10 @@ export function create(mount) {
       dirty = true;
       revalidate();
       closeEditor(); // the edited profile is gone; drop back to the list
+      // Persist the removal to disk right away — a confirmed delete that only lived in memory left the
+      // on-disk config (and its stale profile) untouched until the next unrelated Save. Bypass the
+      // validation gate: a removal must persist even if another profile is currently invalid.
+      await persist();
     },
 
     onToggleGroup(id) {

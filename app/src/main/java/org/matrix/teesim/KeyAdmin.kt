@@ -3,6 +3,7 @@ package org.matrix.teesim
 import android.os.Build
 import android.security.keystore.KeyInfo
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
@@ -36,9 +37,9 @@ import org.json.JSONObject
  *
  * Contract (all responses application/json; send header `X-Teesim-Token: <token>`): GET /status ->
  * { ok, version, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
- * cert{...}} ] } GET /keys/db -> { ok, available, apiLevel, keys:[ {id, alias, uid, package, state,
- * created?, keybox?, keyAlgorithm?} ] } (the keys THIS MODULE minted for target apps, from keystore2's DB
- * on API >= 31; empty + available=false on 10/11 where there is no such database) POST
+ * cert{...}} ] } GET /keys/db -> { ok, available, apiLevel, keys:[ {id, alias, uid, package, state, class,
+ * created?, keybox?, keyAlgorithm?, purposes?} ] } (target-app keys with a stored attestation cert, from
+ * keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no such database) POST
  * /keys/db/delete?ids=1,2,3 -> { ok, deleted, requested } (removes those keyentry ids from keystore2,
  * marker- and target-verified) GET /keys/inspect?alias=A -> { ok, alias, attestation{...} | null }
  * POST /keys/delete?alias=A -> { ok, deleted } GET /logs?after=N&max=M
@@ -50,6 +51,9 @@ import org.json.JSONObject
 object KeyAdmin {
 
     private const val ATTEST_OID = "1.3.6.1.4.1.11129.2.1.17"
+    // Upper bound on a request body (bytes). The admin socket is localhost + token-authed, but a bogus
+    // Content-Length should still never be trusted as an allocation size.
+    private const val MAX_BODY_BYTES = 8 * 1024 * 1024
     private val b64 = Base64.getEncoder()
 
     @Volatile private var token: String = ""
@@ -91,9 +95,19 @@ object KeyAdmin {
         while (true) {
             try {
                 val client = server.accept()
-                handle(client)
+                // Handle each connection on its own thread with a read timeout, so one slow, half-open,
+                // or mis-framed client (e.g. a Content-Length that never fully arrives) can never wedge
+                // the accept loop and take the whole admin endpoint down with it.
+                client.soTimeout = 15000
+                Thread({
+                    try {
+                        handle(client)
+                    } catch (e: Exception) {
+                        SystemLogger.warning("KeyAdmin: handle error", e)
+                    }
+                }, "teesim-keyadmin-conn").apply { isDaemon = true }.start()
             } catch (e: Exception) {
-                SystemLogger.warning("KeyAdmin: accept/handle error", e)
+                SystemLogger.warning("KeyAdmin: accept error", e)
             }
         }
     }
@@ -104,6 +118,8 @@ object KeyAdmin {
             val out = client.getOutputStream()
 
             val requestLine = reader.readLine() ?: return
+            val t0 = System.currentTimeMillis()
+            SystemLogger.info("KeyAdmin: → ${requestLine.take(140)}")
             val parts = requestLine.split(" ")
             if (parts.size < 2) {
                 respond(out, 400, JSONObject().put("ok", false).put("error", "bad request"))
@@ -113,23 +129,68 @@ object KeyAdmin {
             val rawPath = parts[1]
 
             var headerToken: String? = null
+            var contentLength = 0
             while (true) {
                 val line = reader.readLine() ?: break
                 if (line.isEmpty()) break
                 val idx = line.indexOf(':')
-                if (idx > 0 && line.substring(0, idx).trim().equals("X-Teesim-Token", true)) {
-                    headerToken = line.substring(idx + 1).trim()
-                }
+                if (idx <= 0) continue
+                val hName = line.substring(0, idx).trim()
+                val hVal = line.substring(idx + 1).trim()
+                if (hName.equals("X-Teesim-Token", true)) headerToken = hVal
+                else if (hName.equals("Content-Length", true)) contentLength = hVal.toIntOrNull() ?: 0
             }
 
             if (method == "OPTIONS") { // CORS preflight
                 respond(out, 204, null)
                 return
             }
+            // The log download is opened by a browser navigation, which cannot set the
+            // X-Teesim-Token header, so this one route authenticates with a ?token= query
+            // parameter (validated against the same in-memory token) and streams plain text
+            // named by a Content-Disposition header instead of the JSON envelope. Handled here,
+            // ahead of the header-token check that every other route still requires.
+            if (method == "GET" && rawPath.substringBefore('?') == "/logs/download") {
+                val dlQuery = parseQuery(rawPath.substringAfter('?', ""))
+                if (dlQuery["token"] != token) {
+                    respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
+                    return
+                }
+                downloadLogs(out, dlQuery)
+                return
+            }
             if (headerToken == null || headerToken != token) {
                 respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
                 return
             }
+
+            // Read the request body when one was announced. The request line and headers were
+            // consumed through `reader`, whose buffer may already hold body bytes, so the body must
+            // be read from the SAME reader — not the raw socket stream. Content-Length is a byte
+            // count, so read decoded chars until that many UTF-8 bytes have been consumed.
+            // A client-supplied Content-Length is untrusted: cap it so a bogus huge value cannot force a
+            // multi-gigabyte allocation (an OutOfMemoryError would escape the per-connection catch, which
+            // only handles Exception, and kill the thread). Our largest real body is a keybox, well under
+            // this. The initial StringBuilder capacity is also bounded rather than trusting the header.
+            if (contentLength > MAX_BODY_BYTES) {
+                respond(out, 413, JSONObject().put("ok", false).put("error", "request body too large"))
+                return
+            }
+            val requestBody =
+                if (contentLength > 0) {
+                    val sb = StringBuilder(minOf(contentLength, 64 * 1024))
+                    val buf = CharArray(4096)
+                    var bytes = 0
+                    while (bytes < contentLength) {
+                        val n = reader.read(buf, 0, buf.size)
+                        if (n < 0) break
+                        sb.append(buf, 0, n)
+                        bytes += String(buf, 0, n).toByteArray(Charsets.UTF_8).size
+                    }
+                    sb.toString()
+                } else {
+                    ""
+                }
 
             val path = rawPath.substringBefore('?')
             val query = parseQuery(rawPath.substringAfter('?', ""))
@@ -153,11 +214,15 @@ object KeyAdmin {
                                 query["tag"] ?: error("tag required"),
                                 query["variant"] ?: "release",
                             )
+                        method == "POST" && path == "/logs/write" -> writeLogs(query, requestBody)
                         else -> JSONObject().put("ok", false).put("error", "not found")
                     }
-                respond(out, if (body.optBoolean("ok", true)) 200 else 400, body)
+                val ok = body.optBoolean("ok", true)
+                respond(out, if (ok) 200 else 400, body)
+                SystemLogger.info("KeyAdmin: ← ${method} ${path} ${if (ok) 200 else 400} in ${System.currentTimeMillis() - t0}ms")
             } catch (e: Exception) {
                 respond(out, 500, JSONObject().put("ok", false).put("error", e.message ?: "error"))
+                SystemLogger.warning("KeyAdmin: ← ${method} ${path} 500 in ${System.currentTimeMillis() - t0}ms: ${e.message}")
             }
         }
     }
@@ -293,6 +358,76 @@ object KeyAdmin {
             )
         }
         return JSONObject().put("ok", true).put("lines", arr).put("nextAfter", next)
+    }
+
+    /**
+     * Streams the same recent log buffer as [logs] but as a plain-text attachment, so a browser
+     * navigation names and saves the file from the Content-Disposition header (the WebView's
+     * download handler ignores an <a download> attribute). Honors the same optional `after`/`max`
+     * params as [logs]; with neither present it dumps the full recent buffer.
+     */
+    private fun downloadLogs(out: OutputStream, query: Map<String, String>) {
+        val after = query["after"]?.toLongOrNull() ?: 0L
+        val max = (query["max"]?.toIntOrNull() ?: 2000).coerceIn(1, 2000)
+        val (lines, _) = LogTail.snapshot(after, max)
+        // Each Line.text is already the full logcat line the Logs tab renders, so one line per
+        // entry joined by newlines reproduces exactly what the on-screen Save produced.
+        val body = lines.joinToString("\n") { it.text }
+        val payload = (if (body.isEmpty()) body else body + "\n").toByteArray(Charsets.UTF_8)
+        val name = safeDownloadName(query["name"])
+        respondRaw(
+            out,
+            200,
+            "text/plain; charset=utf-8",
+            listOf("Content-Disposition: attachment; filename=\"$name\""),
+            payload,
+        )
+    }
+
+    /**
+     * Reduces a client-supplied filename to a safe basename for a Content-Disposition header:
+     * strips path separators, quotes, and control characters (CR/LF included, which would allow
+     * header injection), caps the length, and falls back to a default when nothing survives.
+     */
+    private fun safeDownloadName(raw: String?): String {
+        val cleaned =
+            (raw ?: "")
+                .replace(Regex("[\\x00-\\x1f/\\\\\"]"), "")
+                .trim()
+                .take(128)
+        return if (cleaned.isEmpty()) "teesim-logs.log" else cleaned
+    }
+
+    /**
+     * Writes the log text the WebUI shows to a caller-chosen file, so the saved file is named and
+     * placed by the daemon (root) rather than the WebView, which ignores both the download filename
+     * and Content-Disposition. The directory is an absolute path the user chose and is used verbatim;
+     * the name is reduced to a safe basename. The resolved file must still sit inside that directory
+     * (a canonical-path check rejects any traversal), then the directory is created and the bytes
+     * written. Responds { ok, path } or { ok:false, error }.
+     */
+    private fun writeLogs(query: Map<String, String>, body: String): JSONObject {
+        val dir = query["dir"] ?: return JSONObject().put("ok", false).put("error", "dir required")
+        if (!dir.startsWith("/"))
+            return JSONObject().put("ok", false).put("error", "dir must be an absolute path")
+        val safeName = safeDownloadName(query["name"])
+        val dirFile = File(dir)
+        val canonicalDir = dirFile.canonicalPath
+        val target = File(dirFile, safeName)
+        val canonicalTarget = target.canonicalPath
+        if (canonicalTarget != canonicalDir + File.separator + safeName &&
+            !canonicalTarget.startsWith(canonicalDir + File.separator)) {
+            return JSONObject().put("ok", false).put("error", "invalid path")
+        }
+        return try {
+            dirFile.mkdirs()
+            File(canonicalTarget).writeBytes(body.toByteArray(Charsets.UTF_8))
+            SystemLogger.info("KeyAdmin: wrote ${body.length} chars of logs to $canonicalTarget")
+            JSONObject().put("ok", true).put("path", canonicalTarget)
+        } catch (e: Exception) {
+            SystemLogger.warning("KeyAdmin: /logs/write failed for $canonicalTarget", e)
+            JSONObject().put("ok", false).put("error", e.message ?: "write failed")
+        }
     }
 
     // --- helpers ----------------------------------------------------------------
@@ -481,6 +616,42 @@ object KeyAdmin {
         sb.append("HTTP/1.1 $code $reason\r\n")
         sb.append("Content-Type: application/json\r\n")
         sb.append("Content-Length: ${payload.size}\r\n")
+        sb.append("Access-Control-Allow-Origin: *\r\n")
+        sb.append("Access-Control-Allow-Headers: X-Teesim-Token, Content-Type\r\n")
+        sb.append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
+        sb.append("Connection: close\r\n")
+        sb.append("\r\n")
+        out.write(sb.toString().toByteArray(Charsets.UTF_8))
+        if (payload.isNotEmpty()) out.write(payload)
+        out.flush()
+    }
+
+    /**
+     * Writes a raw HTTP/1.1 response with a caller-chosen Content-Type and extra header lines,
+     * for downloads that can't use the JSON [respond]. Sends the same CORS and Connection headers.
+     */
+    private fun respondRaw(
+        out: OutputStream,
+        code: Int,
+        contentType: String,
+        extraHeaders: List<String>,
+        payload: ByteArray,
+    ) {
+        val reason =
+            when (code) {
+                200 -> "OK"
+                204 -> "No Content"
+                400 -> "Bad Request"
+                403 -> "Forbidden"
+                404 -> "Not Found"
+                500 -> "Internal Server Error"
+                else -> "OK"
+            }
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 $code $reason\r\n")
+        sb.append("Content-Type: $contentType\r\n")
+        sb.append("Content-Length: ${payload.size}\r\n")
+        extraHeaders.forEach { sb.append(it).append("\r\n") }
         sb.append("Access-Control-Allow-Origin: *\r\n")
         sb.append("Access-Control-Allow-Headers: X-Teesim-Token, Content-Type\r\n")
         sb.append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")

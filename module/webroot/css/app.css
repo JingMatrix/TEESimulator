@@ -182,6 +182,10 @@ input[type="file"].input { padding: 8px 10px; }
 .filter-menu-btn:hover, .filter-menu-btn[aria-expanded="true"] { color: var(--accent); background: var(--accent-weak, rgba(120, 150, 255, 0.12)); }
 .sel-icon { position: relative; width: 16px; height: 16px; border: 1.5px solid currentColor; border-radius: 3px; }
 .sel-icon::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+/* Key-scope control: a segmented "Spoofed | All" toggle on its own row under the filter field, with a
+ * muted hint counting the real device keys the default "Spoofed" scope is hiding. */
+.keyscope-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.keyscope-hint { font-size: 12px; }
 .selmenu-backdrop { position: fixed; inset: 0; z-index: 40; }
 .selmenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 41; min-width: 190px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 6px; }
 .selmenu button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: transparent; color: var(--fg); cursor: pointer; border-radius: 6px; font: inherit; }
@@ -195,6 +199,20 @@ input[type="file"].input { padding: 8px 10px; }
 .keycheck { flex: none; display: flex; align-items: center; }
 .keymeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .keyalias { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Purpose chips sit just under the alias line, above the subdued meta lines: small pills naming what
+ * the key may be used for. AttestKey is accented because an attestation-capable app key is notable. */
+.keypurposes { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip.purpose { color: var(--fg); font-weight: 600; }
+.chip.purpose.attest { color: var(--accent); background: var(--accent-weak, rgba(120, 150, 255, 0.14)); }
+/* Per-key class badge: shares the .chip pill shape, tinted by class. Generated keys we minted
+ * outright read green; patched real keys we re-rooted read amber; delegated keys blue; the app's
+ * own untouched keys stay muted grey. A read-only row's disabled checkbox is dimmed by the UA. */
+.chip.kclass { font-weight: 600; }
+.chip.kclass-generated { color: var(--ok); }
+.chip.kclass-patched { color: var(--warn); }
+.chip.kclass-delegated { color: var(--accent); }
+.chip.kclass-untouched { color: var(--muted); }
+.keyrow.readonly .keymeta { opacity: .85; }
 .keybtns { display: flex; gap: 6px; flex: none; }
 .code { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; font-family: ui-monospace, monospace; font-size: 12px; margin: 0; white-space: pre; }
 
@@ -338,6 +356,11 @@ html, body { overscroll-behavior-y: contain; }
 }
 
 /* --- logs --------------------------------------------------------------- */
+/* Unlike the other panels (where the whole page scrolls), the logs screen is pinned to
+ * the viewport height so the PANE scrolls internally. That is what makes the jump-to-top
+ * / jump-to-bottom buttons work — they move the pane, not the page — and keeps them
+ * pinned in view instead of stranded at the far end of a long page. */
+#tab-logs.screen { height: calc(100dvh - var(--topbar-h)); min-height: 0; overflow: hidden; }
 .logs { position: relative; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
 .logs-head { gap: 10px; }
 .logs-tools { display: flex; gap: 6px; }
@@ -353,17 +376,23 @@ html, body { overscroll-behavior-y: contain; }
 .logline.lv-w { color: var(--warn); }
 .logline.lv-e, .logline.lv-f { color: var(--danger); }
 .logs-tools { flex-wrap: wrap; }
-/* Floating jump-to-top/bottom button over the log pane. Its chevron flips with .up/.down. */
-.logs-fab {
-  position: absolute; right: 18px; bottom: 18px; width: 44px; height: 44px; z-index: 5;
-  border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+/* Two floating buttons over the log pane: jump to top (↑) and jump to bottom (↓), stacked. */
+.logs-fabs {
+  position: absolute; right: 18px; bottom: 18px; z-index: 5;
+  display: flex; flex-direction: column; gap: 8px;
 }
+.logs-fab {
+  width: 40px; height: 40px;
+  border: 1px solid var(--line); border-radius: 50%;
+  background: var(--card); color: var(--accent); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+}
+.logs-fab:hover { border-color: var(--accent); }
 .logs-fab:active { transform: scale(0.94); }
 .fab-chevron { width: 9px; height: 9px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; }
-.logs-fab.down .fab-chevron { transform: translateY(-2px) rotate(45deg); }
-.logs-fab.up .fab-chevron { transform: translateY(2px) rotate(-135deg); }
+.fab-chevron.down { transform: translateY(-2px) rotate(45deg); }
+.fab-chevron.up { transform: translateY(2px) rotate(-135deg); }
 
 /* --- sheets: extra breathing room above the primary/reset action -------- */
 .sheet-submit { margin-top: 8px; }
@@ -380,6 +409,9 @@ html, body { overscroll-behavior-y: contain; }
  * what gets attested (the real value shows in the Fabricated group below). */
 .kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--muted); text-decoration: line-through; }
 .harvest-body { display: flex; flex-direction: column; gap: 12px; }
+/* Level selector: the two chips split the line evenly, flat rather than pill-shaped. */
+.harvest-modes { display: flex; gap: 6px; }
+.harvest-modes .chip.clickable { flex: 1; justify-content: center; border-radius: var(--radius); }
 .kv-replaced .kv-label { color: var(--warn); }
 
 /* --- keybox inspector --------------------------------------------------- */
