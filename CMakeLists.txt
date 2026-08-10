@@ -77,14 +77,18 @@ elseif(ANDROID_ABI STREQUAL "x86")
 endif()
 
 set(RUST_A ${CMAKE_SOURCE_DIR}/rust/target/${RUST_TRIPLE}/release/libteesim_km.a)
-add_custom_command(
-    OUTPUT ${RUST_A}
+# ALWAYS invoke build.sh and let cargo decide incrementally what to rebuild. An OUTPUT custom command
+# with no source DEPENDS only runs when the .a is missing, so once built it was never refreshed on a
+# Rust source change — that once linked a stale 14-argument teesim_km_init_ex against a 16-argument C++
+# caller (ids read from the wrong stack slot → SIGSEGV, keystore2 crash loop). cargo leaves the .a's
+# mtime untouched when nothing changed, so this does not needlessly relink the interceptor.
+add_custom_target(rust_ta
+    BYPRODUCTS ${RUST_A}
     COMMAND ${CMAKE_COMMAND} -E env
             ABI=${ANDROID_ABI} API=${ANDROID_API_LEVEL} NDK_HOME=${ANDROID_NDK}
             BORINGSSL=${BORINGSSL_DIR}
             bash ${CMAKE_SOURCE_DIR}/rust/build.sh
     VERBATIM USES_TERMINAL)
-add_custom_target(rust_ta DEPENDS ${RUST_A})
 
 # --- How the TAs reach BoringSSL --------------------------------------------
 # The two interceptors resolve BoringSSL differently, and a single configure now
