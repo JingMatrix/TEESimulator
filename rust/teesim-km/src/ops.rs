@@ -96,6 +96,12 @@ impl Ta {
         attestation_key: Option<AttestationKey>,
         security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
+        log::info!(
+            "teesim_km: generate_key: {} param(s), security_level={}, attest_key={}",
+            key_params.len(),
+            security_level,
+            attestation_key.is_some()
+        );
         let restore = self.override_attestation_identity(security_level);
         let resp: Result<GenerateKeyResponse, OpError> =
             self.perform(GenerateKeyRequest { key_params, attestation_key });
@@ -103,7 +109,9 @@ impl Ta {
             self.inner.set_security_level(level);
             self.inner.set_aidl_version(version);
         }
-        Ok(marked_result(resp?.ret))
+        let ret = resp?.ret;
+        crate::resign::log_chain("teesim_km: generate_key result", &ret.certificate_chain);
+        Ok(marked_result(ret))
     }
 
     /// importKey. The returned key blob carries our marker. `security_level` is
@@ -117,6 +125,14 @@ impl Ta {
         attestation_key: Option<AttestationKey>,
         security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
+        log::info!(
+            "teesim_km: import_key: {} param(s), format={:?}, {} key bytes, security_level={}, attest_key={}",
+            key_params.len(),
+            key_format,
+            key_data.len(),
+            security_level,
+            attestation_key.is_some()
+        );
         let restore = self.override_attestation_identity(security_level);
         let resp: Result<ImportKeyResponse, OpError> =
             self.perform(ImportKeyRequest { key_params, key_format, key_data, attestation_key });
@@ -124,7 +140,9 @@ impl Ta {
             self.inner.set_security_level(level);
             self.inner.set_aidl_version(version);
         }
-        Ok(marked_result(resp?.ret))
+        let ret = resp?.ret;
+        crate::resign::log_chain("teesim_km: import_key result", &ret.certificate_chain);
+        Ok(marked_result(ret))
     }
 
     /// begin. `key_blob` is a marked blob; the marker is stripped before use.
@@ -135,6 +153,12 @@ impl Ta {
         params: Vec<KeyParam>,
         auth_token: Option<HardwareAuthToken>,
     ) -> Result<InternalBeginResult, OpError> {
+        log::info!(
+            "teesim_km: begin: purpose={:?}, blob_len={}, {} param(s)",
+            purpose,
+            key_blob.len(),
+            params.len()
+        );
         let resp: BeginResponse = self.perform(BeginRequest {
             purpose,
             key_blob: strip_marker(key_blob).to_vec(),
@@ -180,6 +204,12 @@ impl Ta {
         timestamp_token: Option<TimeStampToken>,
         confirmation_token: Option<Vec<u8>>,
     ) -> Result<Vec<u8>, OpError> {
+        log::info!(
+            "teesim_km: finish: op={}, input={} bytes, signature={} bytes",
+            op_handle,
+            input.as_ref().map_or(0, |v| v.len()),
+            signature.as_ref().map_or(0, |v| v.len())
+        );
         let resp: FinishResponse = self.perform(FinishRequest {
             op_handle,
             input,
@@ -199,6 +229,7 @@ impl Ta {
 
     /// deleteKey. `key_blob` is a marked blob.
     pub fn delete_key(&mut self, key_blob: &[u8]) -> Result<(), OpError> {
+        log::info!("teesim_km: delete_key: blob_len={}", key_blob.len());
         let _: DeleteKeyResponse =
             self.perform(DeleteKeyRequest { key_blob: strip_marker(key_blob).to_vec() })?;
         Ok(())
@@ -210,6 +241,11 @@ impl Ta {
         key_blob: &[u8],
         upgrade_params: Vec<KeyParam>,
     ) -> Result<Vec<u8>, OpError> {
+        log::info!(
+            "teesim_km: upgrade_key: blob_len={}, {} param(s)",
+            key_blob.len(),
+            upgrade_params.len()
+        );
         let resp: UpgradeKeyResponse = self.perform(UpgradeKeyRequest {
             key_blob_to_upgrade: strip_marker(key_blob).to_vec(),
             upgrade_params,
@@ -224,6 +260,7 @@ impl Ta {
         app_id: Vec<u8>,
         app_data: Vec<u8>,
     ) -> Result<Vec<KeyCharacteristics>, OpError> {
+        log::info!("teesim_km: get_key_characteristics: blob_len={}", key_blob.len());
         let resp: GetKeyCharacteristicsResponse = self.perform(GetKeyCharacteristicsRequest {
             key_blob: strip_marker(key_blob).to_vec(),
             app_id,

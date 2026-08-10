@@ -50,10 +50,14 @@ impl CertSignInfo {
             .find(|n| n.has_tag_name("Key") && n.attribute("algorithm") == Some("ecdsa"))
             .ok_or("keybox: no <Key algorithm=\"ecdsa\">")?;
 
-        Ok(CertSignInfo {
+        let info = CertSignInfo {
             rsa: parse_algo(rsa_node, SigningAlgorithm::Rsa)?,
             ec: parse_algo(ec_node, SigningAlgorithm::Ec)?,
-        })
+        };
+        log::info!("teesim_km: keybox parsed");
+        crate::resign::log_chain("teesim_km: keybox RSA chain", &info.rsa.chain);
+        crate::resign::log_chain("teesim_km: keybox EC chain", &info.ec.chain);
+        Ok(info)
     }
 }
 

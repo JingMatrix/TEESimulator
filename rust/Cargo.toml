@@ -12,11 +12,14 @@ kmr-common = { path = "../third_party/keymint/common" }
 kmr-derive = { path = "../third_party/keymint/derive" }
 kmr-wire = { path = "../third_party/keymint/wire" }
 kmr-ta = { path = "../third_party/keymint/ta" }
-kmr-tests = { path = "../third_party/keymint/tests" }
 kmr-crypto-boring = { path = "../third_party/keymint/boringssl" }
 
 [profile.release]
 panic = "unwind"
 opt-level = "z"
 lto = true
-strip = true
+# Keep debug info (line tables) and symbols so a crash in the TA symbolicates to a Rust file:line in
+# the tombstone. build.sh always builds --release; the shipped release .so is still stripped by AGP,
+# while the debug variant keeps these symbols (see app/build.gradle.kts keepDebugSymbols).
+strip = false
+debug = true
