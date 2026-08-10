@@ -716,6 +716,42 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
   return static_cast<int>(g_profiles.size());
 }
 
+extern "C" bool teesim_cfg_resign(const char* profile_id, const uint8_t* leaf, size_t leaf_len,
+                                  TsCertSink sink, void* ctx) {
+  if (!profile_id || !leaf || leaf_len == 0 || !sink) return false;
+  TaPtr ta;
+  {
+    std::lock_guard<std::mutex> lk(g_cfg_mu);
+    for (const auto& prof : g_profiles) {
+      if (prof.id == profile_id) {
+        ta = prof.ta;
+        break;
+      }
+    }
+  }
+  if (!ta) {
+    LOGW("resign: unknown profile '%s'", profile_id);
+    return false;
+  }
+  // Re-sign the existing leaf exactly as patch mode does for a fresh key: keep its public key and
+  // attestation content, re-root under the keybox with a patched root of trust.
+  TsCreationResult* res = nullptr;
+  int32_t rc = teesim_km_patch_attestation(ta.get(), leaf, leaf_len, &res);
+  if (rc != 0) {
+    LOGW("resign: patch_attestation failed (%d) for profile '%s'", rc, profile_id);
+    return false;
+  }
+  size_t n = teesim_km_result_num_certs(res);
+  for (size_t i = 0; i < n; ++i) {
+    const uint8_t* c = nullptr;
+    size_t clen = 0;
+    teesim_km_result_cert(res, i, &c, &clen);
+    sink(ctx, c, clen);
+  }
+  teesim_km_free_result(res);
+  return true;
+}
+
 // Create a local device wrapping the real HAL binder (may be null). Returns an
 // AIBinder* whose ownership passes to the caller (release with AIBinder_decStrong).
 //

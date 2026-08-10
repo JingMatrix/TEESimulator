@@ -798,6 +798,12 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
   return static_cast<int>(g_profiles.size());
 }
 
+// The legacy keystore interceptor has no patch mode, so it re-signs nothing.
+extern "C" bool teesim_cfg_resign(const char* /*profile_id*/, const uint8_t* /*leaf*/,
+                                  size_t /*leaf_len*/, TsCertSink /*sink*/, void* /*ctx*/) {
+  return false;
+}
+
 // The interception handler installed for the keystore service binder.
 extern "C" bool teesim_ks_handle(uint32_t code, const Parcel& data, Parcel* reply,
                                   status_t& result) {

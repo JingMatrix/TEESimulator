@@ -65,6 +65,16 @@ bool teesim_cfg_add_profile(const TsProfile *p);
 // Atomically swap the staged profile set live. Returns the number of profiles
 // applied, or -1 on a hard failure. `err` receives a short message on failure.
 int teesim_cfg_commit(uint64_t epoch, char *err, size_t err_len);
+
+// Re-sign an existing key's real attestation leaf under profile `profile_id`'s keybox with its
+// patched (locked/Verified) root of trust — patch mode applied to a key already stored in the
+// keystore. `leaf`/`leaf_len` is the DER leaf. `sink` is invoked once per certificate of the
+// resulting chain [patched leaf, keybox chain] with its DER bytes. Returns false if the profile is
+// unknown or the re-sign fails (the keystore1 interceptor, which has no patch mode, always returns
+// false). Runs on the control thread, against the live profile set.
+typedef void (*TsCertSink)(void *ctx, const uint8_t *der, size_t der_len);
+bool teesim_cfg_resign(const char *profile_id, const uint8_t *leaf, size_t leaf_len,
+                       TsCertSink sink, void *ctx);
 // Which hook this lib is, for the hello message: "keymint" or "keystore1".
 const char *teesim_hook_name(void);
 

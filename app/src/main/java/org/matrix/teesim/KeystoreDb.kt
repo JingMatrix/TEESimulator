@@ -56,6 +56,9 @@ object KeystoreDb {
     // literal so `substr(blob,1,9) = X'…'` selects the keys we minted.
     private const val MARKER_HEX = "54454553494D6B6D00"
 
+    // The KeyMint attestation extension OID; a leaf carrying it has attestation content to re-root.
+    private const val ATTEST_EXT_OID = "1.3.6.1.4.1.11129.2.1.17"
+
     // Plausible epoch-millis window (~2014-05 .. ~2128), used to spot a creation-date metadata cell
     // without depending on the release-specific tag number.
     private const val TS_MIN = 1_400_000_000_000L
@@ -92,6 +95,79 @@ object KeystoreDb {
             query(db, targets)
         } catch (e: Throwable) {
             SystemLogger.warning("KeystoreDb.listKeys failed", e)
+            emptyList()
+        } finally {
+            try {
+                db?.close()
+            } catch (_: Throwable) {}
+            try {
+                snapshotDir.deleteRecursively()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** One pre-existing key to re-attest: its owning app uid, keyentry id, and leaf certificate DER. */
+    data class AttestedKey(val uid: Int, val id: Long, val leaf: ByteArray)
+
+    /**
+     * Every stored key of the given app [uids] that carries a hardware attestation leaf and is NOT one
+     * of ours (no marker blob) — the pre-existing keys whose attestation the daemon re-roots to the
+     * keybox on a config push. One snapshot read for all uids; best effort, never throws. Our own
+     * generation keys (marker blobs) are skipped, and keys with no attestation extension (a plain key
+     * generated without a challenge) have nothing to re-root and are skipped too.
+     */
+    fun attestedKeys(uids: Set<Int>): List<AttestedKey> {
+        if (!available() || uids.isEmpty()) return emptyList()
+        val src = File(KEYSTORE2_DB)
+        if (!src.isFile) return emptyList()
+
+        var db: SQLiteDatabase? = null
+        return try {
+            val copy = snapshot(src)
+            db = SQLiteDatabase.openDatabase(copy.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            if (!tableExists(db, "blobentry")) return emptyList()
+
+            val uidList = uids.joinToString(",") // validated ints -> safe to inline
+            val idToUid = LinkedHashMap<Long, Int>()
+            db.rawQuery(
+                    "SELECT k.id, k.namespace FROM keyentry k WHERE k.domain=0 AND k.namespace IN ($uidList) " +
+                        "AND k.alias IS NOT NULL AND k.state=1 " +
+                        "AND NOT EXISTS (SELECT 1 FROM blobentry b WHERE b.keyentryid=k.id " +
+                        "AND substr(b.blob,1,9)=X'$MARKER_HEX')",
+                    null,
+                )
+                .use { c -> while (c.moveToNext()) idToUid[c.getLong(0)] = c.getInt(1) }
+            if (idToUid.isEmpty()) return emptyList()
+
+            val blobsById = HashMap<Long, MutableList<ByteArray>>()
+            db.rawQuery(
+                    "SELECT keyentryid, blob FROM blobentry WHERE keyentryid IN (${idToUid.keys.joinToString(",")})",
+                    null,
+                )
+                .use { c ->
+                    while (c.moveToNext()) {
+                        val kid = c.getLong(0)
+                        val blob = c.getBlob(1) ?: continue
+                        blobsById.getOrPut(kid) { ArrayList() }.add(blob)
+                    }
+                }
+            val cf = CertificateFactory.getInstance("X.509")
+            val signers = KeyboxInspector.signerIndex()
+            val out = ArrayList<AttestedKey>()
+            for ((id, uid) in idToUid) {
+                val certs = parseCerts(blobsById[id], cf)
+                val leaf = leafOf(certs) ?: continue
+                if (leaf.getExtensionValue(ATTEST_EXT_OID) == null) continue // no attestation to re-root
+                // Skip keys already rooted in a currently-configured keybox (ones we've patched, or a
+                // generation key's chain): re-signing them would be redundant. A key rooted in a keybox
+                // that is no longer configured (e.g. after a keybox swap) is NOT matched, so it is
+                // re-signed under the new keybox — the re-attest self-heals a rotation.
+                if (matchKeybox(certs, leaf, signers) != null) continue
+                out.add(AttestedKey(uid, id, leaf.encoded))
+            }
+            out
+        } catch (e: Throwable) {
+            SystemLogger.warning("KeystoreDb.attestedKeys failed", e)
             emptyList()
         } finally {
             try {
