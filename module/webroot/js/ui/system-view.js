@@ -99,50 +99,83 @@ function harvestCard(status) {
   // record's own fields hold the RAW captured values, so the two groups stay honest.
   const fab = (h.fabricated && typeof h.fabricated === "object" && !Array.isArray(h.fabricated)) ? h.fabricated : {};
   const fabKeys = Object.keys(fab);
-  card.appendChild(el("div", { class: "status" }, [
+  const sbAvailable = !!h.strongBoxAvailable;
+
+  // Both security levels are harvested. TEE is the primary level; StrongBox is always offered when a
+  // TEE exists but may have no working hardware (then its keys are generated, not patched, at the TEE
+  // version). The two chips report each level's status and switch the values below between them: only
+  // the security level and attestation/keymint version differ — the rest is device-wide.
+  let mode = "tee";
+  const teeChip = el("button", { class: "chip clickable", type: "button", onclick: () => select("tee") }, [
     el("span", { class: "dot " + (failed ? "warn" : "ok") }),
-    el("span", { text: failed ? "no working TEE — values fabricated" : "working TEE" }),
-  ]));
-  if (failed) {
-    card.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so every value below is synthesized rather than captured from a real TEE." }));
+    el("span", { text: failed ? "TEE — fabricated" : "TEE" }),
+  ]);
+  const sbChip = el("button", { class: "chip clickable", type: "button", onclick: () => select("strongbox") }, [
+    el("span", { class: "dot " + (sbAvailable ? "ok" : "warn") }),
+    el("span", { text: sbAvailable ? "StrongBox" : "StrongBox — generated" }),
+  ]);
+  card.appendChild(el("div", { class: "chips" }, [teeChip, sbChip]));
+
+  const body = el("div", { class: "harvest-body" });
+  card.appendChild(body);
+
+  function select(m) {
+    mode = m;
+    teeChip.classList.toggle("selected", m === "tee");
+    sbChip.classList.toggle("selected", m === "strongbox");
+    renderBody();
   }
 
-  // Captured: the raw values read from the real TEE key generation. Any that we override for
-  // attestation (i.e. present in `fab`) are shown greyed/struck to signal they'll be replaced.
-  card.appendChild(el("h3", { text: "Captured" }));
-  const rows = el("div", { class: "kv-list" });
-  const add = (label, val) => rows.appendChild(kvRow(label, val, fab[label] !== undefined));
+  function renderBody() {
+    body.replaceChildren();
+    const sb = mode === "strongbox";
+    if (failed) {
+      body.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so every value below is synthesized rather than captured from a real TEE." }));
+    } else if (sb && !sbAvailable) {
+      body.appendChild(el("div", { class: "muted small", text: "StrongBox has no working hardware on this device; keys requested at StrongBox are generated (not patched) at the TEE version." }));
+    }
 
-  add("verifiedBootState", named(h.verifiedBootState) + " (" + show(h.verifiedBootState) + ")");
-  add("deviceLocked", h.deviceLocked == null ? "—" : String(h.deviceLocked));
-  hexRow(rows, "verifiedBootKey", h.verifiedBootKey, fab["verifiedBootKey"] !== undefined);
-  hexRow(rows, "verifiedBootHash", h.verifiedBootHash, fab["verifiedBootHash"] !== undefined);
-  add("osVersion", show(h.osVersion));
-  add("osPatchLevel", show(h.osPatchLevel));
-  add("vendorPatchLevel", show(h.vendorPatchLevel));
-  add("bootPatchLevel", show(h.bootPatchLevel));
-  add("attestationSecurityLevel", secLevel(h.attestationSecurityLevel));
-  add("keymasterSecurityLevel", secLevel(h.keymasterSecurityLevel));
-  if (h.strongBoxAvailable != null) add("strongBox", h.strongBoxAvailable ? "available" : "unavailable");
-  add("attestationVersion", show(h.attestationVersion));
-  add("keymasterVersion", show(h.keymasterVersion));
-  hexRow(rows, "moduleHash", h.moduleHash);
-  // Device identity captured for ID attestation (only the ids the TEE actually provided).
-  for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
-    if (h[key]) add(key, h[key]);
-  }
-  if (h.harvestedAt) add("harvestedAt", fmtTime(h.harvestedAt));
-  card.appendChild(rows);
+    // Captured: the raw values read at the selected level. Any we override for attestation (present
+    // in `fab`) are shown greyed/struck to signal they'll be replaced. Only the security level and
+    // version are level-specific; every other value is device-wide and identical across both.
+    body.appendChild(el("h3", { text: "Captured" }));
+    const rows = el("div", { class: "kv-list" });
+    const add = (label, val) => rows.appendChild(kvRow(label, val, fab[label] !== undefined));
 
-  // Fabricated: the values we override / synthesize for attestation, shown only when we
-  // actually changed something (a genuinely locked, Verified device fabricates nothing).
-  if (fabKeys.length) {
-    card.appendChild(el("h3", { text: "Fabricated" }));
-    card.appendChild(el("div", { class: "muted small", text: "Values we override for attestation." }));
-    const fabRows = el("div", { class: "kv-list" });
-    for (const key of fabKeys) fabRows.appendChild(kvRow(key, show(fab[key])));
-    card.appendChild(fabRows);
+    add("verifiedBootState", named(h.verifiedBootState) + " (" + show(h.verifiedBootState) + ")");
+    add("deviceLocked", h.deviceLocked == null ? "—" : String(h.deviceLocked));
+    hexRow(rows, "verifiedBootKey", h.verifiedBootKey, fab["verifiedBootKey"] !== undefined);
+    hexRow(rows, "verifiedBootHash", h.verifiedBootHash, fab["verifiedBootHash"] !== undefined);
+    add("osVersion", show(h.osVersion));
+    add("osPatchLevel", show(h.osPatchLevel));
+    add("vendorPatchLevel", show(h.vendorPatchLevel));
+    add("bootPatchLevel", show(h.bootPatchLevel));
+    const version = sb ? h.strongBoxAttestationVersion : h.attestationVersion;
+    add("attestationSecurityLevel", secLevel(sb ? 2 : h.attestationSecurityLevel));
+    add("keymasterSecurityLevel", secLevel(sb ? 2 : h.keymasterSecurityLevel));
+    add("attestationVersion", show(version));
+    add("keymasterVersion", show(sb ? version : h.keymasterVersion));
+    hexRow(rows, "moduleHash", h.moduleHash);
+    // Device identity captured for ID attestation (only the ids the TEE actually provided).
+    for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
+      if (h[key]) add(key, h[key]);
+    }
+    if (h.harvestedAt) add("harvestedAt", fmtTime(h.harvestedAt));
+    body.appendChild(rows);
+
+    // Fabricated: the values we override / synthesize for attestation, shown only when we actually
+    // changed something (a genuinely locked, Verified device fabricates nothing). Device-wide, so
+    // the same for both levels.
+    if (fabKeys.length) {
+      body.appendChild(el("h3", { text: "Fabricated" }));
+      body.appendChild(el("div", { class: "muted small", text: "Values we override for attestation." }));
+      const fabRows = el("div", { class: "kv-list" });
+      for (const key of fabKeys) fabRows.appendChild(kvRow(key, show(fab[key])));
+      body.appendChild(fabRows);
+    }
   }
+
+  select("tee");
   return card;
 }
 
