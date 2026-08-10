@@ -25,6 +25,25 @@ use x509_cert::Certificate;
 /// Local (non-TA) failure code, matching `ops::ERR_UNKNOWN`.
 const ERR: i32 = -1000;
 
+/// One-line "subject <= issuer" description of a DER certificate, for logs. Best effort.
+pub(crate) fn describe_cert(der: &[u8]) -> String {
+    match Certificate::from_der(der) {
+        Ok(c) => format!(
+            "subject=[{}] issuer=[{}]",
+            c.tbs_certificate.subject, c.tbs_certificate.issuer
+        ),
+        Err(e) => format!("<unparseable {}-byte cert: {e}>", der.len()),
+    }
+}
+
+/// Log a certificate chain at info level under `tag`, one line per cert.
+pub(crate) fn log_chain(tag: &str, certs: &[kmr_wire::keymint::Certificate]) {
+    log::info!("{tag}: {} cert(s) in chain", certs.len());
+    for (i, c) in certs.iter().enumerate() {
+        log::info!("{tag}:   [{i}] {}", describe_cert(&c.encoded_certificate));
+    }
+}
+
 const ID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const EC_SHA256_SIG_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 const RSA_SHA256_SIG_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
@@ -44,6 +63,7 @@ impl Ta {
     /// Re-sign a real hardware attestation `leaf` (DER) under the keybox with the profile's root of
     /// trust. Returns the new chain `[patched leaf, keybox chain…]`.
     pub fn patch_attestation(&self, leaf: &[u8]) -> Result<Vec<Vec<u8>>, OpError> {
+        log::info!("teesim_km: patch_attestation input leaf: {}", describe_cert(leaf));
         let cert = Certificate::from_der(leaf).map_err(wrap("parse real leaf"))?;
         let mut tbs = cert.tbs_certificate;
 
@@ -86,6 +106,14 @@ impl Ta {
         let mut chain = Vec::with_capacity(1 + batch_chain.len());
         chain.push(patched_leaf);
         chain.extend(batch_chain.iter().map(|c| c.encoded_certificate.clone()));
+        log::info!(
+            "teesim_km: patch_attestation -> {} cert(s) [patched leaf + keybox {} chain]",
+            chain.len(),
+            if is_ec { "EC" } else { "RSA" }
+        );
+        for (i, c) in chain.iter().enumerate() {
+            log::info!("teesim_km:   [{i}] {}", describe_cert(c));
+        }
         Ok(chain)
     }
 
