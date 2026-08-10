@@ -102,6 +102,7 @@
 .chip.small { padding: 1px 7px; font-size: 11px; }
 .chip.clickable { border: 0; font: inherit; font-size: 12px; color: var(--fg); cursor: pointer; min-height: 44px; }
 .chip.clickable.selected { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.chip.clickable:disabled { opacity: 0.45; cursor: default; color: var(--muted); }
 .chip.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .chip.removable { padding-right: 4px; }
 .chip-x { position: relative; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 6px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; }
@@ -407,7 +408,7 @@ html, body { overscroll-behavior-y: contain; }
 .kv-hex { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; color: var(--fg); text-align: left; }
 /* A captured value the simulation will override: dimmed + struck so it's clear it isn't
  * what gets attested (the real value shows in the Fabricated group below). */
-.kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--muted); text-decoration: line-through; }
+.kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--danger); text-decoration: line-through; }
 .harvest-body { display: flex; flex-direction: column; gap: 12px; }
 /* Level selector: the two chips split the line evenly, flat rather than pill-shaped. */
 .harvest-modes { display: flex; gap: 6px; }

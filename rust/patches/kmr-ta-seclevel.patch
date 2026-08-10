@@ -1,8 +1,81 @@
+diff --git a/ta/src/cert.rs b/ta/src/cert.rs
+index 97b15b3..20d332d 100644
+--- a/ta/src/cert.rs
++++ b/ta/src/cert.rs
+@@ -296,9 +296,21 @@ enum SecurityLevel {
+ }
+ 
+ /// Build an ASN.1 DER-encoded attestation extension.
++/// The `keyMintVersion` that corresponds to an `attestationVersion`. They agree for KeyMint (>= 100)
++/// but differ for pre-KeyMint Keymaster releases: attestation 2 -> keymaster 3 (Keymaster 3.0),
++/// 3 -> 4 (Keymaster 4.0), 4 -> 41 (Keymaster 4.1). Any other value is passed through unchanged.
++fn keymint_version_for(attestation_version: i32) -> i32 {
++    match attestation_version {
++        2 => 3,
++        3 => 4,
++        4 => 41,
++        v => v,
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn attestation_extension<'a>(
+-    keymint_version: i32,
++    attestation_version: i32,
+     challenge: &'a [u8],
+     app_id: &'a [u8],
+     security_level: keymint::SecurityLevel,
+@@ -349,9 +361,9 @@ pub(crate) fn attestation_extension<'a>(
+     let sec_level = SecurityLevel::try_from(security_level as u32)
+         .map_err(|_| km_err!(InvalidArgument, "invalid security level {:?}", security_level))?;
+     let ext = AttestationExtension {
+-        attestation_version: keymint_version,
++        attestation_version,
+         attestation_security_level: sec_level,
+-        keymint_version,
++        keymint_version: keymint_version_for(attestation_version),
+         keymint_security_level: sec_level,
+         attestation_challenge: challenge,
+         unique_id,
+diff --git a/ta/src/keys.rs b/ta/src/keys.rs
+index 7323b01..85707d2 100644
+--- a/ta/src/keys.rs
++++ b/ta/src/keys.rs
+@@ -173,7 +173,7 @@ impl crate::KeyMintTa {
+                 let unique_id = self.calculate_unique_id(app_id, params)?;
+                 let boot_info = self.boot_info_hashed_key()?;
+                 let attest_ext = cert::attestation_extension(
+-                    self.aidl_version as i32,
++                    self.attestation_version,
+                     challenge,
+                     app_id,
+                     self.hw_info.security_level,
 diff --git a/ta/src/lib.rs b/ta/src/lib.rs
-index a0efe49..f2601f7 100644
+index a0efe49..ccbd543 100644
 --- a/ta/src/lib.rs
 +++ b/ta/src/lib.rs
-@@ -353,6 +353,37 @@ impl KeyMintTa {
+@@ -125,6 +125,12 @@ pub struct KeyMintTa {
+     /// The version of the HAL AIDL interface specification that this TA acts as.
+     aidl_version: KeyMintHalVersion,
+ 
++    /// The raw `attestationVersion` to report in attestation records. Kept separate from
++    /// `aidl_version` (a KeyMint 100/200/300/400 enum used for HAL behaviour) because a pre-KeyMint
++    /// device reports Keymaster attestation versions (2, 3, 4) that the enum cannot represent, and the
++    /// matching `keyMintVersion` differs from it (e.g. Keymaster 4.0 is attestation 3, keymaster 4).
++    attestation_version: i32,
++
+     /**
+      * State that is set after the TA starts, but latched thereafter.
+      */
+@@ -330,6 +336,7 @@ impl KeyMintTa {
+             hw_info,
+             rpc_info,
+             aidl_version: KEYMINT_CURRENT_VERSION,
++            attestation_version: KEYMINT_CURRENT_VERSION as i32,
+             boot_info: None,
+             rot_data: None,
+             hal_info: None,
+@@ -353,6 +360,31 @@ impl KeyMintTa {
          self.hw_info.security_level == SecurityLevel::Strongbox
      }
  
@@ -19,22 +92,16 @@ index a0efe49..f2601f7 100644
 +        self.hw_info.security_level = security_level;
 +    }
 +
-+    /// Return the KeyMint HAL version reported in attestation records
-+    /// (attestationVersion / keymintVersion).
-+    pub fn aidl_version(&self) -> i32 {
-+        self.aidl_version as i32
++    /// Return the raw `attestationVersion` reported in attestation records.
++    pub fn attestation_version(&self) -> i32 {
++        self.attestation_version
 +    }
 +
-+    /// Override the KeyMint HAL version reported in attestation records, so a
-+    /// generated key can claim the version of the real HAL at the level it was
-+    /// requested through. Values map to the nearest HAL version (100/200/300/400).
-+    pub fn set_aidl_version(&mut self, version: i32) {
-+        self.aidl_version = match version {
-+            v if v >= 400 => KeyMintHalVersion::V4,
-+            v if v >= 300 => KeyMintHalVersion::V3,
-+            v if v >= 200 => KeyMintHalVersion::V2,
-+            _ => KeyMintHalVersion::V1,
-+        };
++    /// Override the `attestationVersion` reported in attestation records, so a generated key can claim
++    /// the version of the real HAL at the level it was requested through. Stored raw (2/3/4/100/…) so
++    /// pre-KeyMint (Keymaster) versions survive; the matching `keyMintVersion` is derived in cert.rs.
++    pub fn set_attestation_version(&mut self, version: i32) {
++        self.attestation_version = version;
 +    }
 +
      /// Indicate whether the current device has secure storage available.

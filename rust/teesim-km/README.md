@@ -107,13 +107,17 @@ report an identical one. `Ta` therefore retains a clone of `CertSignInfo` (the b
 
 ## Per-request attestation identity
 
-One `Ta` serves both the TEE and StrongBox proxies, so the record's security level and KeyMint
-version are set per request rather than at construction. Each creation passes the requesting
-HAL's level; `ops.rs::override_attestation_identity` sets `hw_info.security_level` and
-`aidl_version` (the version harvested at that level, held on the `Ta`) for that one call and
-restores them after. The `security_level`/`aidl_version` getters and setters this needs are added
-to `kmr-ta` by [`patches/kmr-ta-seclevel.patch`](../patches/kmr-ta-seclevel.patch), applied the
-same idempotent way as the BoringSSL patch below.
+One `Ta` serves both the TEE and StrongBox proxies, so the record's security level and version are
+set per request rather than at construction. Each creation passes the requesting HAL's level;
+`ops.rs::override_attestation_identity` sets `hw_info.security_level` and a raw `attestation_version`
+for that one call and restores them after. The version is stored raw (2/3/4/100/…) so a pre-KeyMint
+device's Keymaster versions survive, and `cert.rs` derives the matching `keyMintVersion` from it
+(Keymaster 4.0 is attestation 3 / keymaster 4, 4.1 is 4 / 41; KeyMint versions are equal). The level
+and version come from the harvest, or are fabricated (TrustedEnvironment and the OS-appropriate
+version) when the device produced no working hardware attestation. The `security_level` /
+`attestation_version` getters and setters this needs are added to `kmr-ta` by
+[`patches/kmr-ta-seclevel.patch`](../patches/kmr-ta-seclevel.patch), applied the same idempotent way
+as the BoringSSL patch below.
 
 ## BoringSSL backend
 
