@@ -26,6 +26,8 @@ export const KEYBOX_RE = /^[A-Za-z0-9._-]+\.xml$/;
 export const PATCH_RE = /^(today|no|harvested|system_property|(\d{4}|YYYY)-(0[1-9]|1[0-2]|MM)(-(0[1-9]|[12]\d|3[01]|DD))?)$/;
 // harvested | system_property | "16" | "16.0.0" | packed integer like "160000"
 export const OSVER_RE = /^(harvested|system_property|\d+(\.\d+){0,2})$/;
+// Per-profile operation mode.
+export const MODE_RE = /^(patch|generation)$/;
 
 // Field descriptors, in render order. Each one is:
 //   key      unique id, also the inline-error key
@@ -46,6 +48,15 @@ export const FIELDS = [
     key: "keybox", path: ["keybox"], label: "Keybox", group: "attestation",
     type: "keybox", re: KEYBOX_RE, required: true, default: "keybox.xml",
     help: "An *.xml keybox under /data/adb/teesim to sign attestations with.",
+  },
+  {
+    key: "mode", path: ["mode"], label: "Operation mode", group: "attestation",
+    type: "select", options: ["patch", "generation"], required: true, default: "patch",
+    re: MODE_RE,
+    help:
+      "patch: keep the real hardware key and re-sign only its attestation with the keybox " +
+      "(fewer detection points; needs a working hardware level). generation: mint the whole key " +
+      "in software. A level whose hardware is unavailable always falls back to generation.",
   },
   // --- patch & OS levels (folded away in the editor to keep it concise). Empty means
   //     "use the harvested value" — so these are optional, not required. ---
