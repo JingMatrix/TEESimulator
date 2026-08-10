@@ -665,6 +665,11 @@ extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* 
       security_level = static_cast<int32_t>(hw.securityLevel);
     }
   }
+  // Confirms which KeyMint HALs we intercept: keystore2 resolves a distinct IKeyMintDevice for
+  // TrustedEnvironment (level 1) and, when present, StrongBox (level 2) — both are hooked, each
+  // wrapped by its own local device at its real level.
+  LOGI("teesim_router_new_device: local KeyMint device at security_level=%d (real=%p)",
+       security_level, real_binder);
   auto dev = ndk::SharedRefBase::make<TeesimKeyMintDevice>(
       static_cast<SecurityLevel>(security_level), std::move(real));
   ndk::SpAIBinder b = dev->asBinder();
