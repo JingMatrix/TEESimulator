@@ -88,6 +88,10 @@ function healthCard(status) {
 // or synthesize for attestation — usually deviceLocked and verifiedBootState, since an
 // unlocked / unverified device fails attestation. A debugging view: it shows what the real
 // TEE reported and exactly what the simulation changes on top of it.
+// The harvest level the user last selected, kept across the 5 s status poll's re-render so a click
+// on StrongBox doesn't snap back to TrustedEnvironment a few seconds later.
+let harvestMode = "tee";
+
 function harvestCard(status) {
   const h = status && status.harvest;
   const card = el("div", { class: "card" }, [el("h2", { text: "Harvest" })]);
@@ -101,26 +105,27 @@ function harvestCard(status) {
   const fabKeys = Object.keys(fab);
   const sbAvailable = !!h.strongBoxAvailable;
 
-  // Both security levels are harvested. TEE is the primary level; StrongBox is always offered when a
-  // TEE exists but may have no working hardware (then its keys are generated, not patched, at the TEE
-  // version). The two chips report each level's status and switch the values below between them: only
-  // the security level and attestation/keymint version differ — the rest is device-wide.
-  let mode = "tee";
+  // A TrustedEnvironment exists only when a key was attestable; when harvest failed there is no real
+  // level to show, so we drop the chips and render the (fabricated) values directly. When it exists,
+  // StrongBox is always offered alongside it (the design pretends StrongBox is present even on a unit
+  // whose StrongBox can't attest — its chip then reads "generated"). The chips switch the values below
+  // between the levels: only the security level and attestation/keymint version differ.
+  if (failed) harvestMode = "tee";
   const teeChip = el("button", { class: "chip clickable", type: "button", onclick: () => select("tee") }, [
-    el("span", { class: "dot " + (failed ? "warn" : "ok") }),
-    el("span", { text: failed ? "TEE — fabricated" : "TEE" }),
+    el("span", { class: "dot ok" }),
+    el("span", { text: "TrustedEnvironment" }),
   ]);
   const sbChip = el("button", { class: "chip clickable", type: "button", onclick: () => select("strongbox") }, [
     el("span", { class: "dot " + (sbAvailable ? "ok" : "warn") }),
     el("span", { text: sbAvailable ? "StrongBox" : "StrongBox — generated" }),
   ]);
-  card.appendChild(el("div", { class: "chips" }, [teeChip, sbChip]));
+  if (!failed) card.appendChild(el("div", { class: "harvest-modes" }, [teeChip, sbChip]));
 
   const body = el("div", { class: "harvest-body" });
   card.appendChild(body);
 
   function select(m) {
-    mode = m;
+    harvestMode = m;
     teeChip.classList.toggle("selected", m === "tee");
     sbChip.classList.toggle("selected", m === "strongbox");
     renderBody();
@@ -128,7 +133,7 @@ function harvestCard(status) {
 
   function renderBody() {
     body.replaceChildren();
-    const sb = mode === "strongbox";
+    const sb = harvestMode === "strongbox";
     if (failed) {
       body.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so every value below is synthesized rather than captured from a real TEE." }));
     } else if (sb && !sbAvailable) {
@@ -155,7 +160,7 @@ function harvestCard(status) {
     add("keymasterSecurityLevel", secLevel(sb ? 2 : h.keymasterSecurityLevel));
     add("attestationVersion", show(version));
     add("keymasterVersion", show(sb ? version : h.keymasterVersion));
-    hexRow(rows, "moduleHash", h.moduleHash);
+    hexRow(rows, "moduleHash", h.moduleHash, fab["moduleHash"] !== undefined);
     // Device identity captured for ID attestation (only the ids the TEE actually provided).
     for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
       if (h[key]) add(key, h[key]);
@@ -175,7 +180,7 @@ function harvestCard(status) {
     }
   }
 
-  select("tee");
+  select(harvestMode);
   return card;
 }
 
