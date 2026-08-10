@@ -122,6 +122,65 @@ object Harvester {
         val harvestedAt: Long,
     )
 
+    // --- Fabricated attestation identity (software-only / TEE-broken devices) --------------------
+    // When the device produces no working HARDWARE attestation — a software-only emulator, or a device
+    // whose TEE is broken (attestation falls back to Software, or the harvest failed) — we present a
+    // fabricated TrustedEnvironment identity to apps, since spoofing a hardware key is the whole point.
+    // On a device that really attested in hardware the captured values pass through unchanged.
+
+    private const val SEC_LEVEL_TEE = 1
+
+    /** True when the harvest captured no working hardware attestation, so the level/version must be
+     *  fabricated rather than reflected. */
+    fun noWorkingHardware(r: Record): Boolean =
+        r.harvestFailed || r.attestationSecurityLevel < SEC_LEVEL_TEE
+
+    /** The (securityLevel, attestationVersion) to actually present: fabricated TrustedEnvironment + the
+     *  OS-appropriate version when there is no working hardware, else the captured pair unchanged. */
+    fun effectiveAttestation(r: Record): Pair<Int, Int> =
+        if (noWorkingHardware(r)) SEC_LEVEL_TEE to fabricatedAttestationVersion()
+        else r.attestationSecurityLevel to r.attestationVersion
+
+    /** The `attestationVersion` a real hardware device of this OS release reports. Keymaster and KeyMint
+     *  disagree with `keymasterVersion` only up to Android 11 (mapped in keymasterVersionFor):
+     *  Keymaster 3.0 (<=8.1) = 2, 4.0 (9/10) = 3, 4.1 (11) = 4; KeyMint N.0 (12+) = N*100. */
+    fun fabricatedAttestationVersion(sdk: Int = Build.VERSION.SDK_INT): Int =
+        when {
+            sdk <= 27 -> 2 // <= Android 8.1 (Keymaster 3.0); below our floor, best effort
+            sdk <= 29 -> 3 // Android 9, 10 (Keymaster 4.0)
+            sdk == 30 -> 4 // Android 11 (Keymaster 4.1)
+            sdk <= 32 -> 100 // Android 12 / 12L (KeyMint 1.0)
+            sdk == 33 -> 200 // Android 13 (KeyMint 2.0)
+            sdk == 34 -> 300 // Android 14 (KeyMint 3.0)
+            else -> 400 // Android 15+ (KeyMint 4.0)
+        }
+
+    /** The `keymasterVersion` matching an `attestationVersion` (same derivation as the TA's cert.rs):
+     *  attestation 2 -> keymaster 3, 3 -> 4, 4 -> 41; KeyMint values (>= 100) are equal. */
+    fun keymasterVersionFor(attestationVersion: Int): Int =
+        when (attestationVersion) {
+            2 -> 3
+            3 -> 4
+            4 -> 41
+            else -> attestationVersion
+        }
+
+    private fun secLevelName(n: Int): String =
+        (arrayOf("Software", "TrustedEnvironment", "StrongBox").getOrNull(n) ?: "$n") + " ($n)"
+
+    /** When there is no working hardware, record the fabricated TrustedEnvironment level + versions in
+     *  the `fabricated` map so the WebUI presents what we hand apps. Raw captured fields stay untouched. */
+    private fun markFabricatedAttestation(r: Record): Record {
+        if (!noWorkingHardware(r)) return r
+        val (level, version) = effectiveAttestation(r)
+        val fab = r.fabricated.toMutableMap()
+        fab["attestationSecurityLevel"] = secLevelName(level)
+        fab["keymasterSecurityLevel"] = secLevelName(level)
+        fab["attestationVersion"] = version.toString()
+        fab["keymasterVersion"] = keymasterVersionFor(version).toString()
+        return r.copy(fabricated = fab)
+    }
+
     /**
      * Load the frozen record if present, attempt a fresh harvest, merge (preserving the frozen boot
      * key/hash), persist, and return the effective record.
@@ -161,7 +220,7 @@ object Harvester {
                 else -> existing?.takeIf { !it.harvestFailed } ?: fallback()
             }
 
-        val enriched = supplementDeviceIds(effective)
+        val enriched = markFabricatedAttestation(supplementDeviceIds(effective))
         persist(enriched)
         SystemLogger.info(
             "Harvest complete: failed=${enriched.harvestFailed} " +

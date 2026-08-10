@@ -65,11 +65,12 @@ impl Ta {
     /// Apply a per-request attestation identity — security level and KeyMint HAL version — to the
     /// inner TA for the duration of one generateKey/importKey, returning the previous pair to restore
     /// afterwards. The record's `attestationSecurityLevel` / `keymasterSecurityLevel` and the
-    /// KeyCharacteristics `securityLevel` follow `hw_info.security_level`; its `attestationVersion` /
-    /// `keymintVersion` follow the TA's `aidl_version`. Overriding both makes the record reflect the
-    /// real HAL the request came through: `security_level` picks the level (0 Software, 1
-    /// TrustedEnvironment, 2 StrongBox) and the version harvested at that level (StrongBox falling
-    /// back to the TEE version). A level outside the known set leaves the TA's defaults in place.
+    /// KeyCharacteristics `securityLevel` follow `hw_info.security_level`; its `attestationVersion`
+    /// follows the TA's raw `attestation_version` (and `keyMintVersion` is derived from it in cert.rs).
+    /// Overriding both makes the record reflect the real HAL the request came through: `security_level`
+    /// picks the level (0 Software, 1 TrustedEnvironment, 2 StrongBox) and the version harvested (or
+    /// fabricated) at that level (StrongBox falling back to the TEE version). A level outside the known
+    /// set leaves the TA's defaults in place.
     fn override_attestation_identity(&mut self, security_level: i32) -> Option<(SecurityLevel, i32)> {
         let level = match security_level {
             0 => SecurityLevel::Software,
@@ -77,13 +78,13 @@ impl Ta {
             2 => SecurityLevel::Strongbox,
             _ => return None,
         };
-        let prev = (self.inner.security_level(), self.inner.aidl_version());
+        let prev = (self.inner.security_level(), self.inner.attestation_version());
         self.inner.set_security_level(level);
         let version = match level {
             SecurityLevel::Strongbox => self.attest_version_strongbox,
             _ => self.attest_version_tee,
         };
-        self.inner.set_aidl_version(version);
+        self.inner.set_attestation_version(version);
         Some(prev)
     }
 
@@ -107,7 +108,7 @@ impl Ta {
             self.perform(GenerateKeyRequest { key_params, attestation_key });
         if let Some((level, version)) = restore {
             self.inner.set_security_level(level);
-            self.inner.set_aidl_version(version);
+            self.inner.set_attestation_version(version);
         }
         let ret = resp?.ret;
         crate::resign::log_chain("teesim_km: generate_key result", &ret.certificate_chain);
@@ -138,7 +139,7 @@ impl Ta {
             self.perform(ImportKeyRequest { key_params, key_format, key_data, attestation_key });
         if let Some((level, version)) = restore {
             self.inner.set_security_level(level);
-            self.inner.set_aidl_version(version);
+            self.inner.set_attestation_version(version);
         }
         let ret = resp?.ret;
         crate::resign::log_chain("teesim_km: import_key result", &ret.certificate_chain);

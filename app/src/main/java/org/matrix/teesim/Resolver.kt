@@ -45,11 +45,16 @@ object Resolver {
                 // (probed at harvest). It gates patch mode at the StrongBox level: when false, keys
                 // requested at StrongBox fall back to generation even in a patch profile.
                 put("strongBoxAvailable", harvest.strongBoxAvailable)
-                // Harvested KeyMint HAL version at each level, so a generated key claims the real
-                // device's attestation/keymint version rather than the TA's default. StrongBox reuses
-                // the TEE value when it has no real hardware to harvest.
-                put("attestVersionTee", harvest.attestationVersion)
-                put("attestVersionStrongBox", harvest.strongBoxAttestationVersion)
+                // The attestationVersion each level reports: the real harvested value on a device that
+                // attested in hardware, or a fabricated OS-appropriate one when there is no working
+                // hardware (software-only / TEE-broken). StrongBox reuses it when it has no hardware.
+                val effVersion = Harvester.effectiveAttestation(harvest).second
+                put("attestVersionTee", effVersion)
+                put(
+                    "attestVersionStrongBox",
+                    if (Harvester.noWorkingHardware(harvest)) effVersion
+                    else harvest.strongBoxAttestationVersion,
+                )
             },
         )
 
@@ -75,11 +80,10 @@ object Resolver {
         // key in our TA. The router still forces generation for a level whose hardware is unavailable.
         o.put("mode", p.mode)
 
-        // Security level is not a profile choice: it is the device's real level, harvested
-        // from the TEE (a key's actual level is what the app requested via its keystore
-        // security-level service, bounded by what the device offers — which for the keys we
-        // serve is this harvested TrustedEnvironment level).
-        o.put("securityLevel", harvest.attestationSecurityLevel)
+        // Security level is not a profile choice: it is the device's real harvested level, except that
+        // a device with no working hardware attestation (software-only / TEE-broken) presents a
+        // fabricated TrustedEnvironment so a spoofed key still claims hardware (see effectiveAttestation).
+        o.put("securityLevel", Harvester.effectiveAttestation(harvest).first)
 
         // osVersion: system_property -> the harvested device value, omitted when absent;
         // else the parsed literal, omitted when it can't be parsed. A missing osVersion is
