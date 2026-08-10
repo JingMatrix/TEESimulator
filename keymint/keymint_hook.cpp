@@ -11,7 +11,9 @@
 #include <aidl/android/hardware/security/keymint/IKeyMintDevice.h>
 #include <android/binder_ibinder.h>
 #include <android/binder_parcel.h>
+#include <android/binder_status.h>
 
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -20,12 +22,15 @@
 #include <set>
 #include <string>
 
+#include "logging.hpp"
 #include "lsplt.hpp"
 
 using aidl::android::hardware::security::keymint::IKeyMintDevice;
 
 // Implemented in keymint_router.cpp.
 extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* real_binder);
+// True if the calling uid belongs to a live target profile (keymint_router.cpp).
+extern "C" bool teesim_is_target_uid(int32_t uid);
 
 namespace {
 
@@ -64,6 +69,33 @@ bool IsKeyMintProxy(AIBinder* binder) {
   return desc && std::strcmp(desc, IKeyMintDevice::descriptor) == 0;
 }
 
+// The framework RKP front-end keystore2 asks for a remote-provisioned attestation key. keystore2
+// resolves it by calling IRemoteProvisioning.getRegistration on this binder; failing that transact
+// makes keystore2 fall back to "no attest key" (get_attest_key_info -> Ok(None)) on a hybrid device,
+// so it appends no real-hardware certificate chain to the key we mint.
+bool IsRkpProvisioning(AIBinder* binder) {
+  if (!AIBinder_isRemote(binder)) return false;
+  const AIBinder_Class* clazz = AIBinder_getClass(binder);
+  if (!clazz) return false;
+  const char* desc = AIBinder_Class_getDescriptor(clazz);
+  return desc && std::strcmp(desc, "android.security.rkp.IRemoteProvisioning") == 0;
+}
+
+// Whether TEE is RKP-only. We must NEVER write this property (a global change is an obvious detection
+// point) — we only read it, once, to gate the denial: on an rkp-only device, denying RKP would fail
+// key generation outright, so there we let it through. Default (unset) is hybrid == safe to deny.
+bool RkpOnlyTee() {
+  static const bool value = [] {
+    char buf[PROP_VALUE_MAX] = {0};
+    int n = __system_property_get("remote_provisioning.tee.rkp_only", buf);
+    bool only = n > 0 && (std::strcmp(buf, "true") == 0 || std::strcmp(buf, "1") == 0);
+    LOGI("RKP: remote_provisioning.tee.rkp_only=%s; target-app RKP denial %s", n > 0 ? buf : "<unset>",
+         only ? "DISABLED (rkp-only device; would break generation)" : "enabled");
+    return only;
+  }();
+  return value;
+}
+
 // Return (creating if needed) the local device that wraps `proxy`.
 AIBinder* LocalFor(AIBinder* proxy) {
   std::lock_guard<std::mutex> lk(g_mu);
@@ -97,9 +129,25 @@ binder_status_t Redirect(AIBinder* local, transaction_code_t code, AParcel** in,
 
 binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParcel** in,
                                AParcel** out, binder_flags_t flags) {
-  if (!tls_forwarding && in && *in && IsHandled(code) && IsKeyMintProxy(binder)) {
-    AIBinder* local = LocalFor(binder);
-    if (local) return Redirect(local, code, in, out, flags, binder);
+  if (!tls_forwarding && in && *in) {
+    // Deny a target app's remote-provisioning lookup so keystore2 attaches no real attest key. The
+    // RKP resolution runs on this same binder thread (a current-thread tokio runtime block_on),
+    // while keystore2 is still serving the app's generateKey, so getCallingUid is the app's uid.
+    if (IsRkpProvisioning(binder) && !RkpOnlyTee()) {
+      int32_t uid = static_cast<int32_t>(AIBinder_getCallingUid());
+      if (teesim_is_target_uid(uid)) {
+        LOGI("RKP: denying IRemoteProvisioning transact code=%u for target uid=%d "
+             "(keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
+             code, uid);
+        AParcel_delete(*in);  // honour AIBinder_transact's ownership of the input parcel
+        *in = nullptr;
+        return STATUS_FAILED_TRANSACTION;  // -> Rust `?` -> get_attest_key_info Ok(None) on hybrid
+      }
+    }
+    if (IsHandled(code) && IsKeyMintProxy(binder)) {
+      AIBinder* local = LocalFor(binder);
+      if (local) return Redirect(local, code, in, out, flags, binder);
+    }
   }
   return real_transact(binder, code, in, out, flags);
 }
