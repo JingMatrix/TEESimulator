@@ -25,9 +25,38 @@ object App {
     @Volatile private lateinit var appContext: Context
     @Volatile private lateinit var harvest: Harvester.Record
     @Volatile private var lastGoodConfig: ConfigStore.Config? = null
+    // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
+    private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
+
+    // The delete-helper child body (see main): keystore2 only lets a key's OWNER delete it, and only the
+    // owner's delete evicts keystore2's in-memory cache (a direct database delete does not). binder tells
+    // keystore2 the sender's EFFECTIVE uid, so we seteuid to the owner and then delete — our real uid
+    // stays root, and this is a throwaway process anyway. Exit code: 0 deleted, 1 keystore2 refused,
+    // 2 could-not-seteuid (so the parent falls back to a direct database delete + keystore2 restart).
+    @Suppress("DEPRECATION") // Os.seteuid is deprecated but is the only way to set the binder-reported euid
+    private fun runDeleteHelper(uid: Int, keyId: Long): Int {
+        if (uid < 0) return 2
+        try {
+            android.system.Os.seteuid(uid)
+        } catch (e: Throwable) {
+            SystemLogger.warning("delete-helper: seteuid($uid) failed: ${e.javaClass.simpleName}: ${e.message}")
+            return 2
+        }
+        return try {
+            if (Keystore2Service.deleteKeyById(keyId)) 0 else 1
+        } catch (e: Throwable) {
+            SystemLogger.warning("delete-helper: deleteKeyById($keyId) as euid=$uid failed", e)
+            1
+        }
+    }
 
     @JvmStatic
     fun main(args: Array<String>) {
+        // Delete-helper mode (a child the daemon spawns to delete one key as its owning app — see
+        // runDeleteHelper). Runs before any daemon setup and exits with the outcome as its code.
+        if (args.size == 3 && args[0] == "del") {
+            kotlin.system.exitProcess(runDeleteHelper(args[1].toIntOrNull() ?: -1, args[2].toLongOrNull() ?: 0L))
+        }
         SystemLogger.info("TEESimulator control daemon starting")
         try {
             waitForSystemReady()
@@ -57,7 +86,16 @@ object App {
 
             // Control channel + initial push, then watch config and packages. After each committed
             // push the lib acks; that is when pre-existing target keys are re-attested to the keybox.
-            Control.onCommitted = { lastGoodConfig?.let { ReAttest.run(it) } }
+            Control.onCommitted = {
+            lastGoodConfig?.let { cfg ->
+                // On the first committed push (daemon start) clear each target's stale attestation key
+                // so it is regenerated through the TA — an attest key must be ours to patch the leaves
+                // it later signs. If that purge restarts keystore2, skip re-attestation this round: the
+                // restart re-injects and re-pushes, and re-attestation runs then against a live keystore.
+                val restarting = firstCommit.getAndSet(false) && ReAttest.purgeTargetAttestKeys(cfg)
+                if (!restarting) ReAttest.run(cfg)
+            }
+        }
             Control.start()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }

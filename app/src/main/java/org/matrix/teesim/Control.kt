@@ -227,13 +227,19 @@ object Control {
      * thread delivers the reply, so this must not run on that thread.
      */
     fun resign(profileId: String, leaf: ByteArray): List<ByteArray>? {
-        val out = activeOut ?: return null
+        val out =
+            activeOut
+                ?: run {
+                    SystemLogger.warning("control: resign for '$profileId' skipped — no live connection")
+                    return null
+                }
         resignReplies.clear()
         val req =
             JSONObject()
                 .put("type", "resign")
                 .put("profile", profileId)
                 .put("leafB64", Base64.getEncoder().encodeToString(leaf))
+        SystemLogger.info("control: resign request (profile=$profileId, leaf=${leaf.size} bytes)")
         try {
             writeFrame(out, req.toString())
         } catch (e: Exception) {
@@ -246,11 +252,16 @@ object Control {
                     SystemLogger.warning("control: resign timed out (profile $profileId)")
                     return null
                 }
-        if (!reply.optBoolean("ok")) return null
+        if (!reply.optBoolean("ok")) {
+            SystemLogger.warning("control: resign rejected by lib (profile $profileId)")
+            return null
+        }
         val arr = reply.optJSONArray("chainB64") ?: return null
         val dec = Base64.getDecoder()
         return try {
-            (0 until arr.length()).map { dec.decode(arr.getString(it)) }
+            val chain = (0 until arr.length()).map { dec.decode(arr.getString(it)) }
+            SystemLogger.info("control: resign returned a ${chain.size}-cert chain for '$profileId'")
+            chain
         } catch (e: Exception) {
             SystemLogger.warning("control: resign reply undecodable: ${e.message}")
             null
