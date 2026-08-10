@@ -10,8 +10,10 @@
 
 #include <aidl/android/hardware/security/keymint/BnKeyMintDevice.h>
 #include <aidl/android/hardware/security/keymint/BnKeyMintOperation.h>
+#include <android/binder_ibinder.h>  // AIBinder_getCallingUid
 
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,6 +55,7 @@ struct Profile {
   std::string id;
   TaPtr ta;
   std::vector<std::string> packages;
+  std::vector<int32_t> uids;  // resolved caller uids, for requests that carry no app-id to match
   bool patch_mode = false;
 };
 
@@ -85,9 +88,10 @@ struct RequestTarget {
   bool patch_mode = false;
 };
 
-RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params) {
+RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t caller_uid) {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   if (g_profiles.empty()) return {};
+  // Primary match: the ATTESTATION_APPLICATION_ID the app embeds in the request names its package.
   for (const auto& p : params) {
     if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
     if (p.value.getTag() != KeyParameterValue::blob) continue;
@@ -96,6 +100,16 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params) {
     for (const auto& prof : g_profiles) {
       for (const auto& pkg : prof.packages) {
         if (hay.find(pkg) != std::string::npos) return {prof.ta, prof.patch_mode};
+      }
+    }
+  }
+  // Fallback match: the caller's uid. An app creating an attestation KEY does so unattested — no
+  // challenge, no app-id — so there is nothing to name-match, yet we must still route it to the app's
+  // profile (and mint it in the TA) or the key it later attests is signed by a key we do not hold.
+  if (caller_uid != static_cast<uid_t>(-1)) {
+    for (const auto& prof : g_profiles) {
+      for (int32_t uid : prof.uids) {
+        if (static_cast<uid_t>(uid) == caller_uid) return {prof.ta, prof.patch_mode};
       }
     }
   }
@@ -267,6 +281,20 @@ bool IsOurs(const std::vector<uint8_t>& blob) {
   return teesim_km_is_marked(blob.data(), blob.size());
 }
 
+// True if the request creates a key with ATTEST_KEY purpose (an attestation key). Such a key MUST be
+// minted in the TA (generation), never patched: only if we hold its private key can our TA later sign
+// — and root-of-trust-patch — the leaves this key attests. A patched real-hardware attest key can only
+// ever produce a real, unlocked delegated leaf (we cannot re-sign under a key we don't hold).
+bool IsAttestKeyRequest(const std::vector<KeyParameter>& params) {
+  for (const auto& p : params) {
+    if (p.tag == Tag::PURPOSE && p.value.getTag() == KeyParameterValue::keyPurpose &&
+        p.value.get<KeyParameterValue::keyPurpose>() == KeyPurpose::ATTEST_KEY) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // --- IKeyMintOperation -------------------------------------------------------
 
 class TeesimKeyMintOperation : public BnKeyMintOperation {
@@ -351,7 +379,12 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   ndk::ScopedAStatus generateKey(const std::vector<KeyParameter>& keyParams,
                                  const std::optional<AttestationKey>& attestationKey,
                                  KeyCreationResult* out) override {
-    RequestTarget t = ProfileForRequest(keyParams);
+    const uid_t caller_uid = AIBinder_getCallingUid();
+    RequestTarget t = ProfileForRequest(keyParams, caller_uid);
+    LOGI("generateKey: level=%d, %zu param(s), caller_uid=%d, caller_attest_key=%d, target=%d, "
+         "patch_mode=%d, strongbox_ok=%d",
+         static_cast<int>(level_), keyParams.size(), static_cast<int>(caller_uid),
+         attestationKey.has_value(), t.ta != nullptr, t.patch_mode, g_strongbox_ok);
     if (!t.ta) {
       if (real_) {
         LOGI("generateKey: forwarding to real HAL (not a target)");
@@ -360,26 +393,50 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
-    // A supplied attest key we did not mint is a real-hardware blob our TA cannot parse;
-    // forward the whole request so the real HAL attests it, rather than feeding a foreign
-    // blob to the TA (which fails as InvalidKeyBlob).
-    if (attestationKey && !IsOurs(attestationKey->keyBlob)) {
-      if (real_) {
-        LOGI("generateKey: attest key is not ours; forwarding to real HAL");
-        ForwardGuard g;
-        return real_->generateKey(keyParams, attestationKey, out);
-      }
-      return Status(-100);
+    // Creating an ATTESTATION KEY (ATTEST_KEY purpose) always mints it in the TA (ours) and IGNORES any
+    // attest key keystore2 injected to attest it. This MUST come before the attestationKey branch below:
+    // on TrustedEnvironment, attesting a new attest key that carries a challenge makes keystore2 inject
+    // an RKP-provisioned (real hardware) key — which would otherwise be seen here as a "foreign attest
+    // key" and forwarded, leaving us a foreign attest key we can never re-root. We must hold this key's
+    // private key so the leaves it later signs get a patched root of trust. (StrongBox has no RKP, so its
+    // attest-key creation already arrived with no injected key — exactly why StrongBox worked and TE did
+    // not.) Forward std::nullopt: the TA self-attests the new key under the keybox.
+    if (IsAttestKeyRequest(keyParams)) {
+      LOGI("generateKey: attest-key creation -> forced generation in the TA (ignoring any injected attest key)");
+      return Simulate(t.ta.get(), keyParams, std::nullopt, out);
     }
-    // Patch mode: let the real hardware generate the key and attest it, then keep its blob and only
-    // re-sign the attestation under the keybox with a patched root of trust. It needs working hardware
-    // at this level to forward to — a StrongBox that cannot attest (g_strongbox_ok=false), or no real
-    // HAL at all, falls back to generation.
+    // A leaf that carries an attest key: keystore2 appends that attest key's OWN stored certificate chain
+    // to the leaf we return, so we emit ONLY the leaf, never extra certificates.
+    if (attestationKey) {
+      if (IsOurs(attestationKey->keyBlob)) {
+        // Our attest key: sign the leaf with it in the TA (RoT patched, keybox-rooted). keystore2
+        // appends the attest key's own keybox chain. This is the path an app hits once its attest key
+        // was generated by us above.
+        LOGI("generateKey: attest key is ours; signing the leaf with it (no extra certs)");
+        return Simulate(t.ta.get(), keyParams, attestationKey, out);
+      }
+      // Foreign attest key on a leaf — an RKP key keystore2 injected for a bare challenge, or one made
+      // before we covered the app. Forward so the real hardware signs the leaf and keystore2 appends the
+      // key's chain. This leaf keeps the real root of trust; the durable fix is that attest keys are now
+      // ours (above), so an app that uses its own attest key takes the "ours" path.
+      LOGI("generateKey: foreign attest key (blob_len=%zu); forwarding to real HAL, no extra certs",
+           attestationKey->keyBlob.size());
+      if (!real_) {
+        // No real HAL to forward to (a device built without one). We cannot mint under a foreign
+        // attest key ourselves, so fail rather than dereference a null proxy.
+        LOGW("generateKey: foreign attest key but no real HAL; failing");
+        return Status(-100);
+      }
+      ForwardGuard g;
+      return real_->generateKey(keyParams, attestationKey, out);
+    }
+    // No attest key. Patch mode re-roots the real hardware leaf under the keybox; a StrongBox that cannot
+    // attest (g_strongbox_ok=false), or no real HAL, generates instead.
     if (t.patch_mode && real_ && (level_ != SecurityLevel::STRONGBOX || g_strongbox_ok)) {
       LOGI("generateKey: patch mode (re-signing real hardware attestation) for target app");
       return PatchAttest(t.ta.get(), keyParams, out);
     }
-    LOGI("generateKey: simulating for target app");
+    LOGI("generateKey: generation mode for target app");
     return Simulate(t.ta.get(), keyParams, attestationKey, out);
   }
 
@@ -387,7 +444,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                const std::vector<uint8_t>& keyData,
                                const std::optional<AttestationKey>& attestationKey,
                                KeyCreationResult* out) override {
-    RequestTarget t = ProfileForRequest(keyParams);
+    RequestTarget t = ProfileForRequest(keyParams, AIBinder_getCallingUid());
     TaPtr ta = t.ta;
     if (!ta) {
       if (real_) {
@@ -422,6 +479,8 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                            const std::vector<KeyParameter>& params,
                            const std::optional<HardwareAuthToken>& authToken,
                            BeginResult* out) override {
+    LOGI("begin: purpose=%d, blob_len=%zu, ours=%d", static_cast<int>(purpose), keyBlob.size(),
+         IsOurs(keyBlob));
     if (!IsOurs(keyBlob)) {
       if (real_) {
         ForwardGuard g;
@@ -451,6 +510,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   }
 
   ndk::ScopedAStatus deleteKey(const std::vector<uint8_t>& keyBlob) override {
+    LOGI("deleteKey: blob_len=%zu, ours=%d", keyBlob.size(), IsOurs(keyBlob));
     if (!IsOurs(keyBlob)) {
       if (real_) {
         ForwardGuard g;
@@ -466,6 +526,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   ndk::ScopedAStatus upgradeKey(const std::vector<uint8_t>& keyBlobToUpgrade,
                                 const std::vector<KeyParameter>& upgradeParams,
                                 std::vector<uint8_t>* out) override {
+    LOGI("upgradeKey: blob_len=%zu, ours=%d", keyBlobToUpgrade.size(), IsOurs(keyBlobToUpgrade));
     if (!IsOurs(keyBlobToUpgrade)) {
       if (real_) {
         ForwardGuard g;
@@ -490,6 +551,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                            const std::vector<uint8_t>& appId,
                                            const std::vector<uint8_t>& appData,
                                            std::vector<KeyCharacteristics>* out) override {
+    LOGI("getKeyCharacteristics: blob_len=%zu, ours=%d", keyBlob.size(), IsOurs(keyBlob));
     if (!IsOurs(keyBlob)) {
       if (real_) {
         ForwardGuard g;
@@ -613,6 +675,9 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     KeyCreationResult real;
     {
       ForwardGuard g;
+      // No attest key here — a request that carries one is handled before we reach patch mode (ours is
+      // signed in the TA, a foreign one is forwarded whole). Let the real hardware attest with its own
+      // batch key; we keep only the leaf and re-sign it under the keybox.
       auto st = real_->generateKey(keyParams, std::nullopt, &real);
       if (!st.isOk()) {
         LOGW("patch: real generateKey failed (%d); generating instead", st.getServiceSpecificError());
@@ -623,6 +688,8 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       LOGW("patch: real attestation returned no certificates; generating instead");
       return Simulate(ta, keyParams, std::nullopt, out);
     }
+    LOGI("patch: real HAL returned %zu cert(s); re-signing only the leaf under the keybox",
+         real.certificateChain.size());
     const auto& leaf = real.certificateChain.front().encodedCertificate;
     TsCreationResult* res = nullptr;
     int32_t rc = teesim_km_patch_attestation(ta, leaf.data(), leaf.size(), &res);
@@ -643,6 +710,8 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       out->certificateChain[i].encodedCertificate.assign(c, c + clen);
     }
     teesim_km_free_result(res);
+    LOGI("patch: emitted %zu-cert chain (real key blob kept, leaf re-rooted at keybox)",
+         out->certificateChain.size());
     return ndk::ScopedAStatus::ok();
   }
 
@@ -658,6 +727,8 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     if (rc != 0) return Status(rc);
     FillCreationResult(res, out);
     teesim_km_free_result(res);
+    LOGI("generate: emitted %zu-cert chain (whole key minted in the TA)",
+         out->certificateChain.size());
     return ndk::ScopedAStatus::ok();
   }
 
@@ -703,6 +774,10 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   for (int i = 0; i < p->n_packages && p->packages; ++i) {
     if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
   }
+  for (int i = 0; i < p->n_uids && p->uids; ++i) prof.uids.push_back(p->uids[i]);
+  LOGI("cfg: staged profile '%s' (mode=%s, security_level=%d, %zu package(s), %zu uid(s))",
+       prof.id.c_str(), prof.patch_mode ? "patch" : "generation", p->security_level,
+       prof.packages.size(), prof.uids.size());
   g_staging.push_back(std::move(prof));
   return true;
 }
@@ -716,9 +791,24 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
   return static_cast<int>(g_profiles.size());
 }
 
+// True if `uid` belongs to a live target profile. The transact hook uses this to scope the RKP
+// denial to our apps: when a target app's generateKey resolves a remote-provisioned attest key, we
+// fail that lookup so keystore2 appends no real-hardware chain and our forced generation stays clean.
+extern "C" bool teesim_is_target_uid(int32_t uid) {
+  if (uid < 0) return false;
+  std::lock_guard<std::mutex> lk(g_cfg_mu);
+  for (const auto& prof : g_profiles) {
+    for (int32_t u : prof.uids) {
+      if (u == uid) return true;
+    }
+  }
+  return false;
+}
+
 extern "C" bool teesim_cfg_resign(const char* profile_id, const uint8_t* leaf, size_t leaf_len,
                                   TsCertSink sink, void* ctx) {
   if (!profile_id || !leaf || leaf_len == 0 || !sink) return false;
+  LOGI("resign: request for profile '%s' (leaf %zu bytes)", profile_id, leaf_len);
   TaPtr ta;
   {
     std::lock_guard<std::mutex> lk(g_cfg_mu);
