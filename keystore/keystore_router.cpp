@@ -79,6 +79,29 @@ struct PendingKey {
   std::vector<uint8_t> spki;    // public key, SubjectPublicKeyInfo DER
   std::vector<uint8_t> ta_blob; // key imported into the TA, for signing operations
   std::vector<KmParam> params;  // key parameters from generateKey
+  // Owns the bytes of every byte-array (BYTES/BIGNUM) parameter, in the order those parameters
+  // appear in `params`. A KmParam only holds a raw `blob` pointer, so this storage must outlive the
+  // key and the pointers must be rebound into it after any copy or move (RebindParamBlobs) — otherwise
+  // they dangle into the caller's transient read buffer or into the source object.
+  std::vector<std::vector<uint8_t>> param_blobs;
+
+  // Point each byte-array parameter's `blob` at this object's own `param_blobs`. `params` and
+  // `param_blobs` were built in lockstep, so the k-th byte-array parameter uses param_blobs[k].
+  void RebindParamBlobs() {
+    size_t k = 0;
+    for (auto& kp : params) {
+      const uint32_t type = kp.tag & 0xf0000000u;
+      if (type != 0x80000000u && type != 0x90000000u) continue;  // not a BIGNUM/BYTES param
+      if (k >= param_blobs.size()) {
+        kp.blob = nullptr;
+        kp.blob_len = 0;
+        continue;
+      }
+      kp.blob = param_blobs[k].data();
+      kp.blob_len = param_blobs[k].size();
+      ++k;
+    }
+  }
 };
 
 // A TA is reference-counted so an in-flight operation keeps its profile's TA
@@ -220,8 +243,9 @@ std::vector<KmParam> ReadKeymasterArguments(Parcel& p,
                                             std::vector<std::vector<uint8_t>>& blob_store) {
   std::vector<KmParam> out;
   int32_t count = p.readInt32();
-  if (count < 0) count = 0;
-  blob_store.reserve(blob_store.size() + count);  // keep byte-array data() pointers stable
+  // `count` is attacker-controlled and independent of the parcel size; clamp it so a bogus value can
+  // neither drive a huge loop nor (below) a huge reservation. Real keymaster arg lists are tiny.
+  if (count < 0 || count > 4096) count = 0;
   for (int32_t i = 0; i < count; ++i) {
     if (p.readInt32() == 0) continue;  // typed-list element presence marker
     KmParam kp{};
@@ -486,7 +510,9 @@ bool HandleGenerateKey(int uid, Parcel& in, Parcel* reply) {
   if (in.readInt32() == 1) params = ReadKeymasterArguments(in, blobs);
 
   PendingKey key;
-  key.params = params;
+  key.params = std::move(params);
+  key.param_blobs = std::move(blobs);  // take ownership so the params' blob pointers stay valid
+  key.RebindParamBlobs();              // and repoint them into our own storage, not the read buffer
   {
     std::lock_guard<std::mutex> lk(g_keys_mutex);
     g_keys[KeyId(uid, alias)] = std::move(key);
@@ -564,7 +590,8 @@ bool HandleAttestKey(int uid, Parcel& in, Parcel* reply) {
     auto it = g_keys.find(KeyId(uid, alias));
     if (it == g_keys.end()) return false;  // not ours; forward
     if (it->second.pkcs8.empty() && !GenerateKeyPair(it->second.params, it->second)) return false;
-    key = it->second;
+    key = it->second;        // deep-copies param_blobs, but the params still point into the source...
+    key.RebindParamBlobs();  // ...so repoint them into this copy's own storage
   }
 
   // The caller supplies the attestation challenge; the application id is synthesised.
