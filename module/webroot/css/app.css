@@ -379,6 +379,7 @@ html, body { overscroll-behavior-y: contain; }
 /* A captured value the simulation will override: dimmed + struck so it's clear it isn't
  * what gets attested (the real value shows in the Fabricated group below). */
 .kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--muted); text-decoration: line-through; }
+.harvest-body { display: flex; flex-direction: column; gap: 12px; }
 .kv-replaced .kv-label { color: var(--warn); }
 
 /* --- keybox inspector --------------------------------------------------- */
