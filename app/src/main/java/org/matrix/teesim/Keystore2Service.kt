@@ -22,13 +22,21 @@ object Keystore2Service {
     /** The resolved IKeystoreService: its interface class, the service instance, and KeyDescriptor class. */
     private class Svc(val iface: Class<*>, val service: Any?, val descriptorClass: Class<*>)
 
-    /** Resolve keystore2's binder and reflect the classes we call, or null (logged) if unavailable. */
+    /** Resolve keystore2's binder and reflect the classes we call, or null (logged) if unavailable. A
+     *  freshly spawned delete-helper can outrun keystore2's service registration at boot, so wait
+     *  (bounded) for the service to appear, as the main branch does. */
     private fun connect(): Svc? {
         val serviceManager = Class.forName("android.os.ServiceManager")
-        val binder =
-            serviceManager.getMethod("getService", String::class.java).invoke(null, SERVICE) as? IBinder
+        val getService = serviceManager.getMethod("getService", String::class.java)
+        var binder = getService.invoke(null, SERVICE) as? IBinder
+        var waitedMs = 0
+        while (binder == null && waitedMs < 5000) {
+            Thread.sleep(100)
+            waitedMs += 100
+            binder = getService.invoke(null, SERVICE) as? IBinder
+        }
         if (binder == null) {
-            SystemLogger.warning("Keystore2Service: service $SERVICE not found")
+            SystemLogger.warning("Keystore2Service: service $SERVICE not found after ${waitedMs}ms")
             return null
         }
         val stub = Class.forName("android.system.keystore2.IKeystoreService\$Stub")
@@ -67,6 +75,36 @@ object Keystore2Service {
     }
 
     /**
+     * Delete keyentry [keyId] as its owning app [uid]. keystore2 only lets a key's owner delete it (and
+     * only that evicts its cache), so we cannot remove another app's key directly — we spawn a child
+     * app_process that seteuid's to [uid] before calling keystore2 (binder reports the effective uid).
+     * The child runs as root first, so it can read our dex; App.main handles the "del" arguments. Returns
+     * the child's exit code: 0 deleted, 1 keystore2 refused, 2 could-not-seteuid, -1 could-not-spawn.
+     */
+    fun deleteKeyByIdAsUid(keyId: Long, uid: Int): Int {
+        return try {
+            val cp = System.getProperty("java.class.path")
+            if (cp.isNullOrEmpty()) return -1
+            val cmd = listOf(
+                "/system/bin/app_process", "-Djava.class.path=$cp", "/",
+                "--nice-name=teesim-del", "org.matrix.teesim.App", "del", uid.toString(), keyId.toString(),
+            )
+            val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText().trim()
+            p.waitFor()
+            val code = p.exitValue()
+            SystemLogger.info(
+                "deleteKeyByIdAsUid(keyId=$keyId, uid=$uid): child exit $code" +
+                    if (out.isEmpty()) "" else " | ${out.takeLast(180)}"
+            )
+            code
+        } catch (e: Throwable) {
+            SystemLogger.warning("deleteKeyByIdAsUid(keyId=$keyId, uid=$uid) spawn failed", e)
+            -1
+        }
+    }
+
+    /**
      * Ask keystore2 to replace the stored public/attestation certificate ([publicCert], the leaf DER)
      * and its chain ([certificateChain], the DER concatenation of the rest) for the key with keyentry id
      * [keyId], leaving the key blob itself untouched. This is how a pre-existing key's attestation is
@@ -94,4 +132,5 @@ object Keystore2Service {
             false
         }
     }
+
 }
