@@ -12,10 +12,11 @@ import org.json.JSONObject
  * common/control.cpp ApplyConfig().
  *
  * Field names mirror control.cpp exactly: top level: type, epoch, bootInfo, profiles bootInfo:
- * verifiedBootKey(b64), verifiedBootHash(b64), deviceLocked, verifiedBootState profile: id,
- * keyboxB64, securityLevel(int), osVersion, osPatchLevel, vendorPatchLevel, bootPatchLevel,
- * deviceIds{...}, packages[], uids[] uids[] is parallel to packages[] (same length, -1 where not
- * installed).
+ * verifiedBootKey(b64), verifiedBootHash(b64), deviceLocked, verifiedBootState, strongBoxAvailable,
+ * attestVersionTee, attestVersionStrongBox profile: id, keyboxB64, mode, securityLevel(int),
+ * osVersion, osPatchLevel, vendorPatchLevel,
+ * bootPatchLevel, deviceIds{...}, packages[], uids[] uids[] is parallel to packages[] (same length,
+ * -1 where not installed).
  */
 object Resolver {
 
@@ -40,6 +41,15 @@ object Resolver {
                 // they are non-zero — a real vbmeta digest or a stable fallback).
                 put("deviceLocked", true)
                 put("verifiedBootState", 0)
+                // Whether the device's StrongBox can really produce a hardware-backed attested key
+                // (probed at harvest). It gates patch mode at the StrongBox level: when false, keys
+                // requested at StrongBox fall back to generation even in a patch profile.
+                put("strongBoxAvailable", harvest.strongBoxAvailable)
+                // Harvested KeyMint HAL version at each level, so a generated key claims the real
+                // device's attestation/keymint version rather than the TA's default. StrongBox reuses
+                // the TEE value when it has no real hardware to harvest.
+                put("attestVersionTee", harvest.attestationVersion)
+                put("attestVersionStrongBox", harvest.strongBoxAttestationVersion)
             },
         )
 
@@ -60,6 +70,10 @@ object Resolver {
 
         val keyboxBytes = File(Const.DATA_DIR, p.keybox).readBytes()
         o.put("keyboxB64", b64.encodeToString(keyboxBytes))
+
+        // Operation mode: "patch" re-signs the real hardware attestation, "generation" mints the whole
+        // key in our TA. The router still forces generation for a level whose hardware is unavailable.
+        o.put("mode", p.mode)
 
         // Security level is not a profile choice: it is the device's real level, harvested
         // from the TEE (a key's actual level is what the app requested via its keystore

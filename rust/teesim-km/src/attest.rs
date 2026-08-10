@@ -13,15 +13,27 @@ use kmr_wire::keymint::{self, EcCurve};
 use roxmltree::Document;
 
 /// Per-algorithm signing key material plus its certificate chain.
+#[derive(Clone)]
 struct AlgoInfo {
     key: KeyMaterial,
     chain: Vec<keymint::Certificate>,
 }
 
 /// Signing information for the asymmetric key types we attest with.
+#[derive(Clone)]
 pub struct CertSignInfo {
     rsa: AlgoInfo,
     ec: AlgoInfo,
+}
+
+impl CertSignInfo {
+    /// The batch signing key and its keybox certificate chain for one algorithm (EC when `ec` is
+    /// true, else RSA). Patch mode re-signs a real attestation leaf with this key and appends this
+    /// chain, matching the algorithm of the key being attested.
+    pub fn batch(&self, ec: bool) -> (KeyMaterial, &[keymint::Certificate]) {
+        let a = if ec { &self.ec } else { &self.rsa };
+        (a.key.clone(), &a.chain)
+    }
 }
 
 impl CertSignInfo {

@@ -30,6 +30,9 @@ typedef struct {
   size_t verified_boot_hash_len;
   bool device_locked;
   int32_t verified_boot_state;
+  bool strongbox_available;  // device can produce a real StrongBox-backed key; gates patch at that level
+  int32_t attest_version_tee;        // harvested KeyMint HAL version at TEE (attestationVersion)
+  int32_t attest_version_strongbox;  // harvested KeyMint HAL version at StrongBox (TEE value if broken)
 } TsBootInfo;
 
 // One fully-resolved profile from a config push. All strings/bytes are borrowed
@@ -38,6 +41,7 @@ typedef struct {
   const char *id;
   const uint8_t *keybox;
   size_t keybox_len;
+  const char *mode;  // "patch" | "generation"; NULL defaults to generation
   int32_t security_level;  // 0 Software, 1 TEE, 2 StrongBox
   uint32_t os_version;
   uint32_t os_patchlevel;

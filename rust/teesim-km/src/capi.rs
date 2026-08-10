@@ -242,6 +242,33 @@ pub unsafe extern "C" fn teesim_km_import_key(
     }
 }
 
+/// Re-sign a real hardware attestation `leaf` (DER) under this profile's keybox with a patched
+/// (locked/Verified) root of trust; see `Ta::patch_attestation`. On success *out holds the new chain
+/// `[patched leaf, keybox chain]` with an empty key blob and characteristics.
+///
+/// # Safety
+/// See module docs; `leaf`/`leaf_len` must describe a valid buffer.
+#[no_mangle]
+pub unsafe extern "C" fn teesim_km_patch_attestation(
+    ta: *mut Ta,
+    leaf: *const u8,
+    leaf_len: usize,
+    out: *mut *mut TsCreationResult,
+) -> i32 {
+    match call(|| {
+        let ta = &*ta;
+        let leaf = if leaf.is_null() { &[][..] } else { slice::from_raw_parts(leaf, leaf_len) };
+        let certs = ta.patch_attestation(leaf)?;
+        Ok(TsCreationResult { key_blob: Vec::new(), certs, chars: Vec::new() })
+    }) {
+        Ok(r) => {
+            *out = Box::into_raw(Box::new(r));
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 // Accessors for TsCreationResult.
 
 /// # Safety

@@ -26,3 +26,7 @@ libc = "0.2"
 
 roxmltree = "0.20"
 base64 = "0.22"
+
+# X.509 assembly for patch mode: re-signing the real hardware attestation leaf under the keybox.
+# Pinned to the versions the vendored kmr-ta/kmr-common already use; x509-cert re-exports der/spki.
+x509-cert = "0.2"

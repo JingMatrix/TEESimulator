@@ -113,6 +113,7 @@ bool WriteFrame(int fd, const std::string &payload) {
 // teesim_cfg_add_profile call.
 struct ProfileStorage {
   std::string id;
+  std::string mode;
   std::vector<uint8_t> keybox;
   std::vector<std::string> pkg_strings;
   std::vector<const char *> pkg_ptrs;
@@ -161,8 +162,17 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
     boot.device_locked = bi->get("deviceLocked") ? bi->get("deviceLocked")->as_bool(true) : true;
     boot.verified_boot_state =
         bi->get("verifiedBootState") ? int32_t(bi->get("verifiedBootState")->as_int(0)) : 0;
+    boot.strongbox_available =
+        bi->get("strongBoxAvailable") ? bi->get("strongBoxAvailable")->as_bool(false) : false;
+    boot.attest_version_tee =
+        bi->get("attestVersionTee") ? int32_t(bi->get("attestVersionTee")->as_int(400)) : 400;
+    boot.attest_version_strongbox = bi->get("attestVersionStrongBox")
+                                        ? int32_t(bi->get("attestVersionStrongBox")->as_int(400))
+                                        : boot.attest_version_tee;
   } else {
     boot.device_locked = true;
+    boot.attest_version_tee = 400;
+    boot.attest_version_strongbox = 400;
   }
   boot.verified_boot_key = vb_key.data();
   boot.verified_boot_key_len = vb_key.size();
@@ -177,6 +187,7 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       const tjson::Value &pj = profiles->at(i);
       ProfileStorage s;
       s.id = pj.get("id") ? pj.get("id")->as_string() : std::string();
+      s.mode = pj.get("mode") ? pj.get("mode")->as_string() : std::string();
       if (const tjson::Value *kb = pj.get("keyboxB64")) {
         if (!Base64Decode(kb->as_string(), s.keybox)) {
           LOGE("control: profile %s has an undecodable keybox", s.id.c_str());
@@ -198,6 +209,7 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       tp.id = s.id.c_str();
       tp.keybox = s.keybox.data();
       tp.keybox_len = s.keybox.size();
+      tp.mode = s.mode.empty() ? nullptr : s.mode.c_str();
       tp.security_level = pj.get("securityLevel") ? int32_t(pj.get("securityLevel")->as_int(1)) : 1;
       tp.os_version = pj.get("osVersion") ? uint32_t(pj.get("osVersion")->as_int(0)) : 0;
       tp.os_patchlevel = pj.get("osPatchLevel") ? uint32_t(pj.get("osPatchLevel")->as_int(0)) : 0;

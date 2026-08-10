@@ -1,8 +1,8 @@
 diff --git a/ta/src/lib.rs b/ta/src/lib.rs
-index a0efe49..7f9b165 100644
+index a0efe49..f2601f7 100644
 --- a/ta/src/lib.rs
 +++ b/ta/src/lib.rs
-@@ -353,6 +353,19 @@ impl KeyMintTa {
+@@ -353,6 +353,37 @@ impl KeyMintTa {
          self.hw_info.security_level == SecurityLevel::Strongbox
      }
  
@@ -17,6 +17,24 @@ index a0efe49..7f9b165 100644
 +    /// security level of the HAL it was requested through.
 +    pub fn set_security_level(&mut self, security_level: SecurityLevel) {
 +        self.hw_info.security_level = security_level;
++    }
++
++    /// Return the KeyMint HAL version reported in attestation records
++    /// (attestationVersion / keymintVersion).
++    pub fn aidl_version(&self) -> i32 {
++        self.aidl_version as i32
++    }
++
++    /// Override the KeyMint HAL version reported in attestation records, so a
++    /// generated key can claim the version of the real HAL at the level it was
++    /// requested through. Values map to the nearest HAL version (100/200/300/400).
++    pub fn set_aidl_version(&mut self, version: i32) {
++        self.aidl_version = match version {
++            v if v >= 400 => KeyMintHalVersion::V4,
++            v if v >= 300 => KeyMintHalVersion::V3,
++            v if v >= 200 => KeyMintHalVersion::V2,
++            _ => KeyMintHalVersion::V1,
++        };
 +    }
 +
      /// Indicate whether the current device has secure storage available.

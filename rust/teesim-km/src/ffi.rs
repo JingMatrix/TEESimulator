@@ -104,6 +104,8 @@ pub unsafe extern "C" fn teesim_km_init_ex(
     vb_hash_len: usize,
     device_locked: bool,
     verified_boot_state: i32,
+    attest_version_tee: i32,
+    attest_version_strongbox: i32,
     ids: *const TsDeviceIds,
 ) -> *mut Ta {
     init_logging();
@@ -160,6 +162,8 @@ pub unsafe extern "C" fn teesim_km_init_ex(
             verified_boot_hash: take_bytes(vb_hash, vb_hash_len),
             device_boot_locked: device_locked,
             verified_boot_state,
+            attest_version_tee,
+            attest_version_strongbox,
             attestation_ids,
         };
         match Ta::new_ex(cfg) {
