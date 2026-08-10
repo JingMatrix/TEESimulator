@@ -123,6 +123,7 @@ function harvestCard(status) {
   add("bootPatchLevel", show(h.bootPatchLevel));
   add("attestationSecurityLevel", secLevel(h.attestationSecurityLevel));
   add("keymasterSecurityLevel", secLevel(h.keymasterSecurityLevel));
+  if (h.strongBoxAvailable != null) add("strongBox", h.strongBoxAvailable ? "available" : "unavailable");
   add("attestationVersion", show(h.attestationVersion));
   add("keymasterVersion", show(h.keymasterVersion));
   hexRow(rows, "moduleHash", h.moduleHash);

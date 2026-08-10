@@ -84,6 +84,10 @@ object Harvester {
         val verifiedBootState: Int, // 0 Verified,1 SelfSigned,2 Unverified,3 Failed
         val attestationSecurityLevel: Int, // 0 SW,1 TEE,2 SB
         val keymasterSecurityLevel: Int,
+        // Whether the device can actually produce a StrongBox-backed attested key (probed at harvest).
+        // When a TrustedEnvironment is present StrongBox is always OFFERED regardless; this only
+        // decides whether StrongBox keys can be patched (real hardware) or must be generated.
+        val strongBoxAvailable: Boolean,
         val attestationVersion: Int,
         val keymasterVersion: Int,
         val osVersion: Int?, // encoded major*10000+minor*100+sub
@@ -165,6 +169,9 @@ object Harvester {
     // returns the real IMEI for any package (unlike getImei*, which validates it against the caller uid).
     private const val TELEPHONY_CALLER_PKG = "android"
 
+    // How long to wait for telephony (the modem/RIL) to come up before giving up on the device ids.
+    private const val TELEPHONY_WAIT_MS = 15_000L
+
     /**
      * Fill in the device ids that device-properties attestation does not carry — IMEI, MEID, serial — so
      * the reference TA's ID check passes when an app requests the device's true values.
@@ -177,6 +184,9 @@ object Harvester {
      * when permitted, otherwise the `ro.serialno` property.
      */
     private fun supplementDeviceIds(r: Record): Record {
+        // The harvest runs very early at boot, when telephony (the modem/RIL) usually isn't up yet, so
+        // IPhoneSubInfo returns empty even though the device has an IMEI. Defer the reads until it is.
+        if (r.imei.isBlank()) awaitTelephony()
         val imei = r.imei.ifBlank { deviceIdForPhone(0) }
         var imei2 = r.imei2.ifBlank { deviceIdForPhone(1) }
         if (imei2.isNotBlank() && imei2 == imei) imei2 = "" // single-SIM: slot 1 mirrors slot 0
@@ -188,6 +198,37 @@ object Harvester {
             "Harvest telephony IDs: imei='$imei' secondImei='$imei2' meid='$meid' serial='$serial'"
         )
         return r.copy(imei = imei, imei2 = imei2, meid = meid, serial = serial)
+    }
+
+    /**
+     * Wait (bounded) for telephony to return the primary IMEI. IPhoneSubInfo registers early, but the
+     * modem takes a few seconds more to load, until which getDeviceIdForPhone returns empty — so poll
+     * quietly (no per-attempt "empty" spam) until it appears or [TELEPHONY_WAIT_MS] elapses. A device
+     * with no telephony simply waits out the deadline once and proceeds with an empty IMEI.
+     */
+    private fun awaitTelephony() {
+        val deadline = System.currentTimeMillis() + TELEPHONY_WAIT_MS
+        var waits = 0
+        while (System.currentTimeMillis() < deadline) {
+            val imei = try {
+                phoneSubInfoId("getDeviceIdForPhone", 0)
+            } catch (e: Throwable) {
+                null
+            }
+            if (!imei.isNullOrBlank()) {
+                if (waits > 0) SystemLogger.info("Harvest telephony: ready after ${waits}s")
+                return
+            }
+            waits++
+            try {
+                Thread.sleep(1000)
+            } catch (_: InterruptedException) {
+                return
+            }
+        }
+        SystemLogger.warning(
+            "Harvest telephony: no IMEI after ${TELEPHONY_WAIT_MS / 1000}s; proceeding (no telephony or modem still down)"
+        )
     }
 
     /** The IMEI for a SIM slot, read via IPhoneSubInfo.getDeviceIdForPhone (works even for uid 0). */
@@ -247,11 +288,24 @@ object Harvester {
     private fun tryHarvest(): Record? {
         val leaf = generateAndFetchLeaf() ?: return null
         return try {
-            parse(leaf)
+            parse(leaf).copy(strongBoxAvailable = probeStrongBox())
         } catch (e: Exception) {
             SystemLogger.error("Failed to parse harvested attestation", e)
             null
         }
+    }
+
+    /**
+     * Whether the device can produce a StrongBox-backed attested key, probed once by generating a
+     * throwaway StrongBox key. A device with a TrustedEnvironment but a broken/absent StrongBox
+     * (e.g. an unlocked dev unit) reports false — the resolver still offers StrongBox, but routes
+     * such keys through generation rather than patch.
+     */
+    private fun probeStrongBox(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val ok = tryLeaf(withDeviceIds = false, strongBox = true) != null
+        SystemLogger.info("Harvest: StrongBox-backed key generation available = $ok")
+        return ok
     }
 
     /**
@@ -262,7 +316,7 @@ object Harvester {
     private fun generateAndFetchLeaf(): X509Certificate? =
         tryLeaf(withDeviceIds = true) ?: tryLeaf(withDeviceIds = false)
 
-    private fun tryLeaf(withDeviceIds: Boolean): X509Certificate? {
+    private fun tryLeaf(withDeviceIds: Boolean, strongBox: Boolean = false): X509Certificate? {
         return try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             val gen =
@@ -273,6 +327,9 @@ object Harvester {
                     .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
                     .setDigests(KeyProperties.DIGEST_SHA256)
                     .setAttestationChallenge(challenge)
+            if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                builder.setIsStrongBoxBacked(true)
+            }
             if (withDeviceIds && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 builder.setDevicePropertiesAttestationIncluded(true)
             }
@@ -399,6 +456,7 @@ object Harvester {
             verifiedBootState = verifiedBootState,
             attestationSecurityLevel = attestSecLevel,
             keymasterSecurityLevel = keymasterSecLevel,
+            strongBoxAvailable = false, // set by tryHarvest's probe via copy()
             attestationVersion = attestVersion,
             keymasterVersion = keymasterVersion,
             osVersion = osVersion,
@@ -523,6 +581,7 @@ object Harvester {
             verifiedBootState = 0, // Verified
             attestationSecurityLevel = Const.SECLEVEL_TEE,
             keymasterSecurityLevel = Const.SECLEVEL_TEE,
+            strongBoxAvailable = false, // no working TEE ⇒ no StrongBox either
             attestationVersion = 300,
             keymasterVersion = 300,
             osVersion = osVersion,
@@ -599,6 +658,7 @@ object Harvester {
             put("verifiedBootState", r.verifiedBootState)
             put("attestationSecurityLevel", r.attestationSecurityLevel)
             put("keymasterSecurityLevel", r.keymasterSecurityLevel)
+            put("strongBoxAvailable", r.strongBoxAvailable)
             put("attestationVersion", r.attestationVersion)
             put("keymasterVersion", r.keymasterVersion)
             put("osVersion", r.osVersion ?: JSONObject.NULL)
@@ -628,6 +688,7 @@ object Harvester {
             verifiedBootState = o.optInt("verifiedBootState", 0),
             attestationSecurityLevel = o.optInt("attestationSecurityLevel", Const.SECLEVEL_TEE),
             keymasterSecurityLevel = o.optInt("keymasterSecurityLevel", Const.SECLEVEL_TEE),
+            strongBoxAvailable = o.optBoolean("strongBoxAvailable", false),
             attestationVersion = o.optInt("attestationVersion", 300),
             keymasterVersion = o.optInt("keymasterVersion", 300),
             osVersion = o.optIntOrNull("osVersion"),
