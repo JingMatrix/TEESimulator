@@ -17,6 +17,7 @@ object ConfigStore {
     data class ProfileConfig(
         val id: String,
         val keybox: String, // relative to Const.DATA_DIR
+        val mode: String, // "patch" | "generation"
         val patchSystem: String,
         val patchVendor: String,
         val patchBoot: String,
@@ -69,6 +70,13 @@ object ConfigStore {
             if (!keyboxFile.isFile)
                 throw ConfigException("profile '$id' keybox not found: ${keyboxFile.absolutePath}")
 
+            // Operation mode: patch (re-sign the real hardware attestation) or generation (mint the
+            // whole key). Defaults to patch; a level whose hardware is unavailable still falls back to
+            // generation at resolve time.
+            val mode = p.optString("mode", "patch").trim().lowercase()
+            if (mode != "patch" && mode != "generation")
+                throw ConfigException("profile '$id' has invalid mode '$mode' (patch | generation)")
+
             val patch = p.optJSONObject("patchLevel") ?: JSONObject()
             val apps =
                 p.optJSONArray("apps")?.let { arr ->
@@ -88,6 +96,7 @@ object ConfigStore {
                 ProfileConfig(
                     id = id,
                     keybox = keybox,
+                    mode = mode,
                     // Defaults for an omitted field mirror the shipped config: a current-month system
                     // patch and the conventional YYYY-MM-05 vendor/boot patch; an absent osVersion is
                     // left empty (reuse the harvested value).

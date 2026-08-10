@@ -3,6 +3,7 @@
   "profiles": {
     "default": {
       "keybox": "keybox.xml",
+      "mode": "patch",
       "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",
       "brand": "",
