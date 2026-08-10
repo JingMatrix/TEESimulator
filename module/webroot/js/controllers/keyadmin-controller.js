@@ -4,21 +4,29 @@
 // which the daemon's own AndroidKeyStore never sees. On Android 10/11 there is no
 // keystore2 database, so the view shows a hint instead of a list.
 //
-// It owns the transient UI state the view is stateless about: the filter text and the
-// set of selected key ids. Deletion goes back through /keys/db/delete, which the daemon
-// re-verifies (our marker + a target app) before removing anything. Degrades gracefully:
-// if the daemon isn't reachable yet it shows an "unavailable" panel instead of crashing.
+// It owns the transient UI state the view is stateless about: the filter text, the scope toggle
+// (spoofedOnly), and the set of selected key ids. Deletion goes back through /keys/db/delete, which
+// the daemon re-verifies (a target app) before removing anything. Degrades gracefully: if the daemon
+// isn't reachable yet it shows an "unavailable" panel instead of crashing.
 
 import { keyAdmin } from "../data/keyadmin.js";
 import { renderKeys } from "../ui/key-view.js";
 import { confirmDialog, toast } from "../ui/dom.js";
 import { attachPullToRefresh } from "../ui/pull-refresh.js";
 
+// A key we spoofed vs the app's own untouched real key. Both are deletable; the "Spoofed" scope just
+// hides the real ones by default, and bulk-select only ever touches what the scope currently shows.
+const isSpoofed = (k) => (k.class || "untouched") !== "untouched";
+
 export function create(mount) {
   let state = {
     keys: [], available: false, apiLevel: 0, unavailable: false,
     loading: false, deleting: false, filter: "", selected: new Set(), menuOpen: false,
+    spoofedOnly: true,
   };
+
+  // The keys currently shown given the scope (bulk-select operates on these, never on hidden keys).
+  const visibleKeys = () => (state.spoofedOnly ? state.keys.filter(isSpoofed) : state.keys);
 
   function render() {
     renderKeys(mount, state, handler);
@@ -79,11 +87,20 @@ export function create(mount) {
         state.filter = arg;
         render();
         return;
-      case "toggle":
+      case "toggle": {
         if (state.selected.has(arg)) state.selected.delete(arg);
         else state.selected.add(arg);
         render();
         return;
+      }
+      case "toggleSpoofed": {
+        state.spoofedOnly = !state.spoofedOnly;
+        // Drop any selection that just became hidden, so the delete count only counts visible keys.
+        const vis = new Set(visibleKeys().map((k) => k.id));
+        state.selected = new Set([...state.selected].filter((id) => vis.has(id)));
+        render();
+        return;
+      }
       case "toggleMenu":
         state.menuOpen = !state.menuOpen;
         render();
@@ -92,13 +109,14 @@ export function create(mount) {
         state.menuOpen = false;
         render();
         return;
-      case "selectFiltered":
+      case "selectFiltered": {
         (arg || []).forEach((id) => state.selected.add(id));
         state.menuOpen = false;
         render();
         return;
+      }
       case "selectAll":
-        state.keys.forEach((k) => state.selected.add(k.id));
+        visibleKeys().forEach((k) => state.selected.add(k.id));
         state.menuOpen = false;
         render();
         return;
@@ -109,7 +127,7 @@ export function create(mount) {
         return;
       case "inverse": {
         const next = new Set();
-        state.keys.forEach((k) => { if (!state.selected.has(k.id)) next.add(k.id); });
+        visibleKeys().forEach((k) => { if (!state.selected.has(k.id)) next.add(k.id); });
         state.selected = next;
         state.menuOpen = false;
         render();

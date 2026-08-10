@@ -7,8 +7,8 @@
 // rendered inline because its label carries the live selection count.
 //
 // renderKeys(mount, state, handler)
-//   state = { keys, available, apiLevel, unavailable, loading, deleting, filter, selected, menuOpen }
-//     keys        [{ id, alias, uid, package, state, created?, keybox?, keyAlgorithm? }] from keystore2's DB
+//   state = { keys, available, apiLevel, unavailable, loading, deleting, filter, selected, menuOpen, spoofedOnly }
+//     keys        [{ id, alias, uid, package, state, class, created?, keybox?, keyAlgorithm?, purposes? }] from keystore2's DB
 //     available   true when the daemon could read keystore2's database (API >= 31)
 //     apiLevel    the device SDK_INT the daemon reported (0 before the first fetch)
 //     unavailable true when the daemon key endpoint isn't reachable yet
@@ -48,6 +48,7 @@ export function renderKeys(mount, state, handler) {
   const {
     keys = [], available = false, apiLevel = 0, unavailable = false,
     loading = false, deleting = false, filter = "", selected = new Set(), menuOpen = false,
+    spoofedOnly = true,
   } = state;
 
   // Panel head: Delete-selected (only when something is checked; its label counts the selection),
@@ -103,18 +104,27 @@ export function renderKeys(mount, state, handler) {
     return;
   }
 
-  // Matching is a case-insensitive substring over alias / app / keybox.
+  // Matching is a case-insensitive substring over alias / app / keybox. Spoofed keys
+  // (generated / delegated / patched) sort ahead of untouched ones; the sort is stable,
+  // so within a class the daemon's namespace+alias order is preserved.
   const q = filter.trim().toLowerCase();
-  const shown = q ? keys.filter((k) => matchesFilter(k, q)) : keys;
+  let matched = q ? keys.filter((k) => matchesFilter(k, q)) : keys;
+  // The apps' own untouched (real hardware) keys are hidden by default so the list shows only what we
+  // spoofed; the "All" scope segment reveals them for inspection or deletion.
+  const hiddenReal = spoofedOnly ? matched.filter((k) => !isSpoofed(k)).length : 0;
+  if (spoofedOnly) matched = matched.filter(isSpoofed);
+  const shown = matched.slice().sort((a, b) => classRank(a) - classRank(b));
 
-  // Search card: the filter box with a trailing icon that opens the selection menu.
-  mount.appendChild(searchCard(filter, shown, menuOpen, handler));
+  // Search card: the filter box, the selection menu, and the spoofed/all scope control.
+  mount.appendChild(searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler));
 
   // List card: one row per shown key, each with its own checkbox.
   const listCard = el("div", { class: "card keypanel" });
   if (!shown.length) {
-    listCard.appendChild(el("p", { class: "muted keyempty", text:
-      keys.length ? "No keys match “" + filter + "”." : "No keys." }));
+    const msg = hiddenReal
+      ? hiddenReal + " real device key(s) hidden — switch to All to show them."
+      : keys.length ? "No keys match “" + filter + "”." : "No keys.";
+    listCard.appendChild(el("p", { class: "muted keyempty", text: msg }));
     mount.appendChild(listCard);
     restoreFocus();
     return;
@@ -122,16 +132,17 @@ export function renderKeys(mount, state, handler) {
   const list = el("ul", { class: "keylist" });
   for (const k of shown) {
     const checked = selected.has(k.id);
+    const check = el("input", { type: "checkbox", checked, onchange: () => handler("toggle", k.id) });
     list.appendChild(el("li", { class: "keyrow" + (checked ? " selected" : "") }, [
-      el("label", { class: "keycheck" }, [
-        el("input", { type: "checkbox", checked, onchange: () => handler("toggle", k.id) }),
-      ]),
+      el("label", { class: "keycheck" }, [check]),
       el("div", { class: "keymeta" }, [
         el("div", { class: "keyalias" }, [
           el("span", { class: "mono", text: k.alias || "(no alias)" }),
+          classChip(k),
           el("span", { class: "chip", text: appLabel(k) }),
           ...abnormalChips(k),
         ]),
+        ...purposeChips(k),
         ...metaLines(k),
       ]),
     ]));
@@ -144,7 +155,7 @@ export function renderKeys(mount, state, handler) {
 // The search card: a field that looks like an input, holding the borderless filter box and a
 // trailing icon button. The button opens an in-field menu of bulk-selection actions; a full-screen
 // backdrop below the menu dismisses it on an outside tap.
-function searchCard(filter, shown, menuOpen, handler) {
+function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
   const filterInput = el("input", {
     id: "keyfilter", class: "filter-input", type: "text", value: filter,
     placeholder: "Filter by alias, app, or keybox",
@@ -169,7 +180,30 @@ function searchCard(filter, shown, menuOpen, handler) {
       item("Inverse selection", "inverse"),
     ]));
   }
-  return el("div", { class: "card keysearch" }, [field]);
+
+  // Scope control: "Spoofed" (default) lists only keys this module spoofed; "All" also shows the apps'
+  // own real device keys. Both segments drive the same toggleSpoofed action — clicking the active one
+  // is a no-op. The hint reports how many real keys "Spoofed" is currently hiding.
+  const scope = el("div", { class: "segmented keyscope", role: "group", "aria-label": "Which keys to list" }, [
+    el("button", {
+      class: "seg" + (spoofedOnly ? " on" : ""), type: "button", text: "Spoofed",
+      "aria-pressed": spoofedOnly ? "true" : "false", title: "Only keys this module spoofed",
+      onclick: () => { if (!spoofedOnly) handler("toggleSpoofed"); },
+    }),
+    el("button", {
+      class: "seg" + (!spoofedOnly ? " on" : ""), type: "button", text: "All",
+      "aria-pressed": !spoofedOnly ? "true" : "false", title: "Include the apps' own real device keys",
+      onclick: () => { if (spoofedOnly) handler("toggleSpoofed"); },
+    }),
+  ]);
+  const scopeRow = el("div", { class: "keyscope-row" }, [scope]);
+  if (spoofedOnly && hiddenReal) {
+    scopeRow.appendChild(el("span", {
+      class: "keyscope-hint muted",
+      text: hiddenReal + " real device key(s) hidden",
+    }));
+  }
+  return el("div", { class: "card keysearch" }, [field, scopeRow]);
 }
 
 function matchesFilter(k, q) {
@@ -195,10 +229,48 @@ function stateLabel(s) {
   return ({ 0: "creating", 1: "live", 2: "orphaned" })[Number(s)] || ("state " + s);
 }
 
+// The four key classes the daemon reports, in the order spoofed-before-untouched, each with its
+// display label and badge modifier class. An unknown/absent class is treated as "untouched".
+const KEY_CLASSES = {
+  generated: { label: "Generated", cls: "kclass-generated", rank: 0 },
+  delegated: { label: "Delegated", cls: "kclass-delegated", rank: 1 },
+  patched: { label: "Patched", cls: "kclass-patched", rank: 2 },
+  untouched: { label: "Untouched", cls: "kclass-untouched", rank: 3 },
+};
+
+function keyClass(k) {
+  return KEY_CLASSES[k.class] || KEY_CLASSES.untouched;
+}
+
+function classRank(k) {
+  return keyClass(k).rank;
+}
+
+// A colored badge naming how the key was spoofed (or that it is the app's own untouched key).
+function classChip(k) {
+  const c = keyClass(k);
+  return el("span", { class: "chip kclass " + c.cls, text: c.label });
+}
+
+// A key we spoofed (generated / delegated / patched), as opposed to the app's own untouched real key.
+// Every listed key belongs to a target app and may be deleted; real ones are just hidden by default.
+function isSpoofed(k) {
+  return (k.class || "untouched") !== "untouched";
+}
+
+// The key's KeyPurpose labels (from the daemon's Tag::PURPOSE read) as small chips, with ATTEST_KEY
+// accented since an attestation-capable app key is notable. No chips when the key reports no purposes.
+function purposeChips(k) {
+  if (!Array.isArray(k.purposes) || !k.purposes.length) return [];
+  return [el("div", { class: "keypurposes" }, k.purposes.map((p) =>
+    el("span", { class: "chip small purpose" + (p === "AttestKey" ? " attest" : ""), text: p })))];
+}
+
 function metaLines(k) {
   const lines = [];
   if (k.keyAlgorithm) lines.push(metaLine("Algorithm", k.keyAlgorithm));
-  lines.push(metaLine("Keybox", k.keybox || el("span", { class: "muted", text: "unattributed" })));
+  // Only attributed keys carry a keybox; omit the line entirely for untouched real keys.
+  if (k.keybox) lines.push(metaLine("Keybox", k.keybox));
   if (k.created) lines.push(metaLine("Created", fmtDate(k.created)));
   return lines;
 }

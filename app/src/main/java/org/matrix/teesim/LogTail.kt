@@ -5,11 +5,13 @@ import java.io.InputStreamReader
 
 /**
  * Tails logcat into a bounded ring buffer so the WebUI can poll recent lines cheaply (no logcat
- * spawn per request). It keeps three things: every `TEESimulator` line (the daemon, the TA, and both
- * native interceptors all log under that tag), every `avc` line (SELinux denials — the usual
- * injection blocker), and, once the interceptor is injected, every line from the target keystore
- * process, so the Logs panel shows what happens inside the process we hook rather than only our own
- * output. The WebUI filters this stream by tag, level, and substring.
+ * spawn per request). It keeps: every `TEESimulator` line (the daemon, the TA, and both native
+ * interceptors all log under that tag), every `avc` line (SELinux denials — the usual injection
+ * blocker), every `AndroidRuntime` line and every fatal-level line (Java/native crash reports, so a
+ * crash that takes down the daemon or the hooked process is visible), and, once the interceptor is
+ * injected, every line from the target keystore process, so the Logs panel shows what happens inside
+ * the process we hook rather than only our own output. The WebUI filters this stream by tag, level,
+ * and substring.
  *
  * logcat cannot select by pid in its filterspec, so we capture broadly (`TEESimulator:V *:I`) and
  * keep only the matching lines here; [targetPid] is supplied by the [Injector].
@@ -83,7 +85,15 @@ object LogTail {
             level = m.groupValues[2].firstOrNull() ?: 'I'
             tag = m.groupValues[3].trim()
             val pidNow = targetPid
-            keep = tag == "TEESimulator" || tag == "avc" || (pidNow > 0 && pid == pidNow)
+            // Also keep AndroidRuntime (Java crash reports) and every fatal-level line (native
+            // aborts / "FATAL EXCEPTION"), so a crash that takes down the daemon or keystore2 lands
+            // in the WebUI log without a separate logcat pull.
+            keep =
+                tag == "TEESimulator" ||
+                    tag == "avc" ||
+                    tag == "AndroidRuntime" ||
+                    level == 'F' ||
+                    (pidNow > 0 && pid == pidNow)
             lastKept = keep
             lastLevel = level
             lastTag = tag
