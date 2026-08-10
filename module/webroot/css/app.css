@@ -338,7 +338,7 @@ html, body { overscroll-behavior-y: contain; }
 }
 
 /* --- logs --------------------------------------------------------------- */
-.logs { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.logs { position: relative; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
 .logs-head { gap: 10px; }
 .logs-tools { display: flex; gap: 6px; }
 .logs-msg { color: var(--muted); font-size: 12px; }
@@ -353,6 +353,17 @@ html, body { overscroll-behavior-y: contain; }
 .logline.lv-w { color: var(--warn); }
 .logline.lv-e, .logline.lv-f { color: var(--danger); }
 .logs-tools { flex-wrap: wrap; }
+/* Floating jump-to-top/bottom button over the log pane. Its chevron flips with .up/.down. */
+.logs-fab {
+  position: absolute; right: 18px; bottom: 18px; width: 44px; height: 44px; z-index: 5;
+  border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.logs-fab:active { transform: scale(0.94); }
+.fab-chevron { width: 9px; height: 9px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; }
+.logs-fab.down .fab-chevron { transform: translateY(-2px) rotate(45deg); }
+.logs-fab.up .fab-chevron { transform: translateY(2px) rotate(-135deg); }
 
 /* --- sheets: extra breathing room above the primary/reset action -------- */
 .sheet-submit { margin-top: 8px; }

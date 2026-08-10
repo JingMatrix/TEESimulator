@@ -5,6 +5,7 @@
 // than the last, and caps how many it retains so a long session doesn't grow without bound.
 
 import { keyAdmin } from "../data/keyadmin.js";
+import { moduleVersion } from "../data/logs-io.js";
 import { renderLogs, renderLogFilters } from "../ui/logs-view.js";
 import { toast, clear, openSheet } from "../ui/dom.js";
 
@@ -12,37 +13,26 @@ const POLL_MS = 1500;
 const MAX_FETCH = 500;
 const MAX_KEPT = 4000;
 
-// Copy text to the clipboard, degrading gracefully. navigator.clipboard needs a
-// secure context, which this WebUI running over plain http:// usually is NOT, so the
-// API may be absent or its promise may reject. We fall back to a hidden <textarea> +
-// execCommand("copy"), and always toast the outcome so "Copy" is never a silent no-op
-// (and no unhandled promise rejection escapes).
-function copyText(text) {
-  const fallback = () => toast(legacyCopy(text) ? "Copied" : "Copy failed");
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(() => toast("Copied")).catch(fallback);
-  } else {
-    fallback();
-  }
+// The default export filename: TEESimulator-<version>-<variant>-<timestamp>.log. The module
+// version already embeds the variant, e.g. "v4.0 (17-0375393-debug)"; sanitize it into a
+// filename-safe token (drop parens, spaces/others -> dashes) and append a local timestamp.
+function defaultLogName(version) {
+  const tag =
+    (version || "unknown")
+      .replace(/[()]/g, "")
+      .trim()
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "unknown";
+  return `TEESimulator-${tag}-${timestamp()}.log`;
 }
 
-function legacyCopy(text) {
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
+function timestamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  );
 }
 
 export function create(mount) {
@@ -53,6 +43,7 @@ export function create(mount) {
   let error = null;
   let timer = null;
   let inFlight = false;
+  let moduleVer = ""; // cached at load so Save stays synchronous (an await would kill the gesture)
 
   let filter = { minLevel: "V", tags: new Set(), text: "" };
   let filterHost = null;    // content element inside the filter sheet
@@ -131,13 +122,55 @@ export function create(mount) {
       render();
       if (!paused) poll();
     },
-    clear() {
-      // Client-side clear only; the cursor is untouched so we never refetch old lines.
-      lines = [];
-      render();
-    },
-    copy() {
-      copyText(lines.map((l) => l.text).join("\n"));
+    // Synchronous by design: the download must fire inside the click's user-gesture, or the WebView
+    // silently blocks it and never raises the system Save-As dialog. So no await here — the module
+    // version is prefetched at load(). A Blob URL works over plain http:// (unlike the clipboard API),
+    // and `download` supplies the default filename the dialog opens with (rename + choose location).
+    async save() {
+      const text = lines.map((l) => l.text).join("\n");
+      if (!text) {
+        toast("No logs to save");
+        return;
+      }
+      const name = defaultLogName(moduleVer);
+
+      // Prefer the system "Save As" picker (choose location + rename) via the File System Access
+      // API. It needs a secure context and a user gesture — this WebUI is https and we're inside the
+      // click, and moduleVer is prefetched so nothing awaits before the picker call. Falls back to a
+      // plain download when the API is absent (older WebView). "AbortError" = the user cancelled.
+      if (typeof window.showSaveFilePicker === "function") {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: name,
+            types: [{ description: "Log file", accept: { "text/plain": [".log"] } }],
+          });
+          const w = await handle.createWritable();
+          await w.write(text);
+          await w.close();
+          toast("Saved " + name);
+          return;
+        } catch (e) {
+          if (e && e.name === "AbortError") return;
+          console.warn("[logs.save] showSaveFilePicker failed; falling back to download:", e);
+        }
+      }
+
+      // Fallback: hand the file to the browser as a download.
+      console.log("[logs.save] downloading %o (%d bytes)", name, text.length);
+      try {
+        const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        toast("Saved " + name);
+      } catch (e) {
+        console.error("[logs.save] failed:", e);
+        toast("Save failed: " + (e && e.message ? e.message : String(e)));
+      }
     },
   };
 
@@ -154,6 +187,10 @@ export function create(mount) {
 
   return {
     load() {
+      // Prefetch the module version for the Save filename so save() needn't await (see save()).
+      moduleVersion()
+        .then((v) => { moduleVer = v; console.log("[logs] module version prefetched: %o", v); })
+        .catch((e) => console.error("[logs] moduleVersion prefetch failed:", e));
       render(); // paint the buffer we already have instantly
       startPolling();
       return poll();

@@ -19,6 +19,17 @@ import { create as createKeys } from "./controllers/keyadmin-controller.js";
 import { create as createSystem } from "./controllers/system-controller.js";
 import { create as createLogs } from "./controllers/logs-controller.js";
 
+// --- global diagnostics (inspect via Chrome DevTools, chrome://inspect) ---
+// Surface every uncaught error and rejected promise, so a failure anywhere in the WebUI
+// shows up in the console instead of vanishing silently in the WebView.
+console.log("[app] boot ua=%o href=%o", navigator.userAgent, location.href);
+window.addEventListener("error", (e) => {
+  console.error("[app] uncaught error: %o at %s:%d:%d", e.message, e.filename, e.lineno, e.colno, e.error);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  console.error("[app] unhandled promise rejection:", e.reason);
+});
+
 // The top-bar health pill and the System nav badge are chrome this root owns; the
 // System controller reports into them through these two setters, so no other module
 // reaches across destinations to poke shared chrome.

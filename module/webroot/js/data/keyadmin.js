@@ -11,7 +11,7 @@
 // bound to loopback.
 //
 // Public surface (stable):
-//   keyAdmin("status")               -> { ok, harvest{…}, lib:{ hook, api } }
+//   keyAdmin("status")               -> { ok, version, harvest{…}, lib:{ hook, api } }
 //   keyAdmin("list")                 -> { ok, keys:[{ alias, securityLevel, ours, cert{…} }] }
 //   keyAdmin("keysDb")               -> { ok, available, apiLevel,
 //                                          keys:[{ id, alias, uid, package, state,
@@ -54,7 +54,11 @@ const TOKEN_FILE = "/data/adb/teesim/admin.token";
 let tokenPromise = null;
 function getToken() {
   if (!tokenPromise) {
-    tokenPromise = readFile(TOKEN_FILE).then((s) => (s || "").trim());
+    tokenPromise = readFile(TOKEN_FILE).then((s) => {
+      const t = (s || "").trim();
+      console.log("[keyAdmin] admin token loaded (%d chars) from %s", t.length, TOKEN_FILE);
+      return t;
+    });
   }
   return tokenPromise;
 }
@@ -64,15 +68,20 @@ function getToken() {
 // there is one.
 async function request(method, path) {
   const token = await getToken();
+  const t0 = Date.now();
+  console.log("[keyAdmin] → %s %s%s", method, path, token ? "" : " (NO TOKEN)");
   let res;
   try {
     res = await fetch(BASE + path, { method, headers: { "X-Teesim-Token": token } });
   } catch (e) {
+    console.error("[keyAdmin] ✗ %s %s network error in %dms:", method, path, Date.now() - t0, e);
     throw new Error("daemon unreachable: " + (e && e.message ? e.message : String(e)));
   }
   let body = null;
   try { body = await res.json(); } catch { /* leave body null on empty/invalid JSON */ }
+  console.log("[keyAdmin] ← %s %s %d ok=%o in %dms", method, path, res.status, res.ok, Date.now() - t0);
   if (!res.ok) {
+    console.warn("[keyAdmin] ✗ %s %s body:", method, path, body);
     // The daemon reports failures two ways: key ops use { ok:false, error },
     // while the canary endpoints use { ok:false, message }. Surface either so a
     // failed canaryInstall keeps the daemon's human-readable reason.

@@ -1,5 +1,6 @@
 // The Logs panel: a scrollback pane of recent logcat lines under a sticky header with
-// the title and a Filter / Pause / Clear / Copy toolbar. Filters (min level, a set of
+// the title and a Filter / Pause / Save toolbar, plus a floating button that jumps the
+// pane to the top or bottom (whichever way it isn't). Filters (min level, a set of
 // selected tags, and a message substring) live in the controller and are applied here;
 // the filter controls themselves open in a bottom sheet built by renderLogFilters. Pure
 // DOM — it renders from controller state and calls back through `actions`. Lines are
@@ -51,17 +52,34 @@ export function renderLogs(mount, state, actions) {
         el("div", { class: "logs-tools" }, [
           el("button", { class: "btn small ghost", "data-act": "filter", type: "button" }, "Filter"),
           el("button", { class: "btn small ghost", "data-act": "pause", type: "button" }, "Pause"),
-          el("button", { class: "btn small ghost", "data-act": "clear", type: "button" }, "Clear"),
-          el("button", { class: "btn small ghost", "data-act": "copy", type: "button" }, "Copy"),
+          el("button", { class: "btn small ghost", "data-act": "save", type: "button" }, "Save"),
         ]),
       ]),
       el("span", { class: "logs-msg", "data-role": "msg" }, ""),
       el("pre", { class: "logs-pane", tabindex: "0" }),
+      el("button", { class: "logs-fab down", type: "button", "aria-label": "Scroll to top or bottom" }, [
+        el("span", { class: "fab-chevron", "aria-hidden": "true" }),
+      ]),
     ]);
     shell.querySelector('[data-act="filter"]').addEventListener("click", () => actions.openFilters());
     shell.querySelector('[data-act="pause"]').addEventListener("click", () => actions.togglePause());
-    shell.querySelector('[data-act="clear"]').addEventListener("click", () => actions.clear());
-    shell.querySelector('[data-act="copy"]').addEventListener("click", () => actions.copy());
+    shell.querySelector('[data-act="save"]').addEventListener("click", () => actions.save());
+
+    // Floating scroll button: when the pane is near the bottom it offers "jump to top" (chevron up),
+    // otherwise "jump to bottom" (chevron down). Its direction tracks the scroll position; a tap
+    // scrolls the pane to whichever end it currently points at.
+    const paneEl = shell.querySelector(".logs-pane");
+    const fab = shell.querySelector(".logs-fab");
+    const syncFab = () => {
+      const nearBottom = paneEl.scrollHeight - paneEl.scrollTop - paneEl.clientHeight < 40;
+      fab.classList.toggle("up", nearBottom);
+      fab.classList.toggle("down", !nearBottom);
+    };
+    paneEl.addEventListener("scroll", syncFab);
+    fab.addEventListener("click", () => {
+      paneEl.scrollTop = fab.classList.contains("up") ? 0 : paneEl.scrollHeight;
+    });
+    shell._syncFab = syncFab;
     mount.append(shell);
   }
 
@@ -88,7 +106,7 @@ export function renderLogs(mount, state, actions) {
   const fkey = filterKeyOf(filter);
   const maxSeq = state.lines.length ? seqOf(state.lines[state.lines.length - 1]) : null;
 
-  // Emptied buffer (a Clear tap, or nothing yet): drop rendered lines and forget cursors.
+  // Empty buffer (nothing fetched yet): drop rendered lines and forget cursors.
   if (state.lines.length === 0) {
     if (pane.firstChild) clear(pane);
     pane._lastSeq = undefined;
@@ -118,6 +136,7 @@ export function renderLogs(mount, state, actions) {
   while (pane.childElementCount > MAX_SHOWN) pane.removeChild(pane.firstElementChild);
 
   if (!state.paused && atBottom) pane.scrollTop = pane.scrollHeight;
+  if (shell._syncFab) shell._syncFab();
 }
 
 // ---- filter sheet -------------------------------------------------------

@@ -18,14 +18,22 @@ export function hasBridge() {
 export function exec(cmd) {
   return new Promise((resolve) => {
     if (!hasBridge()) {
+      console.warn("[ksu] no bridge (window.ksu.exec absent); cmd skipped:", String(cmd).slice(0, 120));
       resolve({ errno: -1, stdout: "", stderr: "no ksu bridge" });
       return;
     }
     // A fresh random global per call: concurrent execs never clobber each other,
     // and the slot is deleted the moment it fires so nothing leaks on window.
     const cb = "cb_" + Math.random().toString(36).slice(2);
+    const short = String(cmd).length > 160 ? String(cmd).slice(0, 160) + "…(" + String(cmd).length + "b)" : cmd;
+    const t0 = Date.now();
+    console.log("[ksu] exec:", short);
     window[cb] = (errno, stdout, stderr) => {
       delete window[cb];
+      console.log(
+        "[ksu] done errno=%o in %dms stdout=%db stderr=%o",
+        errno, Date.now() - t0, (stdout || "").length, stderr || "",
+      );
       resolve({ errno, stdout, stderr });
     };
     window.ksu.exec(cmd, "{}", cb);
