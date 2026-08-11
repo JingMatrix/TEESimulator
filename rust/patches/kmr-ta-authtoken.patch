@@ -1,0 +1,39 @@
+diff --git a/ta/src/operation.rs b/ta/src/operation.rs
+index 4975798..37f94ca 100644
+--- a/ta/src/operation.rs
++++ b/ta/src/operation.rs
+@@ -23,7 +23,7 @@ use kmr_wire::{
+     keymint::{HardwareAuthToken, KeyParam},
+     secureclock::{TimeStampToken, Timestamp},
+ };
+-use log::{error, warn};
++use log::{error, info, warn};
+ 
+ mod begin;
+ 
+@@ -392,9 +392,22 @@ impl crate::KeyMintTa {
+         challenge: Option<i64>,
+     ) -> Result<(), Error> {
+         // Common check: confirm the HMAC tag in the token is valid.
+-        let mac_input = crate::hardware_auth_token_mac_input(&auth_token)?;
+-        if !self.verify_device_hmac(&mac_input, &auth_token.mac)? {
+-            return Err(km_err!(KeyUserNotAuthenticated, "failed to authenticate auth_token"));
++        //
++        // TEESimulator: the token is MAC'd by the real Gatekeeper/biometric under the device's
++        // ISharedSecret key. This in-process TA never joins that negotiation (ISharedSecret is not
++        // intercepted), so it holds no device HMAC key and cannot recompute the tag. keystore2 only
++        // attaches a token after the caller has authenticated against the real Gatekeeper, so when we
++        // have no key to verify with, trust the token's presence rather than reject it. Every other
++        // binding below — auth type, secure id, timeout, challenge — is still enforced against the real
++        // token, and an unauthenticated caller carries no token at all. If a device HMAC key is ever
++        // negotiated, verification happens as normal.
++        if self.get_hmac_key().is_some() {
++            let mac_input = crate::hardware_auth_token_mac_input(&auth_token)?;
++            if !self.verify_device_hmac(&mac_input, &auth_token.mac)? {
++                return Err(km_err!(KeyUserNotAuthenticated, "failed to authenticate auth_token"));
++            }
++        } else {
++            info!("no device HMAC key; accepting auth_token on presence (real bindings still checked)");
+         }
+         // Common check: token's auth type should match key's USER_AUTH_TYPE.
+         if (auth_token.authenticator_type as u32 & auth_info.auth_type) == 0 {

@@ -13,10 +13,11 @@ use kmr_wire::keymint::{
 use kmr_wire::secureclock::TimeStampToken;
 use kmr_wire::{
     cbor, read_to_value, AbortRequest, AbortResponse, AsCborValue, BeginRequest, BeginResponse,
-    Code, DeleteKeyRequest, DeleteKeyResponse, FinishRequest, FinishResponse, GenerateKeyRequest,
-    GenerateKeyResponse,
+    Code, DeleteKeyRequest, DeleteKeyResponse, EarlyBootEndedRequest, EarlyBootEndedResponse,
+    FinishRequest, FinishResponse, GenerateKeyRequest, GenerateKeyResponse,
     GetKeyCharacteristicsRequest, GetKeyCharacteristicsResponse, ImportKeyRequest, ImportKeyResponse,
-    InternalBeginResult, KeyMintOperation, UpdateAadRequest, UpdateAadResponse, UpdateRequest,
+    InternalBeginResult, KeyMintOperation, SetAdditionalAttestationInfoRequest,
+    SetAdditionalAttestationInfoResponse, UpdateAadRequest, UpdateAadResponse, UpdateRequest,
     UpdateResponse, UpgradeKeyRequest, UpgradeKeyResponse,
 };
 
@@ -225,6 +226,26 @@ impl Ta {
     /// abort an operation.
     pub fn abort(&mut self, op_handle: i64) -> Result<(), OpError> {
         let _: AbortResponse = self.perform(AbortRequest { op_handle })?;
+        Ok(())
+    }
+
+    /// earlyBootEnded: latch the end of early boot so our EARLY_BOOT_ONLY keys stop working, matching
+    /// the transition keystore2 signals to the real HAL.
+    pub fn early_boot_ended(&mut self) -> Result<(), OpError> {
+        log::info!("teesim_km: early_boot_ended");
+        let _: EarlyBootEndedResponse = self.perform(EarlyBootEndedRequest {})?;
+        Ok(())
+    }
+
+    /// setAdditionalAttestationInfo: record info (e.g. MODULE_HASH) that keys attested by this TA must
+    /// carry, so our attestations match what keystore2 pushes to the real HAL.
+    pub fn set_additional_attestation_info(
+        &mut self,
+        info: Vec<KeyParam>,
+    ) -> Result<(), OpError> {
+        log::info!("teesim_km: set_additional_attestation_info: {} param(s)", info.len());
+        let _: SetAdditionalAttestationInfoResponse =
+            self.perform(SetAdditionalAttestationInfoRequest { info })?;
         Ok(())
     }
 
