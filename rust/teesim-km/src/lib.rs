@@ -54,6 +54,10 @@ fn crypto_impls() -> crypto::Implementation {
         ckdf: Box::new(BoringAesCmac),
         hkdf: Box::new(BoringHmac),
         sha256: Box::new(BoringSha256),
+        // ML-DSA (post-quantum) is required by the crypto Implementation as of KeyMint V5. The
+        // BoringSSL ML-DSA backend is Soong-only (needs bssl-sys, absent under Cargo), and our TA
+        // never mints post-quantum keys, so a stub that rejects use stands in.
+        mldsa: Box::new(device::NoMlDsa),
     }
 }
 
