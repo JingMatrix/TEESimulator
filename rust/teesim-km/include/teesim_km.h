@@ -45,6 +45,28 @@ typedef struct {
   const uint8_t *model;        size_t model_len;
 } TsDeviceIds;
 
+// A KeyMint HardwareAuthToken flattened for the C ABI, passed (nullable) to begin/update/finish so the
+// TA can honour auth-bound keys. `mac` is the Gatekeeper/biometric HMAC tag (NULL/0 when absent).
+typedef struct {
+  int64_t challenge;
+  int64_t user_id;
+  int64_t authenticator_id;
+  int32_t authenticator_type;  // HardwareAuthenticatorType: 0 None, 1 Password, 2 Fingerprint, -1 Any
+  int64_t timestamp_ms;        // milliseconds since epoch
+  const uint8_t *mac;
+  size_t mac_len;
+} TsAuthToken;
+
+// A secureclock TimeStampToken flattened for the C ABI (nullable), carried alongside update/finish for
+// auth-timeout keys checked on a clockless TA. Our TA has its own clock, but the token is forwarded
+// verbatim so the reference TA behaves exactly as it would on real hardware.
+typedef struct {
+  int64_t challenge;
+  int64_t timestamp_ms;
+  const uint8_t *mac;
+  size_t mac_len;
+} TsTimestampToken;
+
 // --- lifecycle ---------------------------------------------------------------
 
 // Build a TA with the historical default identity (used before any daemon push).
@@ -112,21 +134,32 @@ void teesim_km_free_result(TsCreationResult *res);
 
 // --- begin / operation -------------------------------------------------------
 
+// `auth_token` is nullable: keystore2 attaches it when the key is auth-bound (fingerprint/PIN). The TA
+// checks it at begin for AUTH_TIMEOUT keys and defers to update/finish for auth-per-operation keys.
 int32_t teesim_km_begin(Ta *ta, int32_t purpose, const uint8_t *key_blob,
                         size_t key_blob_len, const KmParam *params,
-                        size_t n_params, TsBeginResult **out);
+                        size_t n_params, const TsAuthToken *auth_token,
+                        TsBeginResult **out);
 int64_t teesim_km_begin_challenge(const TsBeginResult *res);
 int64_t teesim_km_begin_op_handle(const TsBeginResult *res);
 size_t teesim_km_begin_num_params(const TsBeginResult *res);
 void teesim_km_begin_param(const TsBeginResult *res, size_t i, KmParam *out);
 void teesim_km_free_begin(TsBeginResult *res);
 
+// update / updateAad / finish take the same nullable auth + timestamp tokens keystore2 passes, so an
+// auth-per-operation key is re-checked on every invocation. finish also carries the (nullable)
+// confirmation token for TRUSTED_CONFIRMATION_REQUIRED keys.
 int32_t teesim_km_update(Ta *ta, int64_t op_handle, const uint8_t *input,
-                        size_t input_len, uint8_t **out, size_t *out_len);
-int32_t teesim_km_update_aad(Ta *ta, int64_t op_handle, const uint8_t *input, size_t input_len);
+                        size_t input_len, const TsAuthToken *auth_token,
+                        const TsTimestampToken *timestamp_token, uint8_t **out, size_t *out_len);
+int32_t teesim_km_update_aad(Ta *ta, int64_t op_handle, const uint8_t *input, size_t input_len,
+                            const TsAuthToken *auth_token, const TsTimestampToken *timestamp_token);
 int32_t teesim_km_finish(Ta *ta, int64_t op_handle, const uint8_t *input,
                         size_t input_len, const uint8_t *signature,
-                        size_t signature_len, uint8_t **out, size_t *out_len);
+                        size_t signature_len, const TsAuthToken *auth_token,
+                        const TsTimestampToken *timestamp_token,
+                        const uint8_t *confirmation_token, size_t confirmation_token_len,
+                        uint8_t **out, size_t *out_len);
 int32_t teesim_km_abort(Ta *ta, int64_t op_handle);
 
 // --- deleteKey / upgradeKey / getKeyCharacteristics --------------------------
@@ -144,6 +177,16 @@ size_t teesim_km_chars_num(const TsCharacteristics *res);
 size_t teesim_km_chars_entry(const TsCharacteristics *res, size_t ci, int32_t *security_level);
 void teesim_km_chars_param(const TsCharacteristics *res, size_t ci, size_t pi, KmParam *out);
 void teesim_km_free_chars(TsCharacteristics *res);
+
+// --- device state (routed to our TA for our keys) ----------------------------
+
+// Mark early boot as ended: EARLY_BOOT_ONLY keys become unusable afterwards. Applied to each profile
+// TA so our keys observe the same transition keystore2 signals to the real HAL.
+int32_t teesim_km_early_boot_ended(Ta *ta);
+
+// Record additional attestation info (e.g. MODULE_HASH on Android 16) so keys attested by this TA
+// carry it, matching what keystore2 pushes to the real HAL. `info` is a KeyParameter array.
+int32_t teesim_km_set_additional_attestation_info(Ta *ta, const KmParam *info, size_t n_info);
 
 #ifdef __cplusplus
 }

@@ -13,8 +13,10 @@
 use crate::{Ta, OpError};
 use kmr_wire::cbor::value::{Integer, Value};
 use kmr_wire::keymint::{
-    AttestationKey, KeyCharacteristics, KeyCreationResult, KeyFormat, KeyParam, KeyPurpose,
+    AttestationKey, HardwareAuthToken, HardwareAuthenticatorType, KeyCharacteristics,
+    KeyCreationResult, KeyFormat, KeyParam, KeyPurpose,
 };
+use kmr_wire::secureclock::{TimeStampToken, Timestamp};
 use kmr_wire::AsCborValue;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
@@ -30,6 +32,59 @@ pub struct KmParam {
     pub int_value: i64,
     pub blob: *const u8,
     pub blob_len: usize,
+}
+
+/// A flattened KeyMint `HardwareAuthToken` (see teesim_km.h). Layout mirrors the C struct.
+#[repr(C)]
+pub struct TsAuthToken {
+    pub challenge: i64,
+    pub user_id: i64,
+    pub authenticator_id: i64,
+    pub authenticator_type: i32,
+    pub timestamp_ms: i64,
+    pub mac: *const u8,
+    pub mac_len: usize,
+}
+
+/// A flattened secureclock `TimeStampToken` (see teesim_km.h). Layout mirrors the C struct.
+#[repr(C)]
+pub struct TsTimestampToken {
+    pub challenge: i64,
+    pub timestamp_ms: i64,
+    pub mac: *const u8,
+    pub mac_len: usize,
+}
+
+/// Rebuild a kmr_wire `HardwareAuthToken` from the flat struct, or `None` when the pointer is null
+/// (keystore2 omits the token for keys that need no user authentication).
+///
+/// # Safety
+/// `tok` is null or points to a valid `TsAuthToken` whose `mac`/`mac_len` describe a readable span.
+unsafe fn auth_token(tok: *const TsAuthToken) -> Option<HardwareAuthToken> {
+    let t = tok.as_ref()?;
+    Some(HardwareAuthToken {
+        challenge: t.challenge,
+        user_id: t.user_id,
+        authenticator_id: t.authenticator_id,
+        // Any unexpected value maps to `Any` rather than failing the whole operation.
+        authenticator_type: HardwareAuthenticatorType::try_from(t.authenticator_type)
+            .unwrap_or(HardwareAuthenticatorType::Any),
+        timestamp: Timestamp { milliseconds: t.timestamp_ms },
+        mac: opt_bytes(t.mac, t.mac_len).unwrap_or_default(),
+    })
+}
+
+/// Rebuild a kmr_wire `TimeStampToken` from the flat struct, or `None` when the pointer is null.
+///
+/// # Safety
+/// `tok` is null or points to a valid `TsTimestampToken` whose `mac`/`mac_len` describe a readable span.
+unsafe fn timestamp_token(tok: *const TsTimestampToken) -> Option<TimeStampToken> {
+    let t = tok.as_ref()?;
+    Some(TimeStampToken {
+        challenge: t.challenge,
+        timestamp: Timestamp { milliseconds: t.timestamp_ms },
+        mac: opt_bytes(t.mac, t.mac_len).unwrap_or_default(),
+    })
 }
 
 // KeyMint TagType bits (top nibble of a tag).
@@ -349,6 +404,7 @@ pub unsafe extern "C" fn teesim_km_begin(
     key_blob_len: usize,
     params: *const KmParam,
     n_params: usize,
+    auth_token_ptr: *const TsAuthToken,
     out: *mut *mut TsBeginResult,
 ) -> i32 {
     match call(|| {
@@ -357,8 +413,9 @@ pub unsafe extern "C" fn teesim_km_begin(
             .ok_or(OpError { code: ERR_UNKNOWN, msg: format!("bad purpose {purpose}") })?;
         let blob = if key_blob.is_null() { &[][..] } else { slice::from_raw_parts(key_blob, key_blob_len) };
         let key_params = to_keyparams(params, n_params)?;
-        // Auth-bound keys are not supported until ISharedSecret is handled.
-        let r = ta.begin(purpose, blob, key_params, None)?;
+        // Forward the auth token keystore2 attached; the TA checks it here for AUTH_TIMEOUT keys and
+        // defers to update/finish for auth-per-operation keys.
+        let r = ta.begin(purpose, blob, key_params, auth_token(auth_token_ptr))?;
         Ok(TsBeginResult {
             challenge: r.challenge,
             op_handle: r.op_handle,
@@ -438,13 +495,15 @@ pub unsafe extern "C" fn teesim_km_update(
     op_handle: i64,
     input: *const u8,
     input_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
-        ta.update(op_handle, data, None, None)
+        ta.update(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
     }) {
         Ok(bytes) => {
             emit(bytes, out, out_len);
@@ -462,11 +521,13 @@ pub unsafe extern "C" fn teesim_km_update_aad(
     op_handle: i64,
     input: *const u8,
     input_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
-        ta.update_aad(op_handle, data, None, None)
+        ta.update_aad(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
     }) {
         Ok(()) => 0,
         Err(code) => code,
@@ -483,12 +544,23 @@ pub unsafe extern "C" fn teesim_km_finish(
     input_len: usize,
     signature: *const u8,
     signature_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
+    confirmation_token: *const u8,
+    confirmation_token_len: usize,
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
-        ta.finish(op_handle, opt_bytes(input, input_len), opt_bytes(signature, signature_len), None, None, None)
+        ta.finish(
+            op_handle,
+            opt_bytes(input, input_len),
+            opt_bytes(signature, signature_len),
+            auth_token(auth_token_ptr),
+            timestamp_token(timestamp_token_ptr),
+            opt_bytes(confirmation_token, confirmation_token_len),
+        )
     }) {
         Ok(bytes) => {
             emit(bytes, out, out_len);
@@ -503,6 +575,36 @@ pub unsafe extern "C" fn teesim_km_finish(
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_abort(ta: *mut Ta, op_handle: i64) -> i32 {
     match call(|| (&mut *ta).abort(op_handle)) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+// --- device state ------------------------------------------------------------
+
+/// # Safety
+/// `ta` is a valid TA handle.
+#[no_mangle]
+pub unsafe extern "C" fn teesim_km_early_boot_ended(ta: *mut Ta) -> i32 {
+    match call(|| (&mut *ta).early_boot_ended()) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+/// # Safety
+/// `info`/`n_info` describe a readable `KmParam` array (or null/0 for none).
+#[no_mangle]
+pub unsafe extern "C" fn teesim_km_set_additional_attestation_info(
+    ta: *mut Ta,
+    info: *const KmParam,
+    n_info: usize,
+) -> i32 {
+    match call(|| {
+        let ta = &mut *ta;
+        let params = to_keyparams(info, n_info)?;
+        ta.set_additional_attestation_info(params)
+    }) {
         Ok(()) => 0,
         Err(code) => code,
     }

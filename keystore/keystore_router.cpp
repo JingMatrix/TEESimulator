@@ -662,8 +662,11 @@ bool HandleBegin(int uid, Parcel& in, Parcel* reply) {
   if (!ta) ta = DefaultTa();
   if (!ta) return false;
   TsBeginResult* res = nullptr;
+  // The legacy keystore1 HAL carries auth tokens through its own mechanism, not the flat token structs
+  // the keystore2 path uses, so no auth token is forwarded here yet (unchanged behavior). Auth-bound
+  // keys on Android 10/11 are a separate follow-up; pass nullptr to mean "no token".
   int32_t rc = teesim_km_begin(ta.get(), purpose, blob.data(), blob.size(), op_params.data(),
-                               op_params.size(), &res);
+                               op_params.size(), /*auth_token=*/nullptr, &res);
   if (rc != 0 || !res) {
     LOGE("keystore: TA begin failed rc=%d", rc);
     return false;
@@ -718,7 +721,8 @@ bool HandleUpdate(int /*uid*/, Parcel& in, Parcel* reply) {
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_update(ta.get(), op_handle, input.data(), input.size(), &out, &out_len);
+  int32_t rc = teesim_km_update(ta.get(), op_handle, input.data(), input.size(),
+                                /*auth_token=*/nullptr, /*timestamp_token=*/nullptr, &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
     output.assign(out, out + out_len);
@@ -746,7 +750,8 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   uint8_t* out = nullptr;
   size_t out_len = 0;
   int32_t rc = teesim_km_finish(ta.get(), op_handle, nullptr, 0, signature.data(), signature.size(),
-                                &out, &out_len);
+                                /*auth_token=*/nullptr, /*timestamp_token=*/nullptr,
+                                /*confirmation_token=*/nullptr, 0, &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
     output.assign(out, out + out_len);
