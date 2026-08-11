@@ -30,6 +30,23 @@ typedef struct {
   size_t blob_len;
 } KmParam;
 
+// How a KeyMint tag's scalar value is represented in KmParam::int_value. Returned by
+// teesim_km_tag_value_kind so the native marshallers share one signed/unsigned/width table with the
+// Rust side (which mirrors kmr_wire's per-tag decoder). Never derive this from the tag's type nibble
+// directly: USER_AUTH_TYPE is ENUM-typed but decoded as an unsigned 32-bit value.
+typedef enum {
+  KM_VALUE_INVALID = 0,  // no scalar value / unknown tag
+  KM_VALUE_BOOL = 1,     // BOOL: presence means true
+  KM_VALUE_BYTES = 2,    // BYTES/BIGNUM: a byte array
+  KM_VALUE_INT32 = 3,    // signed 32-bit: ENUM/ENUM_REP
+  KM_VALUE_UINT32 = 4,   // unsigned 32-bit: UINT/UINT_REP and USER_AUTH_TYPE
+  KM_VALUE_INT64 = 5,    // signed 64-bit: DATE
+  KM_VALUE_UINT64 = 6,   // unsigned 64-bit: ULONG/ULONG_REP
+} KmValueKind;
+
+// Classify a tag's flat value representation (see KmValueKind). Pure function of `tag`.
+KmValueKind teesim_km_tag_value_kind(uint32_t tag);
+
 // Device-ID values a profile vouches for; each is a byte span (NULL/0 = unset).
 // Passed to teesim_km_init_ex. If every field is unset, device-ID attestation is
 // declined, exactly as on a device that was never provisioned with IDs.

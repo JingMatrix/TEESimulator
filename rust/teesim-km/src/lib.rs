@@ -6,6 +6,12 @@
 // transaction into a kmr_wire request, calls `Ta::process`, and re-encodes the
 // reply.
 
+// Surface lossy integer casts crate-wide. The USER_SECURE_ID bug (#205) was a
+// signed carrier sign-extending into a negative CBOR integer that kmr_wire then
+// rejected; these lints (off by default) flag that shape. The value-marshaling
+// boundary in `capi` upgrades them to `deny` on its conversion functions.
+#![warn(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+
 extern crate alloc;
 
 mod attest;

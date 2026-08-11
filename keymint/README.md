@@ -105,9 +105,11 @@ Each method decides for itself whether to simulate or forward:
   just relays them to the real HAL; they're intercepted for uniformity, not simulated.
 
 The method bodies translate between the AIDL types and the TA's flat C ABI
-([`teesim_km.h`](../rust/teesim-km/include/teesim_km.h)): `ToKm`/`FromKm` convert a `KeyParameter` to/from a `KmParam`, using the
-tag's top nibble (`kTagBool`, `kTagBytes`, `kTagUlong`, …) to pick the active union
-member. `TeesimKeyMintOperation` wraps a TA operation handle and aborts it in the
+([`teesim_km.h`](../rust/teesim-km/include/teesim_km.h)): `ToKm`/`FromKm` convert a `KeyParameter` to/from a `KmParam`. `FromKm` asks
+the TA how a tag's value is represented via `teesim_km_tag_value_kind` (returning a
+`KmValueKind`) rather than reading the tag's nibble itself, so the signed/unsigned/width
+choice lives only in the Rust side and can't drift (e.g. `USER_AUTH_TYPE` is ENUM-typed
+but decoded as an unsigned 32-bit value). `TeesimKeyMintOperation` wraps a TA operation handle and aborts it in the
 destructor if `finish` never ran, so a dropped operation doesn't leak state in the TA.
 
 ### Patch and generation modes

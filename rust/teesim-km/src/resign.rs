@@ -142,6 +142,9 @@ impl Ta {
 /// verifiedBootState ENUMERATED, verifiedBootHash OCTET STRING }` from the profile's boot info. This
 /// is the value generation emits (see kmr-ta's `RootOfTrust::from(&BootInfo)`), so patch and
 /// generation report an identical root of trust.
+// `state & 0xff` is a single ENUMERATED byte (VerifiedBootState is 0..=3); the mask makes the u8 cast
+// exact, so the sign-loss lint does not apply.
+#[allow(clippy::cast_sign_loss)]
 pub(crate) fn build_root_of_trust(vb_key: &[u8], locked: bool, state: i32, vb_hash: &[u8]) -> Vec<u8> {
     // kmr-ta hashes an over-long verified-boot key (boot_info_hashed_key); mirror it.
     let key_bytes = if vb_key.len() > 32 {
@@ -263,6 +266,9 @@ fn split_elems(mut content: &[u8]) -> Result<Vec<&[u8]>, OpError> {
 }
 
 /// Encode DER length octets for a value of length `n`.
+// Each `as u8` writes one length octet from a value already reduced to 0..=255 (guarded `n < 0x80`,
+// masked `v & 0xff`, or a byte count that never reaches 256), so the truncation lint does not apply.
+#[allow(clippy::cast_possible_truncation)]
 fn der_len(n: usize) -> Vec<u8> {
     if n < 0x80 {
         return vec![n as u8];
