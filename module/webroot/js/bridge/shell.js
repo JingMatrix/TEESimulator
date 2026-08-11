@@ -15,6 +15,7 @@ import { exec } from "./ksu.js";
 export const DIR = "/data/adb/teesim";
 export const CONFIG = DIR + "/config.json";
 export const HARVEST = DIR + "/harvested.json";
+export const OVERRIDES = DIR + "/overrides.json";
 
 // POSIX single-quote one token. Everything between single quotes is literal in
 // the shell except a single quote itself, which we close-escape-reopen as '\''.
