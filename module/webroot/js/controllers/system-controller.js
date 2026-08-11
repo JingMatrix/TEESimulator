@@ -12,6 +12,7 @@
 // ever opens this screen.
 
 import { getStatus } from "../data/status.js";
+import { t } from "../i18n.js";
 import { keyAdmin } from "../data/keyadmin.js";
 import { renderSystem, refreshHealth as patchHealthCards } from "../ui/system-view.js";
 import { toast, confirmDialog } from "../ui/dom.js";
@@ -104,13 +105,13 @@ export function create(mount, opts = {}) {
         const res = await keyAdmin("canaryInstall", { tag: latest.tag, variant });
         if (res && res.ok === false) {
           installError = res.message || "The daemon rejected the install.";
-          toast("Install failed");
+          toast(t("sys_install_failed"));
         } else {
-          toast((res && res.message) || "Update flashed — reboot to apply.");
+          toast((res && res.message) || t("sys_update_flashed"));
         }
       } catch (e) {
         installError = e && e.message ? e.message : String(e);
-        toast("Install failed: " + installError);
+        toast(t("sys_install_failed") + ": " + installError);
       } finally {
         installing = false;
         render();

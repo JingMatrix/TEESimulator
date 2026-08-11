@@ -7,6 +7,7 @@
 // HTML strings (which also keeps user text out of any innerHTML path).
 
 import { pushOverlay, closeOverlay } from "./nav.js";
+import { t } from "../i18n.js";
 
 // el("div", {class:"card", onclick:fn}, [childNode, "text", ...])
 // attrs: className via `class`; DOM event handlers as on<Event> functions;
@@ -117,7 +118,7 @@ export function disclosure(summary, body, { open = false, onToggle, id } = {}) {
 // guard's close callback resolves the promise with that outcome — one path for
 // every way to leave. Resolves true on confirm, false otherwise.
 export function confirmDialog(msg, opts = {}) {
-  const { confirmLabel = "Confirm", cancelLabel = "Cancel", danger = true } = opts;
+  const { confirmLabel = t("btn_confirm"), cancelLabel = t("btn_cancel"), danger = true } = opts;
   return new Promise((resolve) => {
     let outcome = false;
     const content = el("div", {}, [
@@ -135,7 +136,7 @@ export function confirmDialog(msg, opts = {}) {
 // implement). Same overlay/Back semantics as confirmDialog. Resolves the entered
 // string on OK/Enter, or null on Cancel / backdrop / Back.
 export function promptDialog(msg, initialValue = "", opts = {}) {
-  const { okLabel = "OK", placeholder = "" } = opts;
+  const { okLabel = t("btn_ok"), placeholder = "" } = opts;
   return new Promise((resolve) => {
     let outcome = null;
     const input = el("input", {
@@ -148,7 +149,7 @@ export function promptDialog(msg, initialValue = "", opts = {}) {
       el("p", { class: "modal-msg", text: msg }),
       input,
       el("div", { class: "modal-actions" }, [
-        el("button", { class: "btn ghost", text: "Cancel", onclick: () => { outcome = null; handle.close(); } }),
+        el("button", { class: "btn ghost", text: t("btn_cancel"), onclick: () => { outcome = null; handle.close(); } }),
         el("button", { class: "btn primary", text: okLabel, onclick: submit }),
       ]),
     ]);

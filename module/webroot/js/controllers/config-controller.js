@@ -10,6 +10,7 @@
 // unsaved — re-opening shows them, matching the old "re-activating never discards".
 
 import { load as ioLoad, save as ioSave, listKeyboxes } from "../data/config-io.js";
+import { t } from "../i18n.js";
 import { getStatus } from "../data/status.js";
 import { validateConfig } from "../domain/validate.js";
 import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE } from "../domain/schema.js";
@@ -114,7 +115,7 @@ export function create(mount) {
     const r = await ioSave(config);
     if (r.ok) {
       dirty = false;
-      toast("Saved");
+      toast(t("cfg_saved"));
       if (editing) closeEditor(); // returns to the freshly-repainted list
       else renderList();
     } else {
@@ -128,7 +129,7 @@ export function create(mount) {
       if (name == null) return;
       const trimmed = name.trim();
       if (!trimmed) return;
-      if (!PROFILE_RE.test(trimmed)) { toast("Name must be 1-32 chars: letters, digits, - or _."); return; }
+      if (!PROFILE_RE.test(trimmed)) { toast(t("cfg_name_rule")); return; }
       if (config.profiles[trimmed]) { toast("A profile named " + trimmed + " already exists."); return; }
       config.profiles[trimmed] = emptyProfile();
       dirty = true;
@@ -217,16 +218,16 @@ export function create(mount) {
   function renderLoadError(res) {
     clear(mount);
     const canSeed = !res.raw || res.raw.trim() === "";
-    mount.appendChild(el("div", { class: "panel-head" }, [el("h1", { class: "panel-title", text: "Profiles" })]));
+    mount.appendChild(el("div", { class: "panel-head" }, [el("h1", { class: "panel-title", text: t("nav_profiles") })]));
     const card = el("div", { class: "card" }, [
       el("div", { class: "banner error" }, [el("div", { text: res.error })]),
       canSeed
-        ? el("p", { class: "muted small", text: "The module seeds config.json on install. You can create a starter config now." })
-        : el("p", { class: "muted small", text: "Fix or remove the file on disk — the WebUI will not overwrite a config it cannot read." }),
+        ? el("p", { class: "muted small", text: t("cfg_starter_hint") })
+        : el("p", { class: "muted small", text: t("cfg_fix_or_remove") }),
     ]);
     if (canSeed) {
       card.appendChild(el("button", {
-        class: "btn primary", text: "Create starter config",
+        class: "btn primary", text: t("cfg_create_starter"),
         onclick: async () => {
           config = emptyConfig();
           const r = await ioSave(config);

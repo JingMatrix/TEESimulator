@@ -9,6 +9,7 @@
 // which is what keeps the domain layer unit-testable device-free.
 
 import { setPath } from "./path.js";
+import { t } from "../i18n.js";
 
 export const VERSION = 1;
 
@@ -45,56 +46,53 @@ export const MODE_RE = /^(patch|generation)$/;
 export const FIELDS = [
   // --- attestation record -------------------------------------------------
   {
-    key: "keybox", path: ["keybox"], label: "Keybox", group: "attestation",
+    key: "keybox", path: ["keybox"], label: t("schema_kb_label"), group: "attestation",
     type: "keybox", re: KEYBOX_RE, required: true, default: "keybox.xml",
-    help: "An *.xml keybox under /data/adb/teesim to sign attestations with.",
+    help: t("schema_kb_help"),
   },
   {
-    key: "mode", path: ["mode"], label: "Operation mode", group: "attestation",
+    key: "mode", path: ["mode"], label: t("schema_mode_label"), group: "attestation",
     type: "select", options: ["patch", "generation"], required: true, default: "patch",
     re: MODE_RE,
-    help:
-      "patch: keep the real hardware key and re-sign only its attestation with the keybox " +
-      "(fewer detection points; needs a working hardware level). generation: mint the whole key " +
-      "in software. A level whose hardware is unavailable always falls back to generation.",
+    help: t("schema_mode_help"),
   },
   // --- patch & OS levels (folded away in the editor to keep it concise). Empty means
   //     "use the harvested value" — so these are optional, not required. ---
   {
-    key: "patchSystem", path: ["patchLevel", "system"], label: "System patch",
+    key: "patchSystem", path: ["patchLevel", "system"], label: t("schema_system_patch"),
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "today",
     picks: ["system_property", "today", "no"],
   },
   {
-    key: "patchVendor", path: ["patchLevel", "vendor"], label: "Vendor patch",
+    key: "patchVendor", path: ["patchLevel", "vendor"], label: t("schema_vendor_patch"),
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "YYYY-MM-05",
     picks: ["system_property", "@month05", "today", "no"],
   },
   {
-    key: "patchBoot", path: ["patchLevel", "boot"], label: "Boot patch",
+    key: "patchBoot", path: ["patchLevel", "boot"], label: t("schema_boot_patch"),
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "YYYY-MM-05",
     picks: ["system_property", "@month05", "today", "no"],
   },
   {
-    key: "osVersion", path: ["osVersion"], label: "OS version",
+    key: "osVersion", path: ["osVersion"], label: t("schema_os_version"),
     group: "levels", type: "patch", re: OSVER_RE, required: false, default: "",
     picks: ["system_property"],
   },
   // --- device identity (all optional: blank means "don't provision this id") ---
-  { key: "brand", path: ["brand"], label: "Brand", group: "identity", type: "text", required: false, default: "" },
-  { key: "device", path: ["device"], label: "Device", group: "identity", type: "text", required: false, default: "" },
-  { key: "product", path: ["product"], label: "Product", group: "identity", type: "text", required: false, default: "" },
-  { key: "manufacturer", path: ["manufacturer"], label: "Manufacturer", group: "identity", type: "text", required: false, default: "" },
-  { key: "model", path: ["model"], label: "Model", group: "identity", type: "text", required: false, default: "" },
-  { key: "serial", path: ["serial"], label: "Serial", group: "identity", type: "text", required: false, default: "" },
-  { key: "imei", path: ["imei"], label: "IMEI", group: "identity", type: "text", required: false, default: "" },
-  { key: "meid", path: ["meid"], label: "MEID", group: "identity", type: "text", required: false, default: "" },
-  { key: "imei2", path: ["imei2"], label: "IMEI2", group: "identity", type: "text", required: false, default: "" },
+  { key: "brand", path: ["brand"], label: t("schema_brand"), group: "identity", type: "text", required: false, default: "" },
+  { key: "device", path: ["device"], label: t("schema_device"), group: "identity", type: "text", required: false, default: "" },
+  { key: "product", path: ["product"], label: t("schema_product"), group: "identity", type: "text", required: false, default: "" },
+  { key: "manufacturer", path: ["manufacturer"], label: t("schema_manufacturer"), group: "identity", type: "text", required: false, default: "" },
+  { key: "model", path: ["model"], label: t("schema_model"), group: "identity", type: "text", required: false, default: "" },
+  { key: "serial", path: ["serial"], label: t("schema_serial"), group: "identity", type: "text", required: false, default: "" },
+  { key: "imei", path: ["imei"], label: t("schema_imei"), group: "identity", type: "text", required: false, default: "" },
+  { key: "meid", path: ["meid"], label: t("schema_meid"), group: "identity", type: "text", required: false, default: "" },
+  { key: "imei2", path: ["imei2"], label: t("schema_imei2"), group: "identity", type: "text", required: false, default: "" },
   // --- targeting ----------------------------------------------------------
   {
-    key: "apps", path: ["apps"], label: "Apps", group: "apps", type: "applist",
+    key: "apps", path: ["apps"], label: t("schema_apps_label"), group: "apps", type: "applist",
     re: PKG_RE, required: true, default: [],
-    help: "Package names this profile attests for. At least one, unique across profiles.",
+    help: t("schema_apps_help"),
   },
 ];
 

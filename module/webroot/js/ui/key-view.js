@@ -25,7 +25,8 @@
 // The filter re-renders on every keystroke, so focus + caret are captured before the rebuild
 // and restored after — the caret never jumps mid-type.
 
-import { el, clear } from "./dom.js";
+import { el, clear, confirmDialog } from "./dom.js";
+import { t } from "../i18n.js";
 import { KEY_ACTIONS } from "./key-actions.js";
 
 export function renderKeys(mount, state, handler) {
@@ -57,7 +58,7 @@ export function renderKeys(mount, state, handler) {
   if (selected.size) {
     actionBtns.push(el("button", {
       class: "btn danger", disabled: deleting,
-      text: deleting ? "Deleting…" : "Delete selected (" + selected.size + ")",
+      text: deleting ? t("key_deleting") : t("key_delete_selected") + " (" + selected.size + ")",
       onclick: () => handler("deleteSelected"),
     }));
   }
@@ -67,19 +68,19 @@ export function renderKeys(mount, state, handler) {
     }));
   }
   mount.appendChild(el("div", { class: "panel-head" }, [
-    el("h1", { class: "panel-title", text: "Stored keys" }),
+    el("h1", { class: "panel-title", text: t("key_title") }),
     el("div", { class: "panel-actions" }, actionBtns),
   ]));
 
   if (loading) {
-    mount.appendChild(el("div", { class: "card" }, [el("p", { class: "muted", text: "Loading…" })]));
+    mount.appendChild(el("div", { class: "card" }, [el("p", { class: "muted", text: t("loading") })]));
     return;
   }
 
   if (unavailable) {
     mount.appendChild(el("div", { class: "card" }, [el("div", { class: "banner" }, [
-      el("div", { text: "Daemon key capability unavailable." }),
-      el("div", { class: "muted small", text: "The daemon's KeyAdmin endpoint (127.0.0.1:8790) isn't reachable yet; keys can't be listed." }),
+      el("div", { text: t("key_daemon_unavailable") }),
+      el("div", { class: "muted small", text: t("key_daemon_unreachable") }),
     ])]));
     return;
   }
@@ -87,11 +88,9 @@ export function renderKeys(mount, state, handler) {
   // Android 10/11 (or no keystore2 DB): there is no per-app database to inspect.
   if (apiLevel < 31 || !available) {
     mount.appendChild(el("div", { class: "card" }, [el("div", { class: "banner" }, [
-      el("div", { text: "Key listing is not available on this Android version." }),
+      el("div", { text: t("key_unsupported") }),
       el("div", { class: "muted small", text:
-        "On Android 10 and 11 there is no keystore2 database to inspect, and the keys the module " +
-        "generates are session-scoped — kept only until the keystore restarts (persistence there " +
-        "is not yet implemented)." +
+        t("key_unsupported_hint") +
         (apiLevel ? "  (Android API " + apiLevel + ")" : "") }),
     ])]));
     return;
@@ -99,7 +98,7 @@ export function renderKeys(mount, state, handler) {
 
   if (!keys.length) {
     mount.appendChild(el("div", { class: "card empty" }, [
-      el("p", { class: "muted", text: "This module hasn't minted any keys for the target apps yet." }),
+      el("p", { class: "muted", text: t("key_empty") }),
     ]));
     return;
   }
@@ -122,8 +121,8 @@ export function renderKeys(mount, state, handler) {
   const listCard = el("div", { class: "card keypanel" });
   if (!shown.length) {
     const msg = hiddenReal
-      ? hiddenReal + " real device key(s) hidden — switch to All to show them."
-      : keys.length ? "No keys match “" + filter + "”." : "No keys.";
+      ? hiddenReal + " " + t("key_hidden_switch")
+      : keys.length ? t("key_no_match") + " \u201c" + filter + "\u201d." : t("key_no_keys");
     listCard.appendChild(el("p", { class: "muted keyempty", text: msg }));
     mount.appendChild(listCard);
     restoreFocus();
@@ -137,7 +136,7 @@ export function renderKeys(mount, state, handler) {
       el("label", { class: "keycheck" }, [check]),
       el("div", { class: "keymeta" }, [
         el("div", { class: "keyalias" }, [
-          el("span", { class: "mono", text: k.alias || "(no alias)" }),
+          el("span", { class: "mono", text: k.alias || t("key_no_alias") }),
           classChip(k),
           el("span", { class: "chip", text: appLabel(k) }),
           ...abnormalChips(k),
@@ -158,14 +157,14 @@ export function renderKeys(mount, state, handler) {
 function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
   const filterInput = el("input", {
     id: "keyfilter", class: "filter-input", type: "text", value: filter,
-    placeholder: "Filter by alias, app, or keybox",
+    placeholder: t("key_filter_placeholder"),
     autocapitalize: "off", autocorrect: "off", spellcheck: "false",
     oninput: (e) => handler("filter", e.target.value),
   });
   const field = el("div", { class: "filter-field" }, [
     filterInput,
     el("button", {
-      class: "filter-menu-btn", type: "button", "aria-label": "Selection actions",
+      class: "filter-menu-btn", type: "button", "aria-label": t("key_selection_actions"),
       "aria-expanded": menuOpen ? "true" : "false", onclick: () => handler("toggleMenu"),
     }, [el("span", { class: "sel-icon", "aria-hidden": "true" })]),
   ]);
@@ -174,10 +173,10 @@ function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
     const item = (label, action, arg) =>
       el("button", { type: "button", text: label, onclick: () => handler(action, arg) });
     field.appendChild(el("div", { class: "selmenu", role: "menu" }, [
-      item("Select filtered", "selectFiltered", shown.map((k) => k.id)),
-      item("Select all", "selectAll"),
-      item("Unselect all", "unselectAll"),
-      item("Inverse selection", "inverse"),
+      item(t("key_select_filtered"), "selectFiltered", shown.map((k) => k.id)),
+      item(t("key_select_all"), "selectAll"),
+      item(t("key_unselect_all"), "unselectAll"),
+      item(t("key_inverse"), "inverse"),
     ]));
   }
 
@@ -186,13 +185,13 @@ function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
   // is a no-op. The hint reports how many real keys "Spoofed" is currently hiding.
   const scope = el("div", { class: "segmented keyscope", role: "group", "aria-label": "Which keys to list" }, [
     el("button", {
-      class: "seg" + (spoofedOnly ? " on" : ""), type: "button", text: "Spoofed",
-      "aria-pressed": spoofedOnly ? "true" : "false", title: "Only keys this module spoofed",
+      class: "seg" + (spoofedOnly ? " on" : ""), type: "button", text: t("key_spoofed"),
+      "aria-pressed": spoofedOnly ? "true" : "false", title: t("key_spoofed_title"),
       onclick: () => { if (!spoofedOnly) handler("toggleSpoofed"); },
     }),
     el("button", {
-      class: "seg" + (!spoofedOnly ? " on" : ""), type: "button", text: "All",
-      "aria-pressed": !spoofedOnly ? "true" : "false", title: "Include the apps' own real device keys",
+      class: "seg" + (!spoofedOnly ? " on" : ""), type: "button", text: t("key_all"),
+      "aria-pressed": !spoofedOnly ? "true" : "false", title: t("key_all_title"),
       onclick: () => { if (spoofedOnly) handler("toggleSpoofed"); },
     }),
   ]);
@@ -200,7 +199,7 @@ function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
   if (spoofedOnly && hiddenReal) {
     scopeRow.appendChild(el("span", {
       class: "keyscope-hint muted",
-      text: hiddenReal + " real device key(s) hidden",
+      text: hiddenReal + " " + t("key_hidden_real"),
     }));
   }
   return el("div", { class: "card keysearch" }, [field, scopeRow]);
@@ -226,16 +225,16 @@ function abnormalChips(k) {
 }
 
 function stateLabel(s) {
-  return ({ 0: "creating", 1: "live", 2: "orphaned" })[Number(s)] || ("state " + s);
+  return ({ 0: t("key_creating"), 1: t("key_live"), 2: t("key_orphaned") })[Number(s)] || ("state " + s);
 }
 
 // The four key classes the daemon reports, in the order spoofed-before-untouched, each with its
 // display label and badge modifier class. An unknown/absent class is treated as "untouched".
 const KEY_CLASSES = {
-  generated: { label: "Generated", cls: "kclass-generated", rank: 0 },
-  delegated: { label: "Delegated", cls: "kclass-delegated", rank: 1 },
-  patched: { label: "Patched", cls: "kclass-patched", rank: 2 },
-  untouched: { label: "Untouched", cls: "kclass-untouched", rank: 3 },
+  generated: { label: t("key_generated"), cls: "kclass-generated", rank: 0 },
+  delegated: { label: t("key_delegated"), cls: "kclass-delegated", rank: 1 },
+  patched: { label: t("key_patched"), cls: "kclass-patched", rank: 2 },
+  untouched: { label: t("key_untouched"), cls: "kclass-untouched", rank: 3 },
 };
 
 function keyClass(k) {
@@ -268,10 +267,10 @@ function purposeChips(k) {
 
 function metaLines(k) {
   const lines = [];
-  if (k.keyAlgorithm) lines.push(metaLine("Algorithm", k.keyAlgorithm));
+  if (k.keyAlgorithm) lines.push(metaLine(t("key_algorithm"), k.keyAlgorithm));
   // Only attributed keys carry a keybox; omit the line entirely for untouched real keys.
   if (k.keybox) lines.push(metaLine("Keybox", k.keybox));
-  if (k.created) lines.push(metaLine("Created", fmtDate(k.created)));
+  if (k.created) lines.push(metaLine(t("key_created"), fmtDate(k.created)));
   return lines;
 }
 

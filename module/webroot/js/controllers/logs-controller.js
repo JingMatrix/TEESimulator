@@ -5,6 +5,7 @@
 // than the last, and caps how many it retains so a long session doesn't grow without bound.
 
 import { keyAdmin } from "../data/keyadmin.js";
+import { t } from "../i18n.js";
 import { moduleVersion } from "../data/logs-io.js";
 import { renderLogs, renderLogFilters, renderSaveSheet } from "../ui/logs-view.js";
 import { toast, clear, openSheet } from "../ui/dom.js";
@@ -107,7 +108,7 @@ export function create(mount) {
   // the log text to the daemon, which (as root) writes it to the chosen folder/name and
   // returns the final path. The folder is remembered in localStorage for next time.
   function openSaveSheet() {
-    if (!lines.length) { toast("No logs to save"); return; }
+    if (!lines.length) { toast(t("log_no_logs_to_save")); return; }
     const dir = localStorage.getItem(SAVE_DIR_KEY) || DEFAULT_SAVE_DIR;
     const name = defaultLogName(moduleVer);
     saveHost = document.createElement("div");
@@ -118,7 +119,7 @@ export function create(mount) {
   const saveActions = {
     async save(dir, name) {
       const text = lines.map((l) => l.text).join("\n");
-      if (!text) { toast("No logs to save"); return; }
+      if (!text) { toast(t("log_no_logs_to_save")); return; }
       const folder = (dir || "").trim() || DEFAULT_SAVE_DIR;
       try {
         const res = await keyAdmin("logsWrite", { dir: folder, name, text });

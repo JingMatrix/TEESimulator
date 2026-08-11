@@ -20,19 +20,20 @@
 //   actions = { close() }
 
 import { el, clear } from "./dom.js";
+import { t } from "../i18n.js";
 
 export function renderKeyboxes(mount, state, actions) {
   clear(mount);
   const { files = [] } = state;
 
   mount.appendChild(el("div", { class: "panel-head" }, [
-    el("h1", { class: "panel-title", text: "Keyboxes" }),
-    el("button", { class: "btn primary", text: "Import", onclick: () => actions.onImport() }),
+    el("h1", { class: "panel-title", text: t("kb_title") }),
+    el("button", { class: "btn primary", text: t("kb_add"), onclick: () => actions.onImport() }),
   ]));
 
   if (!files.length) {
     mount.appendChild(el("div", { class: "card empty" },
-      [el("p", { class: "muted", text: "No keyboxes yet. Import an *.xml keybox to sign attestations with." })]));
+      [el("p", { class: "muted", text: t("kb_empty") })]));
     return;
   }
 
@@ -43,14 +44,14 @@ export function renderKeyboxes(mount, state, actions) {
       // that wraps instead of shoving the Rename/Delete buttons off the row.
       el("button", {
         class: "kb-name mono", type: "button",
-        title: "Inspect " + name, onclick: () => actions.inspect(name),
+        title: t("kb_inspect") + " " + name, onclick: () => actions.inspect(name),
       }, [
         el("span", { class: "kb-icon", "aria-hidden": "true" }),
         el("span", { class: "kb-file", text: name }),
       ]),
       el("div", { class: "keybtns" }, [
-        el("button", { class: "btn small ghost", text: "Rename", onclick: () => actions.rename(name) }),
-        el("button", { class: "btn small danger ghost", text: "Delete", onclick: () => actions.delete(name) }),
+        el("button", { class: "btn small ghost", text: t("btn_rename"), onclick: () => actions.rename(name) }),
+        el("button", { class: "btn small danger ghost", text: t("btn_delete"), onclick: () => actions.delete(name) }),
       ]),
     ]));
   }
@@ -78,16 +79,16 @@ export function renderKeyboxImport(state, actions) {
 
   return el("div", {}, [
     el("div", { class: "sheet-head" }, [
-      el("h2", { text: "Import keybox" }),
-      el("button", { class: "iconbtn", type: "button", "aria-label": "Close", onclick: () => actions.close() }, [
+      el("h2", { text: t("kb_import_title") }),
+      el("button", { class: "iconbtn", type: "button", "aria-label": t("btn_close"), onclick: () => actions.close() }, [
         el("span", { class: "x-mark", "aria-hidden": "true" }),
       ]),
     ]),
     error ? el("div", { class: "banner error" }, [el("div", { text: error })]) : null,
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Keybox file" }), fileInput]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Save as" }), nameInput]),
-    el("button", { class: "btn primary block sheet-submit", text: "Import", disabled: !importContent, onclick: () => actions.import() }),
-    el("p", { class: "field-help", text: "The file is copied into /data/adb/teesim; the name field becomes its filename." }),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("kb_keybox_file") }), fileInput]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("kb_save_as") }), nameInput]),
+    el("button", { class: "btn primary block sheet-submit", text: t("btn_import"), disabled: !importContent, onclick: () => actions.import() }),
+    el("p", { class: "field-help", text: t("kb_import_hint") }),
   ]);
 }
 
@@ -101,21 +102,21 @@ export function renderKeyboxInspect(state, actions) {
 
   if (!data || data.ok === false) {
     body.appendChild(el("div", { class: "banner error" }, [
-      el("div", { text: (data && data.error) || "Could not inspect this keybox." }),
+      el("div", { text: (data && data.error) || t("kb_inspect_error") }),
     ]));
   } else {
-    if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: "DeviceID: " + data.deviceId }));
+    if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: t("kb_device_id") + data.deviceId }));
     const keys = Array.isArray(data.keys) ? data.keys : [];
-    if (!keys.length) body.appendChild(el("p", { class: "muted", text: "No <Key> blocks found in this keybox." }));
+    if (!keys.length) body.appendChild(el("p", { class: "muted", text: t("kb_no_key_blocks") }));
     for (const k of keys) body.appendChild(keyBlock(k));
   }
 
   return el("div", {}, [
     el("div", { class: "drill-head" }, [
-      el("button", { class: "iconbtn", type: "button", "aria-label": "Back to keyboxes", onclick: () => actions.close() }, [
+      el("button", { class: "iconbtn", type: "button", "aria-label": t("kb_back_to_keyboxes"), onclick: () => actions.close() }, [
         el("span", { class: "chevron-left", "aria-hidden": "true" }),
       ]),
-      el("h1", { class: "drill-title", text: "Keybox", tabindex: "-1" }),
+      el("h1", { class: "drill-title", text: t("kb_keybox"), tabindex: "-1" }),
     ]),
     body,
   ]);
@@ -124,17 +125,17 @@ export function renderKeyboxInspect(state, actions) {
 function keyBlock(k) {
   const linkage = k.linkage || "";
   const linkChip =
-    linkage === "ok" ? el("span", { class: "chip good", text: "chain ok" })
-    : linkage === "broken" ? el("span", { class: "chip warn", text: "chain broken" })
-    : linkage === "single" ? el("span", { class: "chip", text: "single cert" })
+    linkage === "ok" ? el("span", { class: "chip good", text: t("kb_chain_ok") })
+    : linkage === "broken" ? el("span", { class: "chip warn", text: t("kb_chain_broken") })
+    : linkage === "single" ? el("span", { class: "chip", text: t("kb_single_cert") })
     : null;
   const head = el("div", { class: "kbi-head" }, [
     el("span", { class: "chip mono", text: (k.algorithm || "?").toUpperCase() }),
-    el("span", { class: "chip", text: (k.chainLength || 0) + (k.chainLength === 1 ? " cert" : " certs") }),
+    el("span", { class: "chip", text: (k.chainLength || 0) + t(k.chainLength === 1 ? "kb_cert" : "kb_certs") }),
     linkChip,
     k.privateKeyPresent
-      ? el("span", { class: "chip good", text: "private key" })
-      : el("span", { class: "chip warn", text: "no private key" }),
+      ? el("span", { class: "chip good", text: t("kb_private_key") })
+      : el("span", { class: "chip warn", text: t("kb_no_private_key") }),
   ]);
   const certs = Array.isArray(k.certs) ? k.certs : [];
   return el("div", { class: "card kbi-key" }, [head, ...certs.map(certBlock)]);
@@ -142,13 +143,13 @@ function keyBlock(k) {
 
 function certBlock(c) {
   if (c.error) {
-    return el("div", { class: "kbi-cert" }, [el("div", { class: "err", text: "cert " + c.index + ": " + c.error })]);
+    return el("div", { class: "kbi-cert" }, [el("div", { class: "err", text: t("kb_cert") + " " + c.index + ": " + c.error })]);
   }
   const badges = el("div", { class: "chips" }, [
     el("span", { class: "chip", text: roleOf(c) }),
     el("span", { class: "chip mono", text: (c.keyAlgorithm || "?") + (c.keySize ? " " + c.keySize : "") }),
-    c.expired ? el("span", { class: "chip warn", text: "expired" }) : null,
-    c.notYetValid ? el("span", { class: "chip warn", text: "not yet valid" }) : null,
+    c.expired ? el("span", { class: "chip warn", text: t("kb_expired") }) : null,
+    c.notYetValid ? el("span", { class: "chip warn", text: t("kb_not_yet_valid") }) : null,
   ]);
   return el("div", { class: "kbi-cert" }, [
     badges,
@@ -161,9 +162,9 @@ function certBlock(c) {
 }
 
 function roleOf(c) {
-  if (c.index === 0) return "leaf";
-  if (c.selfSigned) return "root";
-  return c.isCa ? "intermediate" : "cert " + c.index;
+  if (c.index === 0) return t("kb_leaf");
+  if (c.selfSigned) return t("kb_root");
+  return c.isCa ? t("kb_intermediate") : "cert " + c.index;
 }
 
 function kv(label, value) {

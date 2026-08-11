@@ -13,6 +13,7 @@
 // case below.
 
 import { el } from "./dom.js";
+import { t } from "../i18n.js";
 
 export function renderField(descriptor, value, onChange, context = {}) {
   switch (descriptor.type) {
@@ -102,13 +103,13 @@ function keyboxWidget(d, value, onChange, ctx) {
   if (value && !files.includes(value)) files.push(value);
   if (files.length === 0) {
     return el("select", { id: ctx.id, class: "input", disabled: true },
-      [el("option", { text: "no keybox files found" })]);
+      [el("option", { text: t("field_no_keybox_files") })]);
   }
   return el("select", {
     id: ctx.id, class: "input",
     onchange: (e) => onChange(d.path, e.target.value),
   }, files.map((f) =>
-    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)") })));
+    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " " + t("field_missing")) })));
 }
 
 function applistWidget(d, value, ctx) {
@@ -116,10 +117,10 @@ function applistWidget(d, value, ctx) {
   const chips = el("div", { class: "applist" }, apps.length
     ? apps.map((pkg) => el("span", { class: "chip removable" }, [
         el("span", { class: "chip-text", text: pkg }),
-        el("button", { type: "button", class: "chip-x", "aria-label": "Remove " + pkg, text: "✕",
+        el("button", { type: "button", class: "chip-x", "aria-label": t("field_remove") + " " + pkg, text: "✕",
           onclick: () => ctx.removeApp(pkg) }),
       ]))
-    : [el("span", { class: "muted small", text: "No apps yet." })]);
+    : [el("span", { class: "muted small", text: t("field_no_apps") })]);
 
   const input = el("input", {
     id: ctx.id, class: "input", type: "text", placeholder: "com.example.app",
@@ -134,7 +135,7 @@ function applistWidget(d, value, ctx) {
   };
   input.addEventListener("input", () => input.classList.toggle("invalid", input.value.trim() !== "" && !d.re.test(input.value.trim())));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
-  const add = el("button", { type: "button", class: "btn", text: "Add", onclick: submit });
+  const add = el("button", { type: "button", class: "btn", text: t("btn_add"), onclick: submit });
 
   return el("div", {}, [chips, el("div", { class: "add-row" }, [input, add])]);
 }
