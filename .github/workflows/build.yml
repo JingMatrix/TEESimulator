@@ -1,0 +1,194 @@
+name: Build
+
+on:
+  push:
+    branches: [dev]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  module:
+    runs-on: ubuntu-latest
+    # A "Release TEESimulator v…" commit is cut straight to a v* tag, which builds and publishes it.
+    # Skip its redundant dev-push build entirely so the same code never builds (or canaries) twice.
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/dev' && startsWith(github.event.head_commit.message, 'Release TEESimulator v')) }}
+    permissions:
+      contents: write # publish canary prereleases and tagged releases
+    env:
+      NDK_VERSION: "28.2.13676358"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # full history so the commit-count version is correct
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build golang-go clang libclang-dev zip
+
+      - name: Set up the Android SDK and NDK
+        uses: android-actions/setup-android@v3
+      - name: Install NDK, CMake and build-tools
+        run: sdkmanager --install "ndk;${NDK_VERSION}" "cmake;3.22.1" "build-tools;34.0.0" "build-tools;36.0.0" "platforms;android-34" "platforms;android-36"
+
+      # The whole build is driven by Gradle via the committed wrapper: AGP produces the control
+      # daemon's dex and builds the native interceptors through externalNativeBuild (CMake), whose
+      # AIDL is generated with the build-tools above.
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Rust
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          # Pinned for reproducibility. cargo-ndk 4 sets bindgen's NDK-sysroot clang args by default,
+          # which rust/build.sh (openssl-sys bindgens BoringSSL) relies on.
+          cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            rust/target
+          key: cargo-${{ hashFiles('rust/**/Cargo.toml') }}
+
+      - name: Build the module
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: ./gradlew zipRelease zipDebug
+
+      # upload-artifact re-zips whatever it is given on download, so handing it the built module zip
+      # yields a zip-of-a-zip that has to be unpacked twice before flashing. Unpack each variant and
+      # upload its contents, so the downloaded artifact is a single, directly-flashable module. Release
+      # and Debug go up as separate artifacts, each named after its build.
+      - name: Stage the module artifacts
+        id: artifacts
+        run: |
+          set -euo pipefail
+          rel=$(ls out/TEESimulator-*-Release.zip)
+          dbg=$(ls out/TEESimulator-*-Debug.zip)
+          mkdir -p artifact-release artifact-debug
+          unzip -q "$rel" -d artifact-release
+          unzip -q "$dbg" -d artifact-debug
+          echo "release=$(basename "$rel" .zip)" >> "$GITHUB_OUTPUT"
+          echo "debug=$(basename "$dbg" .zip)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the release module
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts.outputs.release }}
+          path: artifact-release/*
+          if-no-files-found: error
+
+      - name: Upload the debug module
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts.outputs.debug }}
+          path: artifact-debug/*
+          if-no-files-found: error
+
+      # --- stable release (pushed v* tag) --------------------------------------------------------
+      #
+      # `git tag vX && git push --tags` publishes the release here from the very zips this build
+      # produced — nothing is hand-uploaded, so the assets can never drift from what was built.
+      # The build stamps every zip with the commit hash for canary traceability; a tagged release is
+      # named by its tag, so that hash is stripped from the asset names first, giving the exact zip
+      # name module/update.json's zipUrl points at. The OTA descriptor (module/update.json) and the
+      # changelog live in the repo and are served from the branch (raw.githubusercontent) — not
+      # generated here — so this step only builds the release and uses the changelog as its body.
+      # Bump module/update.json's version/versionCode/zipUrl to match the tag before tagging.
+      - name: Publish release
+        if: ${{ success() && github.ref_type == 'tag' && startsWith(github.ref_name, 'v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Drop the -<hash> segment sitting before -Release/-Debug so the release assets read
+          # TEESimulator-<ver>-<count>-Release.zip, matching module/update.json's zipUrl.
+          for z in out/TEESimulator-*-Release.zip out/TEESimulator-*-Debug.zip; do
+            clean=$(echo "$z" | sed -E 's/-[0-9a-f]{7,}-(Release|Debug)\.zip$/-\1.zip/')
+            [ "$z" = "$clean" ] || mv "$z" "$clean"
+          done
+          rel=$(ls out/TEESimulator-*-Release.zip)
+          dbg=$(ls out/TEESimulator-*-Debug.zip)
+          # `%s` argument, never the format string, so a `%` anywhere in the changelog stays literal.
+          notes=$(printf '# TEESimulator %s\n\n%s\n' "${TAG}" "$(cat module/changelog.md)")
+          # Recreated rather than edited so a re-run replaces the assets instead of appending a second
+          # copy. No --cleanup-tag: the release is rebuilt, the pushed release tag is kept.
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --latest \
+            --title "TEESimulator ${TAG}" \
+            --notes "$notes" \
+            "$rel" "$dbg"
+
+      # --- canary distribution (dev push) --------------------------------------------------------
+      #
+      # The zips are also attached to a rolling prerelease so testers (and the WebUI updater) can
+      # download without a GitHub account: an Actions artifact 401s an anonymous caller, a release
+      # asset does not. Marked prerelease so releases/latest keeps pointing at the last stable tag.
+      # Release commits never reach here — the job-level `if` skips their dev build outright.
+      - name: Publish canary prerelease
+        if: >-
+          success() &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/dev'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          set -euo pipefail
+          code=$(git rev-list HEAD --count)
+          short=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --pretty=%s)
+          tag="canary-${code}"
+          notes=$(cat <<EOF
+          **${subject}**
+
+          Built from [\`${short}\`](${COMMIT_URL}) by [run ${{ github.run_id }}](${RUN_URL}).
+
+          A canary — the current state of \`dev\`, tested by CI and nothing else, published as a
+          prerelease so it can be downloaded (and flashed from the WebUI) without a GitHub account.
+
+          | Build | Use it when |
+          | :-- | :-- |
+          | \`…-Debug.zip\` | Chasing a bug — far more logging. |
+          | \`…-Release.zip\` | You just want the newest code. |
+
+          Only the five most recent canaries are kept.
+          EOF
+          )
+          # Recreate rather than edit so a re-run replaces the build instead of appending assets.
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" \
+            --prerelease \
+            --target "${{ github.sha }}" \
+            --title "TEESimulator canary ${code}" \
+            --notes "$notes" \
+            out/TEESimulator-*-Release.zip \
+            out/TEESimulator-*-Debug.zip
+
+      # Five is enough to bisect a regression; sorted by version code (commit count, monotonic), not
+      # date, which reruns and reverts can disorder.
+      - name: Keep only the five most recent canaries
+        if: >-
+          success() &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/dev'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^canary-' || true)
+          [ -n "$tags" ] || exit 0
+          echo "$tags" | sort -t- -k2 -n -r | tail -n +6 | while read -r old; do
+            echo "Removing $old"
+            gh release delete "$old" --yes --cleanup-tag
+          done
