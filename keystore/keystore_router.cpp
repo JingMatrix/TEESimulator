@@ -25,6 +25,7 @@
 #include <openssl/x509.h>
 
 #include <ctime>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -778,6 +779,10 @@ bool HandleAbort(int /*uid*/, Parcel& in, Parcel* reply) {
 }  // namespace
 
 extern "C" const char* teesim_hook_name(void) { return "keystore1"; }
+
+// Usage stats are a keystore2/KeyMint-only feature; Android 10/11 is out of scope
+// for the scope picker, so this router reports an empty array (see control.h).
+extern "C" char* teesim_usage_json_alloc(void) { return strdup("[]"); }
 
 // Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
 // the control thread; only teesim_cfg_commit touches the live routing tables.

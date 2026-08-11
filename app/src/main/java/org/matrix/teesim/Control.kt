@@ -9,6 +9,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -26,6 +27,8 @@ object Control {
 
     private const val RESIGN_TIMEOUT_MS = 10_000L
 
+    private const val USAGE_TIMEOUT_MS = 5_000L
+
     private val lock = Object()
     @Volatile private var latest: String? = null
     private var seq = 0L
@@ -37,6 +40,11 @@ object Control {
     // Responses to the one in-flight resign request. Buffered (size 1) so a reply that arrives before
     // the sender polls is not lost; the sender drains it before each request.
     private val resignReplies = LinkedBlockingQueue<JSONObject>(1)
+
+    // The one in-flight usage-poll reply, same buffered(1) rationale as [resignReplies]. [usageLock]
+    // serializes fetchUsage() so only a single getUsage request is ever outstanding on the wire.
+    private val usageReplies = LinkedBlockingQueue<JSONObject>(1)
+    private val usageLock = Object()
 
     // Invoked (on [commitExecutor]) after the lib acks a config commit, so the daemon can re-attest
     // pre-existing keys against the just-committed profile set. Coalesced by [commitPending].
@@ -216,6 +224,12 @@ object Control {
                 resignReplies.clear()
                 resignReplies.offer(msg)
             }
+            "usage" -> {
+                // The poll thread parks on usageReplies; hand the frame over and never do the (uid->pkg,
+                // disk) merge here — this is the reader thread, and the merge can block on PackageManager.
+                usageReplies.clear()
+                usageReplies.offer(msg)
+            }
             "pong" -> SystemLogger.verbose("control: pong ${msg.optLong("epoch")}")
         }
     }
@@ -267,6 +281,40 @@ object Control {
             null
         }
     }
+
+    /**
+     * Poll the lib for its per-uid key-request usage (spec C1), mirroring [resign]'s request/reply
+     * shape: write `{"type":"getUsage"}`, wait for the matching `usage` frame, and hand back its `apps`
+     * array (one entry per uid that has requested a key since the lib loaded), or null on no connection /
+     * timeout / malformed reply. Serialized by [usageLock] so at most one request is outstanding.
+     *
+     * MUST be called off the reader thread ([App]'s poll thread) — [handleFrame] delivers the reply, so
+     * blocking here on that same thread would deadlock. The reply is consumed as-is; the caller resolves
+     * uid->package and folds deltas into [UsageStore].
+     */
+    fun fetchUsage(): JSONArray? =
+        synchronized(usageLock) {
+            val out =
+                activeOut
+                    ?: run {
+                        SystemLogger.verbose("control: getUsage skipped — no live connection")
+                        return null
+                    }
+            usageReplies.clear()
+            try {
+                writeFrame(out, "{\"type\":\"getUsage\"}")
+            } catch (e: Exception) {
+                SystemLogger.warning("control: getUsage send failed: ${e.message}")
+                return null
+            }
+            val reply =
+                usageReplies.poll(USAGE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                    ?: run {
+                        SystemLogger.warning("control: getUsage timed out")
+                        return null
+                    }
+            reply.optJSONArray("apps")
+        }
 
     // --- framing: [u32 BE length][UTF-8 JSON] -----------------------------------
 

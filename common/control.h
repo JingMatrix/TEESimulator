@@ -78,6 +78,17 @@ bool teesim_cfg_resign(const char *profile_id, const uint8_t *leaf, size_t leaf_
 // Which hook this lib is, for the hello message: "keymint" or "keystore1".
 const char *teesim_hook_name(void);
 
+// Snapshot the per-caller key-usage stats this lib has recorded since it loaded,
+// as a malloc'd, NUL-terminated JSON ARRAY the caller must free(). Each element
+// is one uid that has requested a key this boot:
+//   [{"uid":N,"count":N,"lastBootMs":N,"pkg":"..."}]
+// count is the cumulative generateKey requests from that uid, lastBootMs is the
+// CLOCK_BOOTTIME (ms) of its most recent request, and pkg is a best-effort
+// package hint (usually "" — the daemon resolves uid->package itself). The
+// keymint router fills this in; the keystore1 router returns "[]" (out of scope).
+// The daemon polls it via the control channel's getUsage request.
+char *teesim_usage_json_alloc(void);
+
 // --- control server, implemented in common/control.cpp -----------------------
 
 // Bind the abstract socket @teesim, listen, and serve config pushes on a
