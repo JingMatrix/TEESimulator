@@ -89,9 +89,18 @@ unsafe fn timestamp_token(tok: *const TsTimestampToken) -> Option<TimeStampToken
 
 // KeyMint TagType bits (top nibble of a tag).
 const TAG_TYPE_MASK: u32 = 0xF000_0000;
+const TAG_UINT: u32 = 0x3000_0000;
+const TAG_UINT_REP: u32 = 0x4000_0000;
+const TAG_ULONG: u32 = 0x5000_0000;
 const TAG_BOOL: u32 = 0x7000_0000;
 const TAG_BIGNUM: u32 = 0x8000_0000;
 const TAG_BYTES: u32 = 0x9000_0000;
+const TAG_ULONG_REP: u32 = 0xA000_0000;
+
+// USER_AUTH_TYPE is ENUM-typed (top nibble 0x1) yet kmr_wire decodes it as a
+// u32, and its ANY value is 0xFFFFFFFF, so it needs the same unsigned handling
+// as the UINT tags rather than the signed enum path.
+const TAG_USER_AUTH_TYPE: u32 = 0x1000_0000 | 504;
 
 fn call<T>(f: impl FnOnce() -> Result<T, OpError>) -> Result<T, i32> {
     match catch_unwind(AssertUnwindSafe(f)) {
@@ -107,18 +116,34 @@ fn call<T>(f: impl FnOnce() -> Result<T, OpError>) -> Result<T, i32> {
 /// Convert a flat `KmParam` into a kmr_wire `KeyParam`, reusing kmr_wire's own
 /// tag-keyed decoding.
 fn to_keyparam(p: &KmParam) -> Result<KeyParam, OpError> {
-    let value = match p.tag & TAG_TYPE_MASK {
-        TAG_BOOL => Value::Bool(true),
-        TAG_BYTES | TAG_BIGNUM => {
-            let bytes = if p.blob.is_null() || p.blob_len == 0 {
-                Vec::new()
-            } else {
-                // Safety: the caller guarantees blob/blob_len are valid for the call.
-                unsafe { slice::from_raw_parts(p.blob, p.blob_len) }.to_vec()
-            };
-            Value::Bytes(bytes)
+    // Unsigned tag values cross the ABI in the signed `int_value` carrier, so a
+    // value with its top bit set arrives as a negative i64. kmr_wire decodes these
+    // tags with u32/u64 decoders that reject a negative CBOR integer with
+    // OutOfRangeIntegerValue, so the bits must be reinterpreted to a non-negative
+    // integer of the decoder's width. Enum and DATE tags stay on the signed path:
+    // their values are a defined (small, non-negative) enumerant or an epoch time.
+    let value = if p.tag == TAG_USER_AUTH_TYPE {
+        // ENUM-typed but u32-decoded; ANY == 0xFFFFFFFF must stay non-negative.
+        Value::Integer(Integer::from(p.int_value as u32 as u64))
+    } else {
+        match p.tag & TAG_TYPE_MASK {
+            TAG_BOOL => Value::Bool(true),
+            TAG_BYTES | TAG_BIGNUM => {
+                let bytes = if p.blob.is_null() || p.blob_len == 0 {
+                    Vec::new()
+                } else {
+                    // Safety: the caller guarantees blob/blob_len are valid for the call.
+                    unsafe { slice::from_raw_parts(p.blob, p.blob_len) }.to_vec()
+                };
+                Value::Bytes(bytes)
+            }
+            // 32-bit unsigned tags (KEY_SIZE, patchlevels, ...): drop the sign
+            // extension so the low word decodes as the intended u32.
+            TAG_UINT | TAG_UINT_REP => Value::Integer(Integer::from(p.int_value as u32 as u64)),
+            // 64-bit unsigned tags (USER_SECURE_ID, RSA_PUBLIC_EXPONENT).
+            TAG_ULONG | TAG_ULONG_REP => Value::Integer(Integer::from(p.int_value as u64)),
+            _ => Value::Integer(Integer::from(p.int_value)),
         }
-        _ => Value::Integer(Integer::from(p.int_value)),
     };
     let tag = Value::Integer(Integer::from((p.tag as i32) as i64));
     KeyParam::from_cbor_value(Value::Array(vec![tag, value])).map_err(|e| OpError {
