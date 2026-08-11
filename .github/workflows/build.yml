@@ -57,6 +57,16 @@ jobs:
             rust/target
           key: cargo-${{ hashFiles('rust/**/Cargo.toml') }}
 
+      # Enforce the TA's cast lints on the shipped target before building: capi's
+      # KeyParameter conversion denies lossy integer casts (see #205), so a new
+      # unguarded cast fails here rather than silently mis-encoding a tag.
+      - name: Lint the KeyMint TA (clippy)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          rustup component add clippy
+          ./rust/build.sh clippy
+
       - name: Build the module
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}

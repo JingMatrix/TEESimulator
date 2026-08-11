@@ -90,8 +90,7 @@ struct PendingKey {
   void RebindParamBlobs() {
     size_t k = 0;
     for (auto& kp : params) {
-      const uint32_t type = kp.tag & 0xf0000000u;
-      if (type != 0x80000000u && type != 0x90000000u) continue;  // not a BIGNUM/BYTES param
+      if (teesim_km_tag_value_kind(kp.tag) != KM_VALUE_BYTES) continue;  // not a BIGNUM/BYTES param
       if (k >= param_blobs.size()) {
         kp.blob = nullptr;
         kp.blob_len = 0;
@@ -250,23 +249,19 @@ std::vector<KmParam> ReadKeymasterArguments(Parcel& p,
     if (p.readInt32() == 0) continue;  // typed-list element presence marker
     KmParam kp{};
     kp.tag = static_cast<uint32_t>(p.readInt32());
-    switch (kp.tag & 0xf0000000u) {
-      case 0x10000000:  // ENUM
-      case 0x20000000:  // ENUM_REP
-      case 0x30000000:  // UINT
-      case 0x40000000:  // UINT_REP
+    switch (teesim_km_tag_value_kind(kp.tag)) {
+      case KM_VALUE_INT32:   // ENUM/ENUM_REP
+      case KM_VALUE_UINT32:  // UINT/UINT_REP, USER_AUTH_TYPE
         kp.int_value = p.readInt32();
         break;
-      case 0x50000000:  // ULONG
-      case 0x60000000:  // DATE
-      case 0xa0000000:  // ULONG_REP
+      case KM_VALUE_INT64:   // DATE
+      case KM_VALUE_UINT64:  // ULONG/ULONG_REP
         kp.int_value = p.readInt64();
         break;
-      case 0x70000000:  // BOOL
+      case KM_VALUE_BOOL:
         kp.int_value = 1;
         break;
-      case 0x80000000:  // BIGNUM
-      case 0x90000000:  // BYTES
+      case KM_VALUE_BYTES:  // BIGNUM/BYTES
         blob_store.push_back(ReadByteArray(p));
         kp.blob = blob_store.back().data();
         kp.blob_len = blob_store.back().size();
@@ -304,23 +299,21 @@ void WriteKeymasterArguments(Parcel& p, const std::vector<KmParam>& params) {
   for (const auto& kp : params) {
     p.writeInt32(1);  // typed-list element presence marker
     p.writeInt32(static_cast<int32_t>(kp.tag));
-    switch (kp.tag & 0xf0000000u) {
-      case 0x10000000:
-      case 0x20000000:
-      case 0x30000000:
-      case 0x40000000:
+    switch (teesim_km_tag_value_kind(kp.tag)) {
+      case KM_VALUE_INT32:
+      case KM_VALUE_UINT32:
         p.writeInt32(static_cast<int32_t>(kp.int_value));
         break;
-      case 0x50000000:
-      case 0x60000000:
-      case 0xa0000000:
+      case KM_VALUE_INT64:
+      case KM_VALUE_UINT64:
         p.writeInt64(kp.int_value);
         break;
-      case 0x70000000:
+      case KM_VALUE_BOOL:
         break;  // bool: presence only
-      case 0x80000000:
-      case 0x90000000:
+      case KM_VALUE_BYTES:
         p.writeByteArray(kp.blob_len, kp.blob);
+        break;
+      default:
         break;
     }
   }

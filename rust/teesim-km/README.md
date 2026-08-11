@@ -154,8 +154,11 @@ encoding:
 - Handles it holds but can't inspect: `Ta` (the boxed TA), `TsCreationResult`
   (generate/import output), `TsBeginResult`, `TsCharacteristics`.
 - `KmParam` — a KeyMint `KeyParameter` flattened to `{ tag, int_value, blob,
-  blob_len }`. The tag's top-nibble type bits decide which field is live, so C++
-  copies one union arm without knowing the tag catalog.
+  blob_len }`. `teesim_km_tag_value_kind(tag)` returns a `KmValueKind` saying how
+  `int_value` is represented (bool / bytes / signed or unsigned 32- or 64-bit), so
+  C++ copies one union arm without knowing the tag catalog and both sides share one
+  signed/unsigned/width table (it mirrors `kmr_wire`'s per-tag decoder — the source
+  of the `USER_SECURE_ID` sign bug this replaced).
 - Per-method entry points (`teesim_km_generate_key`, `teesim_km_begin`,
   `teesim_km_update`, `teesim_km_finish`, …), each returning `0` or a negative
   KeyMint error code, plus accessor functions to walk the result handles field by

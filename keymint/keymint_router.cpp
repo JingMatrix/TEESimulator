@@ -32,14 +32,6 @@ extern "C" void teesim_hook_set_forwarding(bool forwarding);
 
 namespace {
 
-constexpr uint32_t kTagTypeMask = 0xF0000000u;
-constexpr uint32_t kTagUlong = 0x50000000u;
-constexpr uint32_t kTagDate = 0x60000000u;
-constexpr uint32_t kTagBool = 0x70000000u;
-constexpr uint32_t kTagBignum = 0x80000000u;
-constexpr uint32_t kTagBytes = 0x90000000u;
-constexpr uint32_t kTagUlongRep = 0xA0000000u;
-
 // A TA is reference-counted so an in-flight operation keeps its profile's TA
 // alive even if a config reload swaps or drops that profile underneath it.
 using TaPtr = std::shared_ptr<::Ta>;
@@ -230,22 +222,24 @@ KeyParameter FromKm(const KmParam& k) {
     default:
       break;
   }
-  switch (k.tag & kTagTypeMask) {
-    case kTagBool:
+  // The remaining tags map by their flat value kind (the classifier the Rust TA
+  // owns), so the width/signedness table lives in one place. The specific ENUM
+  // tags handled above keep their dedicated union fields; everything else is a
+  // bool, a byte array, a date, a long, or a plain 32-bit integer.
+  switch (teesim_km_tag_value_kind(k.tag)) {
+    case KM_VALUE_BOOL:
       kp.value.set<KeyParameterValue::boolValue>(true);
       break;
-    case kTagBytes:
-    case kTagBignum:
+    case KM_VALUE_BYTES:
       kp.value.set<KeyParameterValue::blob>(std::vector<uint8_t>(k.blob, k.blob + k.blob_len));
       break;
-    case kTagDate:
+    case KM_VALUE_INT64:  // DATE
       kp.value.set<KeyParameterValue::dateTime>(k.int_value);
       break;
-    case kTagUlong:
-    case kTagUlongRep:
+    case KM_VALUE_UINT64:  // ULONG/ULONG_REP
       kp.value.set<KeyParameterValue::longInteger>(k.int_value);
       break;
-    default:
+    default:  // INT32/UINT32 enums and integers
       kp.value.set<KeyParameterValue::integer>(static_cast<int32_t>(k.int_value));
       break;
   }
