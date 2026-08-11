@@ -28,7 +28,9 @@ if [ -z "${NDK_HOME:-}" ]; then
   NDK_HOME="$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/ndk/* 2>/dev/null | sort -V | tail -1)"
 fi
 [ -d "$NDK_HOME" ] || { echo "NDK not found; set NDK_HOME" >&2; exit 1; }
-export ANDROID_NDK_HOME="$NDK_HOME" ANDROID_NDK="$NDK_HOME"
+# Set every NDK variable cargo-ndk consults to the one NDK we resolved, so it neither warns about a
+# mismatch nor silently falls back to a different preinstalled NDK (CI runners preset ANDROID_NDK_ROOT).
+export ANDROID_NDK_HOME="$NDK_HOME" ANDROID_NDK_ROOT="$NDK_HOME" ANDROID_NDK="$NDK_HOME"
 
 # Adapt the reference TA to build under Cargo rather than Soong: the BoringSSL
 # backend (openssl-sys vs bssl-sys, kmr-crypto-boring.patch) and a per-request
@@ -64,6 +66,11 @@ export "${ENVPREFIX}_OPENSSL_STATIC=0"
 export "${ENVPREFIX}_OPENSSL_LIBS=crypto"
 
 cd "$HERE"
-cargo ndk -t "$ABI" --platform "$API" --bindgen build --release -p teesim-km
+# cargo-ndk >= 4 sets bindgen's NDK-sysroot clang args (BINDGEN_EXTRA_CLANG_ARGS_*) by default; older
+# 3.x needs an explicit --bindgen to do the same. openssl-sys bindgens the BoringSSL FFI, so it must
+# see those args either way — detect which cargo-ndk is installed and pass the flag only when it exists.
+BINDGEN=()
+if cargo ndk --help 2>/dev/null | grep -q -- '--bindgen'; then BINDGEN=(--bindgen); fi
+cargo ndk -t "$ABI" --platform "$API" "${BINDGEN[@]}" build --release -p teesim-km
 
 echo "Output: $HERE/target/$TRIPLE/release/libteesim_km.a"
