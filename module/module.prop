@@ -4,3 +4,4 @@ version=${REPLACEMEVER}
 versionCode=${REPLACEMEVERCODE}
 author=JingMatrix
 description=Redirects key attestation for selected apps to an in-process reference KeyMint trusted application.
+updateJson=https://raw.githubusercontent.com/JingMatrix/TEESimulator/dev/module/update.json
