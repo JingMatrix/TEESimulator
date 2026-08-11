@@ -151,25 +151,27 @@ function harvestCard(status, actions = {}) {
     }
     capturedBox.appendChild(el("h3", { text: "Captured" }));
     const rows = el("div", { class: "kv-list" });
+    // Show ONLY genuinely captured values. A field the leaf did not carry (null/undefined/empty) gets no
+    // row at all — never a "—" or any other placeholder. Every value passed here is the raw capture.
     const add = (label, val) => {
-      if (val != null && val !== "" && val !== "—") rows.appendChild(kvRow(label, val));
+      if (val != null && val !== "") rows.appendChild(kvRow(label, String(val)));
     };
 
     add("verifiedBootState", h.verifiedBootState == null ? null : named(h.verifiedBootState) + " (" + h.verifiedBootState + ")");
     add("deviceLocked", h.deviceLocked == null ? null : String(h.deviceLocked));
     if (h.verifiedBootKey) hexRow(rows, "verifiedBootKey", h.verifiedBootKey);
     if (h.verifiedBootHash) hexRow(rows, "verifiedBootHash", h.verifiedBootHash);
-    add("osVersion", show(h.osVersion));
-    add("osPatchLevel", show(h.osPatchLevel));
-    add("vendorPatchLevel", show(h.vendorPatchLevel));
-    add("bootPatchLevel", show(h.bootPatchLevel));
+    add("osVersion", h.osVersion);
+    add("osPatchLevel", h.osPatchLevel);
+    add("vendorPatchLevel", h.vendorPatchLevel);
+    add("bootPatchLevel", h.bootPatchLevel);
     // The device has one real captured level. StrongBox reads level 2 only when it actually works;
-    // otherwise it falls back to the captured level, so both chips honestly show that same value.
+    // otherwise it shows the captured level. Only render when the level was actually captured.
     const sbReal = sb && sbAvailable;
-    add("attestationSecurityLevel", secLevel(sbReal ? 2 : h.attestationSecurityLevel));
-    add("keymasterSecurityLevel", secLevel(sbReal ? 2 : h.keymasterSecurityLevel));
-    add("attestationVersion", show(sbReal ? h.strongBoxAttestationVersion : h.attestationVersion));
-    add("keymasterVersion", show(h.keymasterVersion));
+    add("attestationSecurityLevel", h.attestationSecurityLevel == null ? null : secLevel(sbReal ? 2 : h.attestationSecurityLevel));
+    add("keymasterSecurityLevel", h.keymasterSecurityLevel == null ? null : secLevel(sbReal ? 2 : h.keymasterSecurityLevel));
+    add("attestationVersion", sbReal ? h.strongBoxAttestationVersion : h.attestationVersion);
+    add("keymasterVersion", h.keymasterVersion);
     if (h.moduleHash) hexRow(rows, "moduleHash", h.moduleHash);
     // Device identity — only the ids the TEE actually attested (serial/imei are usually absent, and now
     // shown under Overrides as supplements rather than falsely claimed here).
@@ -260,8 +262,6 @@ function fmtOverrideValue(field, value) {
   if (field === "attestationSecurityLevel" || field === "keymasterSecurityLevel") return secLevel(Number(value));
   return String(value);
 }
-
-const show = (v) => (v == null || v === "" ? "—" : String(v));
 
 function secLevel(n) {
   if (n == null || Number.isNaN(n)) return "—";
