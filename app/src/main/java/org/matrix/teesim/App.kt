@@ -176,7 +176,61 @@ object App {
         val field = ActivityThread::class.java.getDeclaredField("mInitialApplication")
         field.isAccessible = true
         field.set(activityThread, app)
+
+        neutralizeSqliteSettingsReads()
         return app
+    }
+
+    /**
+     * Stop SQLiteDatabase from reading device settings on its first open in this process. Planting
+     * mInitialApplication above (so KeyStore/PackageManager see a context) makes
+     * ActivityThread.currentApplication() non-null, and SQLiteDatabase's constructor then reaches into
+     * settings the way a normal app would. Our process is not an AMS-registered app, so on some ROMs
+     * resolving a provider throws ("Unable to find app for caller"), and every openDatabase() — hence
+     * every KeystoreDb read — fails, leaving the WebUI key list empty. We pre-seed the framework's
+     * cached settings so those lookups never run. Two independent reads have to be defused:
+     *
+     * - OnePlus builds have SQLiteGlobal consult a package list (getPkgs/BenchAppList) to pick a sync
+     *   mode. Seeding sDefaultSyncMode to NORMAL short-circuits that before it touches PackageManager.
+     * - Stock SQLiteCompatibilityWalFlags.initIfNeeded() reads Settings.Global.getString() under only a
+     *   try/finally. Marking the class initialised returns early before it touches settings; its
+     *   defaults (no compat-WAL overrides) are exactly what our read-only snapshot reads want.
+     *
+     * Each step is best effort: a framework that lays the class out differently just keeps the old
+     * behaviour.
+     */
+    private fun neutralizeSqliteSettingsReads() {
+        // OnePlus compares the current package against a BenchAppList to decide the sync mode; seeding
+        // sDefaultSyncMode keeps SQLiteGlobal from calling getPkgs() through PackageManager.
+        try {
+            val syncMode =
+                Class.forName("android.database.sqlite.SQLiteGlobal")
+                    .getDeclaredField("sDefaultSyncMode")
+                    .apply { isAccessible = true }
+            if (syncMode.get(null) == null) {
+                syncMode.set(null, "NORMAL")
+                SystemLogger.info("SQLiteGlobal.sDefaultSyncMode seeded NORMAL (skip getPkgs on DB open)")
+            }
+        } catch (e: Throwable) {
+            SystemLogger.verbose("SQLiteGlobal sync-mode guard not applied: ${e.message}")
+        }
+
+        // Stock AOSP settings dependency: present since API 28, absent on some newer builds.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                val walFlags = Class.forName("android.database.sqlite.SQLiteCompatibilityWalFlags")
+                // Mark initialised so initIfNeeded() returns before reading Settings.Global.
+                walFlags.getDeclaredField("sInitialized").apply { isAccessible = true }.setBoolean(null, true)
+                // Secondary recursion guard, in case a build reorders the initIfNeeded() short-circuit.
+                walFlags
+                    .getDeclaredField("sCallingGlobalSettings")
+                    .apply { isAccessible = true }
+                    .setBoolean(null, true)
+                SystemLogger.info("SQLiteCompatibilityWalFlags neutralised (skip Settings.Global on DB open)")
+            } catch (e: Throwable) {
+                SystemLogger.warning("Could not neutralise SQLiteCompatibilityWalFlags", e)
+            }
+        }
     }
 
     /**
