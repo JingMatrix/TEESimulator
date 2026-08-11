@@ -27,21 +27,25 @@ export function renderSystem(mount, state, actions) {
   mount.appendChild(el("div", { class: "panel-head" }, [el("h1", { class: "panel-title", text: "System" })]));
 
   mount.appendChild(tag(healthCard(status), "health"));
-  mount.appendChild(tag(harvestCard(status), "harvest"));
+  mount.appendChild(tag(harvestCard(status, actions), "harvest"));
   mount.appendChild(tag(updateCard({ update, probed, variant, installing, installError, notesOpen }, actions), "update"));
 }
 
 // Patch ONLY the health + harvest cards from a fresh status snapshot, leaving the
 // interactive Update card (and any open disclosure / variant choice / focus) exactly
 // as it is. The 5 s health poll calls this instead of renderSystem so it never tears
-// down the updater. Returns false when the screen hasn't been fully rendered yet
-// (e.g. probed on boot before it's shown), so the caller can fall back to a full render.
-export function refreshHealth(mount, status) {
+// down the updater. The harvest card is skipped while one of its override inputs is
+// focused, so a re-render never wipes a value mid-edit. Returns false when the screen
+// hasn't been fully rendered yet (e.g. probed on boot before it's shown), so the caller
+// can fall back to a full render.
+export function refreshHealth(mount, status, actions) {
   const oldHealth = mount.querySelector('[data-card="health"]');
   const oldHarvest = mount.querySelector('[data-card="harvest"]');
   if (!oldHealth || !oldHarvest) return false;
   oldHealth.replaceWith(tag(healthCard(status), "health"));
-  oldHarvest.replaceWith(tag(harvestCard(status), "harvest"));
+  const active = document.activeElement;
+  const editing = active && active.tagName === "INPUT" && oldHarvest.contains(active);
+  if (!editing) oldHarvest.replaceWith(tag(harvestCard(status, actions), "harvest"));
   return true;
 }
 
@@ -81,33 +85,33 @@ function healthCard(status) {
 }
 
 // --- harvest summary -----------------------------------------------------
-// A deliberately complete, honest dump of the device state the daemon harvested before
-// any simulation, split into two groups. "Captured" is the RAW values read from the real
-// TEE key generation (verified-boot key/hash shown even when all-zero, lock/boot state,
-// patch and OS levels, security levels, versions). "Fabricated" is the values we override
-// or synthesize for attestation — usually deviceLocked and verifiedBootState, since an
-// unlocked / unverified device fails attestation. A debugging view: it shows what the real
-// TEE reported and exactly what the simulation changes on top of it.
-// The harvest level the user last selected, kept across the 5 s status poll's re-render so a click
-// on StrongBox doesn't snap back to TrustedEnvironment a few seconds later.
+// A deliberately honest dump of the device state the daemon harvested, split into two groups.
+// "Captured" is ONLY what the real TEE key generation actually reported (raw, never overwritten): the
+// verified-boot key/hash — shown even when all-zero — lock/boot state, patch and OS levels, security
+// levels, versions, and the device ids the leaf actually carried. A captured value that we do not present
+// (it has a fabricated counterpart) is struck + red. "Fabricated" is the layer we present on top: values
+// forced for attestation (deviceLocked, Verified), ids read from the OS because the leaf omits them, and,
+// on a device with no working hardware, a synthesized level/version.
+//
+// The fabricated values the user may edit (synthesized level/version, and an all-zero verified-boot
+// key/hash) get an inline editor; the rest are read-only, badged by source. Ids are shown but not editable
+// here — spoofing an id is a per-profile concern in the profile editor (that is what "override" means).
+//
+// The harvest level the user last selected, kept across the status poll so a StrongBox click doesn't snap
+// back to TrustedEnvironment a few seconds later.
 let harvestMode = "tee";
 
-function harvestCard(status) {
+function harvestCard(status, actions = {}) {
   const h = status && status.harvest;
   const card = el("div", { class: "card" }, [el("h2", { text: "Harvest" })]);
   if (!status) { card.appendChild(el("p", { class: "muted", text: "—" })); return card; }
   if (!h) { card.appendChild(el("p", { class: "muted", text: "No harvest record yet." })); return card; }
 
-  const failed = h.failed || h.harvestFailed;
-  // fabricated is a map of JSON field name -> the display value we override it to. The
-  // record's own fields hold the RAW captured values, so the two groups stay honest.
-  const fab = (h.fabricated && typeof h.fabricated === "object" && !Array.isArray(h.fabricated)) ? h.fabricated : {};
-  const fabKeys = Object.keys(fab);
+  const failed = !!h.harvestFailed;
+  // overrides: { field: { value, source, editable, userEdited } }. `value` is the machine form (level
+  // integer, "true", hex); the display formatting per field happens in fmtOverrideValue.
+  const overrides = (h.overrides && typeof h.overrides === "object" && !Array.isArray(h.overrides)) ? h.overrides : {};
   const sbAvailable = !!h.strongBoxAvailable;
-  // The two hardware levels a spoofed key can present. We ASK for TrustedEnvironment (the default), and
-  // always offer StrongBox too; there is no Software chip because we never present Software — a device
-  // with no real TEE has its captured Software level fabricated up to TrustedEnvironment (shown struck
-  // in Captured, corrected in Fabricated). Selecting a chip switches the level-specific rows below.
   const modes = [
     { key: "tee", label: "TrustedEnvironment" },
     { key: "strongbox", label: "StrongBox" },
@@ -122,83 +126,146 @@ function harvestCard(status) {
   if (!failed) card.appendChild(el("div", { class: "harvest-modes" }, chipEls));
 
   const body = el("div", { class: "harvest-body" });
+  // Captured is chip-dependent (StrongBox reads a different level), so it is rebuilt on every chip click.
+  // The Overrides group does not depend on the chip and holds the edit inputs, so it is built once and
+  // left untouched — a chip click never tears down a value being typed.
+  const capturedBox = el("div");
+  body.appendChild(capturedBox);
   card.appendChild(body);
 
   function select(m) {
     harvestMode = m;
     modes.forEach((mode, i) => chipEls[i].classList.toggle("selected", mode.key === m));
-    renderBody();
+    renderCaptured();
   }
 
-  function renderBody() {
-    body.replaceChildren();
+  function renderCaptured() {
+    capturedBox.replaceChildren();
     const sb = harvestMode === "strongbox";
     if (failed) {
-      body.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so every value below is synthesized rather than captured from a real TEE." }));
-    } else if (sb && !sbAvailable) {
-      body.appendChild(el("div", { class: "muted small", text: "StrongBox has no working hardware on this device; keys requested at StrongBox are generated (not patched) at the TEE version." }));
+      capturedBox.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so nothing was captured — every value below is synthesized." }));
+      return;
     }
-
-    // Captured: the real values read from the device, shown honestly — only when actually captured (no
-    // placeholders), and nothing at all when the harvest failed (everything is then fabricated below).
-    // A value we override for attestation (present in `fab`) is shown struck, to signal it is replaced.
-    if (!failed) {
-      body.appendChild(el("h3", { text: "Captured" }));
-      const rows = el("div", { class: "kv-list" });
-      const add = (label, val) => {
-        if (val != null && val !== "" && val !== "—")
-          rows.appendChild(kvRow(label, val, fab[label] !== undefined));
-      };
-
-      add("verifiedBootState", h.verifiedBootState == null ? null : named(h.verifiedBootState) + " (" + h.verifiedBootState + ")");
-      add("deviceLocked", h.deviceLocked == null ? null : String(h.deviceLocked));
-      if (h.verifiedBootKey) hexRow(rows, "verifiedBootKey", h.verifiedBootKey, fab["verifiedBootKey"] !== undefined);
-      if (h.verifiedBootHash) hexRow(rows, "verifiedBootHash", h.verifiedBootHash, fab["verifiedBootHash"] !== undefined);
-      add("osVersion", show(h.osVersion));
-      add("osPatchLevel", show(h.osPatchLevel));
-      add("vendorPatchLevel", show(h.vendorPatchLevel));
-      add("bootPatchLevel", show(h.bootPatchLevel));
-      // The device has one real captured level. StrongBox reads level 2 only when it actually works;
-      // otherwise it falls back to the captured level (Software on a device with no secure element), so
-      // both chips honestly show that same captured value.
-      const sbReal = sb && sbAvailable;
-      add("attestationSecurityLevel", secLevel(sbReal ? 2 : h.attestationSecurityLevel));
-      add("keymasterSecurityLevel", secLevel(sbReal ? 2 : h.keymasterSecurityLevel));
-      add("attestationVersion", show(sbReal ? h.strongBoxAttestationVersion : h.attestationVersion));
-      add("keymasterVersion", show(h.keymasterVersion));
-      if (h.moduleHash) hexRow(rows, "moduleHash", h.moduleHash, fab["moduleHash"] !== undefined);
-      // Device identity captured for ID attestation (only the ids the TEE actually provided).
-      for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
-        if (h[key]) add(key, h[key]);
-      }
-      if (h.harvestedAt) add("harvestedAt", fmtTime(h.harvestedAt));
-      body.appendChild(rows);
+    if (sb && !sbAvailable) {
+      capturedBox.appendChild(el("div", { class: "muted small", text: "StrongBox has no working hardware on this device; keys requested at StrongBox are generated (not patched) at the TEE version." }));
     }
+    capturedBox.appendChild(el("h3", { text: "Captured" }));
+    const rows = el("div", { class: "kv-list" });
+    // Show ONLY genuinely captured values. A field the leaf did not carry (null/undefined/empty) gets no
+    // row at all — never a "—" or any other placeholder. Every value passed here is the raw capture. A
+    // value that has a fabricated counterpart (it is what the device reported but NOT what we present) is
+    // struck + red; the value we present for it shows in the Fabricated group below.
+    const add = (label, val) => {
+      if (val != null && val !== "") rows.appendChild(kvRow(label, String(val), overrides[label] != null));
+    };
 
-    // Fabricated: the values we present to apps in place of the captured ones. The security level is the
-    // level of the chip being viewed — we present both TrustedEnvironment and StrongBox; the versions and
-    // the device ids are the same for both.
-    if (fabKeys.length) {
-      body.appendChild(el("h3", { text: "Fabricated" }));
-      body.appendChild(el("div", { class: "muted small", text: "Values we present to apps in place of the captured ones." }));
-      const fabRows = el("div", { class: "kv-list" });
-      const fabLevel = secLevel(sb ? 2 : 1);
-      for (const key of fabKeys) {
-        const isLevel = key === "attestationSecurityLevel" || key === "keymasterSecurityLevel";
-        fabRows.appendChild(kvRow(key, isLevel ? fabLevel : show(fab[key])));
-      }
-      body.appendChild(fabRows);
+    add("verifiedBootState", h.verifiedBootState == null ? null : named(h.verifiedBootState) + " (" + h.verifiedBootState + ")");
+    add("deviceLocked", h.deviceLocked == null ? null : String(h.deviceLocked));
+    if (h.verifiedBootKey) hexRow(rows, "verifiedBootKey", h.verifiedBootKey, overrides["verifiedBootKey"] != null);
+    if (h.verifiedBootHash) hexRow(rows, "verifiedBootHash", h.verifiedBootHash, overrides["verifiedBootHash"] != null);
+    add("osVersion", h.osVersion);
+    add("osPatchLevel", h.osPatchLevel);
+    add("vendorPatchLevel", h.vendorPatchLevel);
+    add("bootPatchLevel", h.bootPatchLevel);
+    // The device has one real captured level. StrongBox reads level 2 only when it actually works;
+    // otherwise it shows the captured level. Only render when the level was actually captured.
+    const sbReal = sb && sbAvailable;
+    add("attestationSecurityLevel", h.attestationSecurityLevel == null ? null : secLevel(sbReal ? 2 : h.attestationSecurityLevel));
+    add("keymasterSecurityLevel", h.keymasterSecurityLevel == null ? null : secLevel(sbReal ? 2 : h.keymasterSecurityLevel));
+    add("attestationVersion", sbReal ? h.strongBoxAttestationVersion : h.attestationVersion);
+    add("keymasterVersion", h.keymasterVersion);
+    if (h.moduleHash) hexRow(rows, "moduleHash", h.moduleHash, overrides["moduleHash"] != null);
+    // Device identity — only the ids the TEE actually attested (serial/imei are usually absent, and now
+    // shown under Overrides as supplements rather than falsely claimed here).
+    for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
+      if (h[key]) add(key, h[key]);
     }
+    if (h.harvestedAt) add("harvestedAt", fmtTime(h.harvestedAt));
+    capturedBox.appendChild(rows);
   }
 
   select(harvestMode);
+  const ov = overridesGroup(overrides, actions);
+  if (ov) body.appendChild(ov);
   return card;
 }
 
-const show = (v) => (v == null || v === "" ? "—" : String(v));
+// The Fabricated group: every field we present in place of (or absent from) the raw capture, each with a
+// source badge. Editable ones (synthesized level/version, all-zero boot key/hash) get an inline editor.
+function overridesGroup(overrides, actions) {
+  const fields = ORDER.filter((f) => overrides[f]).concat(
+    Object.keys(overrides).filter((f) => !ORDER.includes(f)),
+  );
+  if (!fields.length) return null;
+  const box = el("div");
+  box.appendChild(el("h3", { text: "Fabricated" }));
+  const rows = el("div", { class: "kv-list" });
+  for (const field of fields) rows.appendChild(overrideRow(field, overrides[field], actions));
+  box.appendChild(rows);
+  return box;
+}
+
+// A stable, readable order for the override rows (unknown fields fall to the end).
+const ORDER = [
+  "deviceLocked", "verifiedBootState", "verifiedBootKey", "verifiedBootHash",
+  "attestationSecurityLevel", "keymasterSecurityLevel", "attestationVersion", "keymasterVersion",
+  "moduleHash", "osVersion", "osPatchLevel", "vendorPatchLevel", "bootPatchLevel",
+  "serial", "imei", "imei2", "meid",
+];
+
+const SOURCE_LABEL = { required: "required", supplement: "supplement", synthesized: "synthesized" };
+const HEX_FIELDS = new Set(["verifiedBootKey", "verifiedBootHash", "moduleHash"]);
+
+function overrideRow(field, o, actions) {
+  const badge = el("span", { class: "badge badge-" + (o.source || "required"), text: SOURCE_LABEL[o.source] || o.source || "" });
+  const edited = o.userEdited ? el("span", { class: "badge badge-edited", text: "edited" }) : null;
+  const label = el("span", { class: "kv-label" }, [field, badge, edited]);
+
+  if (!o.editable) {
+    const val = el("span", { class: "kv-val" + (HEX_FIELDS.has(field) ? " mono kv-hex" : ""), text: fmtOverrideValue(field, o.value) });
+    return el("div", { class: "kv" + (HEX_FIELDS.has(field) ? " kv-stack" : "") }, [label, val]);
+  }
+
+  // Editable: an inline editor + Save, and Reset (revert to the computed default) when user-edited.
+  const input = editorFor(field, o.value);
+  const save = el("button", {
+    class: "btn small", type: "button",
+    onclick: () => actions.onSaveOverride && actions.onSaveOverride(field, String(input.value).trim()),
+  }, "Save");
+  const reset = o.userEdited
+    ? el("button", { class: "linklike small", type: "button", onclick: () => actions.onResetOverride && actions.onResetOverride(field) }, "reset")
+    : null;
+  return el("div", { class: "kv kv-stack" }, [label, el("div", { class: "ov-edit" }, [input, save, reset])]);
+}
+
+// The right input for an editable field: a level picker, a version number, or a 64-hex boot value.
+function editorFor(field, value) {
+  if (field === "attestationSecurityLevel" || field === "keymasterSecurityLevel") {
+    const sel = el("select", { class: "ov-input" });
+    for (const [n, name] of [[0, "Software"], [1, "TrustedEnvironment"], [2, "StrongBox"]]) {
+      const opt = el("option", { value: String(n), text: name + " (" + n + ")" });
+      if (String(n) === String(value)) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    return sel;
+  }
+  if (HEX_FIELDS.has(field)) {
+    return el("input", { class: "ov-input mono", type: "text", value: value || "", maxlength: "64",
+      spellcheck: "false", autocapitalize: "none", placeholder: "64 hex chars" });
+  }
+  return el("input", { class: "ov-input", type: "number", inputmode: "numeric", value: value || "" });
+}
+
+// Display formatting for an override's machine value, by field.
+function fmtOverrideValue(field, value) {
+  if (value == null || value === "") return "—";
+  if (field === "verifiedBootState") return named(Number(value)) + " (" + value + ")";
+  if (field === "attestationSecurityLevel" || field === "keymasterSecurityLevel") return secLevel(Number(value));
+  return String(value);
+}
 
 function secLevel(n) {
-  if (n == null) return "—";
+  if (n == null || Number.isNaN(n)) return "—";
   const names = ["Software", "TrustedEnvironment", "StrongBox"];
   return (typeof n === "number" && names[n] ? names[n] : String(n)) + " (" + n + ")";
 }
@@ -212,7 +279,7 @@ function kvRow(label, val, replaced) {
 
 // A verified-boot key / hash / module hash: base64 in the record, shown as wrapping hex
 // so the raw bytes are visible. An all-zero value is flagged (it is what an unlocked
-// device reports, and worth spotting).
+// device reports, and worth spotting). `replaced` struck + red when it has a fabricated counterpart.
 function hexRow(rows, label, b64, replaced) {
   const hex = b64 ? b64ToHex(b64) : null;
   const allZero = hex != null && hex.length > 0 && /^0+$/.test(hex);

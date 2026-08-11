@@ -62,6 +62,16 @@ object KeyAdmin {
     fun start(record: Harvester.Record) {
         harvest = record
         token = newToken()
+        return startInner()
+    }
+
+    /** Swap in a freshly re-merged record after an overrides.json change, so /status reflects the live
+     *  override layer without restarting the daemon. */
+    fun updateHarvest(record: Harvester.Record) {
+        harvest = record
+    }
+
+    private fun startInner() {
         try {
             Const.adminTokenFile.parentFile?.mkdirs()
             Const.adminTokenFile.writeText(token)
@@ -246,7 +256,7 @@ object KeyAdmin {
     private fun listKeys(): JSONObject {
         val ks = androidKeyStore()
         val keys = JSONArray()
-        val ours = harvest?.verifiedBootKey
+        val ours = harvest?.effectiveBootKey()
         val aliases = ks.aliases()
         while (aliases.hasMoreElements()) {
             val alias = aliases.nextElement()

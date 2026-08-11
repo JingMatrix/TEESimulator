@@ -23,8 +23,14 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 object App {
 
     @Volatile private lateinit var appContext: Context
+    // The frozen captured harvest (raw device state + computed default overrides). Never re-merged.
+    @Volatile private lateinit var capturedBase: Harvester.Record
+    // capturedBase with the user's overrides.json layered on — what we present and push. Recomputed on
+    // every resolveAndPush, so an edit to overrides.json (which trips the DATA_DIR watcher) takes effect.
     @Volatile private lateinit var harvest: Harvester.Record
     @Volatile private var lastGoodConfig: ConfigStore.Config? = null
+    // The ro.boot.vbmeta.* values we last pushed to resetprop, so we only re-set them when they change.
+    @Volatile private var lastBootProps: Map<String, String> = emptyMap()
     // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
     private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -75,8 +81,10 @@ object App {
 
             Packages.init(appContext)
 
-            // Real-key harvest (frozen verifiedBoot*), persisted to harvested.json.
-            harvest = Harvester.run(appContext)
+            // Real-key harvest (frozen verifiedBoot*), persisted to harvested.json. Then layer the user's
+            // overrides.json over it for the record we actually present.
+            capturedBase = Harvester.run(appContext)
+            harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
 
             // Key-management endpoint for the WebUI.
             KeyAdmin.start(harvest)
@@ -177,6 +185,12 @@ object App {
      */
     @Synchronized
     private fun resolveAndPush() {
+        // Re-layer the user's overrides.json over the frozen capture — an override edit trips the same
+        // DATA_DIR watcher that calls us, so this is where a changed override becomes live. Refresh the
+        // record the WebUI reads, and reflect any boot key/hash override into ro.boot.vbmeta.*.
+        harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
+        KeyAdmin.updateHarvest(harvest)
+        applyBootProps(harvest)
         try {
             lastGoodConfig = ConfigStore.load()
         } catch (e: ConfigStore.ConfigException) {
@@ -196,6 +210,24 @@ object App {
         } catch (e: Exception) {
             SystemLogger.error("Failed to resolve/push config", e)
         }
+    }
+
+    /**
+     * When a verifiedBootKey/Hash override is active (only possible when the device reported an all-zero,
+     * unlocked boot value), reflect the spoofed value into the matching ro.boot.vbmeta.* property so that
+     * anything reading those props directly sees what attestation presents. Only re-sets a property when
+     * its value changed, so the package/config watchers don't resetprop on every unrelated event.
+     */
+    private fun applyBootProps(h: Harvester.Record) {
+        val want =
+            Harvester.BOOT_PROP.mapNotNull { (field, prop) ->
+                h.overrides[field]?.value?.takeIf { it.isNotEmpty() }?.let { prop to it }
+            }.toMap()
+        if (want == lastBootProps) return
+        for ((prop, value) in want) {
+            if (lastBootProps[prop] != value) SysProp.set(prop, value)
+        }
+        lastBootProps = want
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */

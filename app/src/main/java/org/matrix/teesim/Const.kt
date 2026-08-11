@@ -9,6 +9,9 @@ object Const {
 
     val configFile = File(DATA_DIR, "config.json")
     val harvestedFile = File(DATA_DIR, "harvested.json")
+    /** User edits to the harvest override layer (device ids, synthesized levels, an all-zero boot key).
+     *  Written by the WebUI, merged over the frozen captured harvest on every push. */
+    val overridesFile = File(DATA_DIR, "overrides.json")
     val adminTokenFile = File(DATA_DIR, "admin.token")
 
     /** keystore's uid; the control socket only sends the keybox once the peer is it. */

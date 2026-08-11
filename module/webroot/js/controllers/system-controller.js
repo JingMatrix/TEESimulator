@@ -13,10 +13,14 @@
 
 import { getStatus } from "../data/status.js";
 import { keyAdmin } from "../data/keyadmin.js";
+import * as overridesIo from "../data/overrides-io.js";
 import { renderSystem, refreshHealth as patchHealthCards } from "../ui/system-view.js";
 import { toast, confirmDialog } from "../ui/dom.js";
 
 const POLL_MS = 5000;
+// How long to wait after writing overrides.json before re-reading status: the daemon's DATA_DIR watcher
+// re-merges and re-pushes, then /status reflects the new override layer. The 5 s poll is the backstop.
+const OVERRIDE_SETTLE_MS = 600;
 
 export function create(mount, opts = {}) {
   const onHealth = opts.onHealth || (() => {});
@@ -58,7 +62,23 @@ export function create(mount, opts = {}) {
     } finally {
       inFlight = false;
     }
-    if (!patchHealthCards(mount, status)) render();
+    if (!patchHealthCards(mount, status, actions)) render();
+  }
+
+  // Persist one override edit to overrides.json, then let the daemon re-merge and re-push before we
+  // re-read status. Writing an empty value (or reset) removes the key so the field falls back to the
+  // daemon's computed default. Never throws to the view — surfaces failures as a toast.
+  async function writeOverride(field, value) {
+    const cur = await overridesIo.load();
+    if (!cur.ok) { toast("Cannot read overrides.json: " + cur.error); return; }
+    const next = { ...cur.overrides };
+    if (value == null || value === "") delete next[field];
+    else next[field] = value;
+    const res = await overridesIo.save(next);
+    if (!res.ok) { toast("Save failed: " + res.error); return; }
+    toast("Fabricated value saved — applying…");
+    await new Promise((r) => setTimeout(r, OVERRIDE_SETTLE_MS));
+    await refreshHealth();
   }
 
   // Canary probe: sets the update state and the nav badge. A daemon that is down or
@@ -80,6 +100,10 @@ export function create(mount, opts = {}) {
   }
 
   const actions = {
+    // Harvest override edits (System screen "Overrides" group). Both write overrides.json and refresh.
+    onSaveOverride(field, value) { writeOverride(field, value); },
+    onResetOverride(field) { writeOverride(field, ""); },
+
     onSelectVariant(v) {
       if (v === variant) return;
       variant = v;

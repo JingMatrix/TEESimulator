@@ -81,11 +81,71 @@ object Harvester {
     private const val TAG_ATTESTATION_ID_MODEL = 717
     private const val TAG_ATTESTATION_ID_SECOND_IMEI = 723
 
+    /** Where an override value comes from, which drives its badge and editability in the WebUI. */
+    enum class OverrideSource {
+        /** Structurally forced for attestation to pass (deviceLocked, verifiedBootState, and the boot
+         *  key/hash when the device reported an all-zero one). Locked, except the boot key/hash. */
+        REQUIRED,
+        /** A real device value the attested leaf did not carry (imei/meid/serial), read from the OS. */
+        SUPPLEMENT,
+        /** Synthesized because there is no working hardware (level/version on a software-only device). */
+        SYNTHESIZED,
+    }
+
+    /** One field we present to apps in place of the raw captured value. `value` is the display/wire form
+     *  (hex for the boot key/hash, the plain string otherwise). `editable` is whether the WebUI may change
+     *  it; `userEdited` is whether the live value came from the user's overrides.json rather than the
+     *  daemon's computed default. */
+    data class Override(
+        val value: String,
+        val source: OverrideSource,
+        val editable: Boolean,
+        val userEdited: Boolean = false,
+    )
+
+    /** Device ids the leaf omits but we read from the OS. Shown for transparency but NOT editable here —
+     *  spoofing an id is a per-profile concern (Resolver.resolveProfile lets a profile override each). */
+    private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid")
+    /** Level/version values we synthesize on a device with no working hardware — editable. */
+    private val SYNTHESIZED_FIELDS =
+        setOf(
+            "attestationSecurityLevel",
+            "keymasterSecurityLevel",
+            "attestationVersion",
+            "keymasterVersion",
+        )
+    /** The two boot fields the user may edit ONLY when the captured value is all-zero (unlocked device);
+     *  applying an override for either also resetprops the matching ro.boot.vbmeta.* system property. */
+    val BOOT_PROP = mapOf(
+        "verifiedBootKey" to "ro.boot.vbmeta.public_key_digest",
+        "verifiedBootHash" to "ro.boot.vbmeta.digest",
+    )
+
+    private fun sourceFor(field: String): OverrideSource =
+        when {
+            field in SUPPLEMENT_IDS -> OverrideSource.SUPPLEMENT
+            field in SYNTHESIZED_FIELDS -> OverrideSource.SYNTHESIZED
+            else -> OverrideSource.REQUIRED
+        }
+
+    /** Whether a field's override may be edited in the WebUI. Boot key/hash are editable only when the
+     *  device reported an all-zero (unlocked) value; everything required-but-not-boot stays locked. */
+    private fun editableFor(field: String, bootKeyRaw: ByteArray, bootHashRaw: ByteArray): Boolean =
+        when (field) {
+            in SYNTHESIZED_FIELDS -> true
+            "verifiedBootKey" -> !isReal(bootKeyRaw)
+            "verifiedBootHash" -> !isReal(bootHashRaw)
+            else -> false // SUPPLEMENT ids are shown only; per-profile config spoofs them
+        }
+
+    private fun editableFor(field: String, captured: Record): Boolean =
+        editableFor(field, captured.verifiedBootKey, captured.verifiedBootHash)
+
     /** One harvested (or fallback) device-identity record. */
     data class Record(
         val harvestFailed: Boolean,
-        val verifiedBootKey: ByteArray, // 32 bytes, frozen
-        val verifiedBootHash: ByteArray, // 32 bytes, frozen
+        val verifiedBootKey: ByteArray, // 32 bytes, RAW as captured (all-zero on an unlocked device)
+        val verifiedBootHash: ByteArray, // 32 bytes, RAW as captured
         val deviceLocked: Boolean,
         val verifiedBootState: Int, // 0 Verified,1 SelfSigned,2 Unverified,3 Failed
         val attestationSecurityLevel: Int, // 0 SW,1 TEE,2 SB
@@ -104,8 +164,9 @@ object Harvester {
         val vendorPatchLevel: Int?, // YYYYMMDD
         val bootPatchLevel: Int?, // YYYYMMDD
         val moduleHash: ByteArray?,
-        // Device-identity values captured from the attested leaf (empty when the TEE
-        // does not provision that id). Provisioned back so ID attestation can succeed.
+        // Device-identity values captured from the attested leaf, RAW — blank when the leaf did not
+        // carry that id (device-properties attestation omits imei/meid/serial). The value we actually
+        // present for a blank one lives in `overrides` (source SUPPLEMENT), never written back here.
         val brand: String,
         val device: String,
         val product: String,
@@ -115,12 +176,45 @@ object Harvester {
         val imei: String,
         val meid: String,
         val imei2: String,
-        // JSON field names whose value we synthesize (fabricate) for attestation, mapped to
-        // the display value we override them to. The record itself keeps the RAW captured
-        // values; this map lets the WebUI show the overrides separately and honestly.
-        val fabricated: Map<String, String>,
+        // The values we present to apps in place of the raw captured ones, keyed by JSON field name.
+        // The record keeps the RAW capture in the fields above; this map is the honest override layer
+        // the WebUI shows separately (and, for editable fields, lets the user change via overrides.json).
+        val overrides: Map<String, Override>,
         val harvestedAt: Long,
-    )
+    ) {
+        /** The string we actually present for a field: the override when one is active, else the raw
+         *  capture. A blank result (e.g. an unsupplemented, unattested id) means "decline that field". */
+        fun effective(field: String): String =
+            overrides[field]?.value ?: capturedString(field)
+
+        /** The integer we present for a numeric field, or [fallback] when neither override nor capture
+         *  yields a parseable value. */
+        fun effectiveInt(field: String, fallback: Int): Int =
+            overrides[field]?.value?.toIntOrNull() ?: capturedString(field).toIntOrNull() ?: fallback
+
+        /** The 32-byte boot key/hash we actually present: the override (hex) when active — guaranteed
+         *  non-zero — else the raw capture. Used by the config push and ownership check, which must
+         *  never see the all-zero value an unlocked device reports. */
+        fun effectiveBootKey(): ByteArray = effectiveBoot("verifiedBootKey", verifiedBootKey)
+
+        fun effectiveBootHash(): ByteArray = effectiveBoot("verifiedBootHash", verifiedBootHash)
+
+        private fun effectiveBoot(field: String, captured: ByteArray): ByteArray =
+            overrides[field]?.value?.let { hexBytes(it) } ?: captured
+
+        private fun capturedString(field: String): String =
+            when (field) {
+                "serial" -> serial
+                "imei" -> imei
+                "imei2" -> imei2
+                "meid" -> meid
+                "attestationSecurityLevel" -> attestationSecurityLevel.toString()
+                "keymasterSecurityLevel" -> keymasterSecurityLevel.toString()
+                "attestationVersion" -> attestationVersion.toString()
+                "keymasterVersion" -> keymasterVersion.toString()
+                else -> ""
+            }
+    }
 
     // --- Fabricated attestation identity (software-only / TEE-broken devices) --------------------
     // When the device produces no working HARDWARE attestation — a software-only emulator, or a device
@@ -165,20 +259,70 @@ object Harvester {
             else -> attestationVersion
         }
 
-    private fun secLevelName(n: Int): String =
-        (arrayOf("Software", "TrustedEnvironment", "StrongBox").getOrNull(n) ?: "$n") + " ($n)"
+    /** Build the typed default overrides from a raw field->value map, deciding editability against the
+     *  raw captured boot key/hash. `userEdited` is false: these are the daemon's computed defaults. Values
+     *  are the machine form (the level integer, "true", hex) — the WebUI formats them for display. */
+    private fun typedOverrides(
+        values: Map<String, String>,
+        bootKeyRaw: ByteArray,
+        bootHashRaw: ByteArray,
+    ): Map<String, Override> =
+        values.mapValues { (field, value) ->
+            Override(value, sourceFor(field), editableFor(field, bootKeyRaw, bootHashRaw), userEdited = false)
+        }
 
-    /** When there is no working hardware, record the fabricated TrustedEnvironment level + versions in
-     *  the `fabricated` map so the WebUI presents what we hand apps. Raw captured fields stay untouched. */
+    /** Add or replace one computed-default override, keeping the raw captured fields untouched. */
+    private fun Record.withOverride(field: String, value: String): Record =
+        copy(
+            overrides =
+                overrides + (field to Override(value, sourceFor(field), editableFor(field, this))),
+        )
+
+    /**
+     * Layer the user's overrides.json (field -> value) over the daemon's computed defaults, honoring only
+     * editable fields (synthesized levels/versions, and an all-zero boot key/hash) — a hand-edited id or
+     * required field is ignored, since ids are a per-profile concern. A blank value resets a field to its
+     * computed default; an out-of-range value is dropped with a warning. This is what the daemon pushes.
+     */
+    fun applyUserOverrides(base: Record, user: Map<String, String>): Record {
+        if (user.isEmpty()) return base
+        val merged = base.overrides.toMutableMap()
+        for ((field, raw) in user) {
+            if (!editableFor(field, base)) {
+                SystemLogger.info("override: ignoring non-editable field '$field'")
+                continue
+            }
+            val value = raw.trim()
+            when {
+                value.isEmpty() -> Unit // reset: keep the computed default already in `merged`
+                !validOverride(field, value) ->
+                    SystemLogger.warning("override: ignoring invalid $field='$value'")
+                else -> merged[field] = Override(value, sourceFor(field), true, userEdited = true)
+            }
+        }
+        return base.copy(overrides = merged)
+    }
+
+    /** Per-field validation for a user override value (machine form): 64 hex chars for a boot key/hash,
+     *  an in-range level/version. Keeps a bad hand-edit from ever reaching the config push. */
+    private fun validOverride(field: String, value: String): Boolean =
+        when (field) {
+            "verifiedBootKey", "verifiedBootHash" -> hexBytes(value) != null
+            "attestationSecurityLevel", "keymasterSecurityLevel" -> value.toIntOrNull() in 0..2
+            "attestationVersion", "keymasterVersion" -> (value.toIntOrNull() ?: -1) in 1..100_000
+            else -> true
+        }
+
+    /** When there is no working hardware, record the synthesized TrustedEnvironment level + versions as
+     *  overrides so the WebUI presents what we hand apps. Raw captured fields stay untouched. */
     private fun markFabricatedAttestation(r: Record): Record {
         if (!noWorkingHardware(r)) return r
         val (level, version) = effectiveAttestation(r)
-        val fab = r.fabricated.toMutableMap()
-        fab["attestationSecurityLevel"] = secLevelName(level)
-        fab["keymasterSecurityLevel"] = secLevelName(level)
-        fab["attestationVersion"] = version.toString()
-        fab["keymasterVersion"] = keymasterVersionFor(version).toString()
-        return r.copy(fabricated = fab)
+        return r
+            .withOverride("attestationSecurityLevel", level.toString())
+            .withOverride("keymasterSecurityLevel", level.toString())
+            .withOverride("attestationVersion", version.toString())
+            .withOverride("keymasterVersion", keymasterVersionFor(version).toString())
     }
 
     /**
@@ -204,8 +348,10 @@ object Harvester {
                             verifiedBootHash =
                                 if (isReal(existing.verifiedBootHash)) existing.verifiedBootHash
                                 else fresh.verifiedBootHash,
-                            fabricated =
-                                fresh.fabricated.filterKeys { k ->
+                            // When we keep existing's real captured boot value, drop fresh's synthesized
+                            // override for it — the captured value is now honest and needs no override.
+                            overrides =
+                                fresh.overrides.filterKeys { k ->
                                     !(k == "verifiedBootKey" && isReal(existing.verifiedBootKey)) &&
                                         !(k == "verifiedBootHash" && isReal(existing.verifiedBootHash))
                                 },
@@ -264,15 +410,16 @@ object Harvester {
         SystemLogger.info(
             "Harvest telephony IDs: imei='$imei' secondImei='$imei2' meid='$meid' serial='$serial'"
         )
-        // These ids are not carried by device-properties attestation; when the attested leaf had no
-        // value (r.<id> blank) and we supplemented one, it is fabricated rather than captured — record
-        // that so the WebUI shows it honestly. A device that DID attest an id keeps it as captured.
-        val fab = r.fabricated.toMutableMap()
-        if (r.imei.isBlank() && imei.isNotBlank()) fab["imei"] = imei
-        if (r.imei2.isBlank() && imei2.isNotBlank()) fab["imei2"] = imei2
-        if (r.meid.isBlank() && meid.isNotBlank()) fab["meid"] = meid
-        if (r.serial.isBlank() && serial.isNotBlank()) fab["serial"] = serial
-        return r.copy(imei = imei, imei2 = imei2, meid = meid, serial = serial, fabricated = fab)
+        // These ids are not carried by device-properties attestation. When the attested leaf had no value
+        // (r.<id> blank) and we read one from the OS, it is a SUPPLEMENT override — the RAW captured field
+        // stays blank so "Captured" never claims we attested it. A device that DID attest an id keeps it
+        // as a real capture (no override), and the user can still spoof it per-profile.
+        var out = r
+        if (r.imei.isBlank() && imei.isNotBlank()) out = out.withOverride("imei", imei)
+        if (r.imei2.isBlank() && imei2.isNotBlank()) out = out.withOverride("imei2", imei2)
+        if (r.meid.isBlank() && meid.isNotBlank()) out = out.withOverride("meid", meid)
+        if (r.serial.isBlank() && serial.isNotBlank()) out = out.withOverride("serial", serial)
+        return out
     }
 
     /**
@@ -508,17 +655,28 @@ object Harvester {
         }
 
         val fab = mutableMapOf<String, String>()
-        // Always attest a locked, Verified device (an unlocked / unverified state fails
-        // attestation by construction). The record keeps the RAW captured values; these two
-        // are fabricated only when the device's real value differs — a genuinely locked,
-        // Verified device reports them captured, so the map stays empty for them.
+        // Always attest a locked, Verified device (an unlocked / unverified state fails attestation by
+        // construction). The record keeps the RAW captured values; these two get an override only when the
+        // device's real value differs — a genuinely locked, Verified device needs none. Values are the
+        // machine form ("true", "0"); the WebUI formats them for display.
         if (!deviceLocked) fab["deviceLocked"] = "true"
-        if (verifiedBootState != 0) fab["verifiedBootState"] = "Verified (0)"
+        if (verifiedBootState != 0) fab["verifiedBootState"] = "0"
 
-        // When the leaf omits MODULE_HASH (older HAL versions do), deduce it from /apex exactly the
-        // way Android's attestation and keystore2 build it, so a key attested with it still verifies.
-        // A deduced value is not captured from our attestation, so it is marked fabricated.
-        val moduleHash = capturedModuleHash ?: computeModuleHash().also { fab["moduleHash"] = it.toHex() }
+        // The RAW captured boot key/hash, exactly as the leaf reported them (all-zero on an unlocked
+        // device, or absent). We keep the raw bytes in the record and, when they are not usable, add an
+        // editable override carrying the value we actually present (from ro.boot.vbmeta.* or a stable
+        // fallback). The override is editable precisely because the capture was all-zero — see editableFor.
+        val rawBootKey = verifiedBootKey ?: ByteArray(32)
+        val rawBootHash = verifiedBootHash ?: ByteArray(32)
+        defaultBootOverride("ro.boot.vbmeta.public_key_digest", ::fallbackBootKey, rawBootKey)
+            ?.let { fab["verifiedBootKey"] = it }
+        defaultBootOverride("ro.boot.vbmeta.digest", ::fallbackBootHash, rawBootHash)
+            ?.let { fab["verifiedBootHash"] = it }
+
+        // When the leaf omits MODULE_HASH (older HAL versions do), deduce it from /apex exactly the way
+        // Android's attestation and keystore2 build it, so a key attested with it still verifies. The RAW
+        // capture stays null; the deduced value is an override, shown honestly as synthesized.
+        if (capturedModuleHash == null) fab["moduleHash"] = computeModuleHash().toHex()
 
         // Device-identity ids parsed per tag. An empty value means the tag was ABSENT from the leaf —
         // device-properties attestation omits imei/meid/serial — not a parse failure.
@@ -540,10 +698,8 @@ object Harvester {
         )
         return Record(
             harvestFailed = false,
-            verifiedBootKey =
-                resolveBoot(verifiedBootKey, "ro.boot.vbmeta.public_key_digest", ::fallbackBootKey, fab, "verifiedBootKey"),
-            verifiedBootHash =
-                resolveBoot(verifiedBootHash, "ro.boot.vbmeta.digest", ::fallbackBootHash, fab, "verifiedBootHash"),
+            verifiedBootKey = rawBootKey,
+            verifiedBootHash = rawBootHash,
             deviceLocked = deviceLocked,
             verifiedBootState = verifiedBootState,
             attestationSecurityLevel = attestSecLevel,
@@ -556,7 +712,7 @@ object Harvester {
             osPatchLevel = osPatchLevel,
             vendorPatchLevel = vendorPatchLevel,
             bootPatchLevel = bootPatchLevel,
-            moduleHash = moduleHash,
+            moduleHash = capturedModuleHash,
             brand = brand,
             device = device,
             product = product,
@@ -566,7 +722,7 @@ object Harvester {
             imei = imei,
             meid = meid,
             imei2 = imei2,
-            fabricated = fab,
+            overrides = typedOverrides(fab, rawBootKey, rawBootHash),
             harvestedAt = System.currentTimeMillis(),
         )
     }
@@ -768,20 +924,14 @@ object Harvester {
      * stable fallback. Never all-zeros — that is what an unlocked device reports and
      * it fails attestation.
      */
-    private fun resolveBoot(
-        harvested: ByteArray?,
-        prop: String,
-        fallback: () -> ByteArray,
-        fabricated: MutableMap<String, String>,
-        name: String,
-    ): ByteArray {
-        if (isReal(harvested)) return harvested!!
-        hexBytes(DeviceProps.prop(prop, ""))?.let {
-            return it
-        }
-        val synthesized = fallback()
-        fabricated[name] = synthesized.toHex()
-        return synthesized
+    /** The value to present for a boot key/hash when the RAW capture is unusable (all-zero on an unlocked
+     *  device, or absent): the ro.boot.vbmeta.* property if it holds a real 32-byte value, else a stable
+     *  synthesized fallback — returned as hex. Null when the capture is already real, so no override is
+     *  recorded and the honest captured value stands. */
+    private fun defaultBootOverride(prop: String, fallback: () -> ByteArray, raw: ByteArray): String? {
+        if (isReal(raw)) return null
+        hexBytes(DeviceProps.prop(prop, ""))?.let { return it.toHex() }
+        return fallback().toHex()
     }
 
     /** A usable boot value: exactly 32 bytes and not all zero. */
@@ -804,12 +954,16 @@ object Harvester {
         val osPatchLevel = DeviceProps.toYyyymm(DeviceProps.systemSecurityPatch())
         val vendorPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
         val bootPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
+        // Harvest failed: nothing was captured, so every field is raw-empty (all-zero boot bytes, null
+        // moduleHash) and every attestation-critical value we present lives in `overrides`. The WebUI
+        // hides the Captured group entirely when harvestFailed, so only these synthesized values show.
+        val zero = ByteArray(32)
         return Record(
             harvestFailed = true,
-            verifiedBootKey = fallbackBootKey(),
-            verifiedBootHash = fallbackBootHash(),
-            deviceLocked = true,
-            verifiedBootState = 0, // Verified
+            verifiedBootKey = zero,
+            verifiedBootHash = zero,
+            deviceLocked = false,
+            verifiedBootState = 2, // Unverified — nothing was captured
             attestationSecurityLevel = Const.SECLEVEL_TEE,
             keymasterSecurityLevel = Const.SECLEVEL_TEE,
             strongBoxAvailable = false, // no working TEE ⇒ no StrongBox either
@@ -820,7 +974,7 @@ object Harvester {
             osPatchLevel = osPatchLevel,
             vendorPatchLevel = vendorPatchLevel,
             bootPatchLevel = bootPatchLevel,
-            moduleHash = computeModuleHash(),
+            moduleHash = null,
             brand = buildId("ro.product.brand", Build.BRAND),
             device = buildId("ro.product.device", Build.DEVICE),
             product = buildId("ro.product.name", Build.PRODUCT),
@@ -830,18 +984,22 @@ object Harvester {
             imei = "",
             meid = "",
             imei2 = "",
-            // No working TEE: every attestation-critical value is synthesized.
-            fabricated =
-                mapOf(
-                    "deviceLocked" to "true",
-                    "verifiedBootState" to "Verified (0)",
-                    "verifiedBootKey" to fallbackBootKey().toHex(),
-                    "verifiedBootHash" to fallbackBootHash().toHex(),
-                    "osVersion" to osVersion.toString(),
-                    "osPatchLevel" to osPatchLevel.toString(),
-                    "vendorPatchLevel" to vendorPatchLevel.toString(),
-                    "bootPatchLevel" to bootPatchLevel.toString(),
-                    "moduleHash" to computeModuleHash().toHex(),
+            // No working TEE: every attestation-critical value is synthesized (machine form values).
+            overrides =
+                typedOverrides(
+                    mapOf(
+                        "deviceLocked" to "true",
+                        "verifiedBootState" to "0",
+                        "verifiedBootKey" to fallbackBootKey().toHex(),
+                        "verifiedBootHash" to fallbackBootHash().toHex(),
+                        "osVersion" to osVersion.toString(),
+                        "osPatchLevel" to osPatchLevel.toString(),
+                        "vendorPatchLevel" to vendorPatchLevel.toString(),
+                        "bootPatchLevel" to bootPatchLevel.toString(),
+                        "moduleHash" to computeModuleHash().toHex(),
+                    ),
+                    zero,
+                    zero,
                 ),
             harvestedAt = System.currentTimeMillis(),
         )
@@ -882,7 +1040,7 @@ object Harvester {
 
     fun toJson(r: Record): JSONObject =
         JSONObject().apply {
-            put("version", 1)
+            put("version", 2)
             put("harvestFailed", r.harvestFailed)
             put("frozen", !r.harvestFailed)
             put("verifiedBootKey", b64.encodeToString(r.verifiedBootKey))
@@ -909,15 +1067,34 @@ object Harvester {
             put("imei", r.imei)
             put("meid", r.meid)
             put("imei2", r.imei2)
-            put("fabricated", JSONObject(r.fabricated as Map<*, *>))
+            // The override layer, keyed by field. Each carries the machine value we present plus the
+            // metadata the WebUI needs: source (badge), editable (show an input), userEdited (came from
+            // overrides.json vs computed default). The captured fields above stay raw and honest.
+            put(
+                "overrides",
+                JSONObject().apply {
+                    for ((field, ov) in r.overrides) {
+                        put(
+                            field,
+                            JSONObject()
+                                .put("value", ov.value)
+                                .put("source", ov.source.name.lowercase())
+                                .put("editable", ov.editable)
+                                .put("userEdited", ov.userEdited),
+                        )
+                    }
+                },
+            )
             put("harvestedAt", r.harvestedAt)
         }
 
-    private fun fromJson(o: JSONObject): Record =
-        Record(
+    private fun fromJson(o: JSONObject): Record {
+        val bootKey = b64d.decode(o.getString("verifiedBootKey"))
+        val bootHash = b64d.decode(o.getString("verifiedBootHash"))
+        return Record(
             harvestFailed = o.optBoolean("harvestFailed", false),
-            verifiedBootKey = b64d.decode(o.getString("verifiedBootKey")),
-            verifiedBootHash = b64d.decode(o.getString("verifiedBootHash")),
+            verifiedBootKey = bootKey,
+            verifiedBootHash = bootHash,
             deviceLocked = o.optBoolean("deviceLocked", true),
             verifiedBootState = o.optInt("verifiedBootState", 0),
             attestationSecurityLevel = o.optInt("attestationSecurityLevel", Const.SECLEVEL_TEE),
@@ -941,12 +1118,42 @@ object Harvester {
             imei = o.optString("imei", ""),
             meid = o.optString("meid", ""),
             imei2 = o.optString("imei2", ""),
-            fabricated =
-                o.optJSONObject("fabricated")?.let { obj ->
-                    obj.keys().asSequence().associateWith { obj.getString(it) }
-                } ?: emptyMap(),
+            overrides = readOverrides(o, bootKey, bootHash),
             harvestedAt = o.optLong("harvestedAt", System.currentTimeMillis()),
         )
+    }
+
+    /** Rebuild the typed override map from persisted JSON: the v2 `overrides` object, or a legacy v1
+     *  `fabricated` value-map (migrated by re-deriving source/editability). Absent → empty. */
+    private fun readOverrides(o: JSONObject, bootKeyRaw: ByteArray, bootHashRaw: ByteArray): Map<String, Override> {
+        o.optJSONObject("overrides")?.let { obj ->
+            val m = LinkedHashMap<String, Override>()
+            for (field in obj.keys()) {
+                val e = obj.optJSONObject(field)
+                if (e != null) {
+                    val src =
+                        runCatching { OverrideSource.valueOf(e.optString("source", "required").uppercase()) }
+                            .getOrDefault(sourceFor(field))
+                    m[field] =
+                        Override(
+                            e.optString("value", ""),
+                            src,
+                            e.optBoolean("editable", editableFor(field, bootKeyRaw, bootHashRaw)),
+                            e.optBoolean("userEdited", false),
+                        )
+                }
+            }
+            return m
+        }
+        o.optJSONObject("fabricated")?.let { obj ->
+            return typedOverrides(
+                obj.keys().asSequence().associateWith { obj.getString(it) },
+                bootKeyRaw,
+                bootHashRaw,
+            )
+        }
+        return emptyMap()
+    }
 
     private fun JSONObject.optIntOrNull(k: String): Int? =
         if (isNull(k) || !has(k)) null else optInt(k)
