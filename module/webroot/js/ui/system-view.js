@@ -88,14 +88,14 @@ function healthCard(status) {
 // A deliberately honest dump of the device state the daemon harvested, split into two groups.
 // "Captured" is ONLY what the real TEE key generation actually reported (raw, never overwritten): the
 // verified-boot key/hash — shown even when all-zero — lock/boot state, patch and OS levels, security
-// levels, versions, and the device ids the leaf actually carried. "Overrides" is the layer we present
-// on top: values forced for attestation (deviceLocked, Verified), ids read from the OS because the leaf
-// omits them, and, on a device with no working hardware, a synthesized level/version. A value is never
-// shown in both groups — Captured stays truthful, Overrides shows exactly what we change.
+// levels, versions, and the device ids the leaf actually carried. A captured value that we do not present
+// (it has a fabricated counterpart) is struck + red. "Fabricated" is the layer we present on top: values
+// forced for attestation (deviceLocked, Verified), ids read from the OS because the leaf omits them, and,
+// on a device with no working hardware, a synthesized level/version.
 //
-// The overrides the user may edit (synthesized level/version, and an all-zero verified-boot key/hash) get
-// an inline editor; the rest are read-only, badged by source. Ids are shown but not editable here —
-// spoofing an id is a per-profile concern in the profile editor.
+// The fabricated values the user may edit (synthesized level/version, and an all-zero verified-boot
+// key/hash) get an inline editor; the rest are read-only, badged by source. Ids are shown but not editable
+// here — spoofing an id is a per-profile concern in the profile editor (that is what "override" means).
 //
 // The harvest level the user last selected, kept across the status poll so a StrongBox click doesn't snap
 // back to TrustedEnvironment a few seconds later.
@@ -152,15 +152,17 @@ function harvestCard(status, actions = {}) {
     capturedBox.appendChild(el("h3", { text: "Captured" }));
     const rows = el("div", { class: "kv-list" });
     // Show ONLY genuinely captured values. A field the leaf did not carry (null/undefined/empty) gets no
-    // row at all — never a "—" or any other placeholder. Every value passed here is the raw capture.
+    // row at all — never a "—" or any other placeholder. Every value passed here is the raw capture. A
+    // value that has a fabricated counterpart (it is what the device reported but NOT what we present) is
+    // struck + red; the value we present for it shows in the Fabricated group below.
     const add = (label, val) => {
-      if (val != null && val !== "") rows.appendChild(kvRow(label, String(val)));
+      if (val != null && val !== "") rows.appendChild(kvRow(label, String(val), overrides[label] != null));
     };
 
     add("verifiedBootState", h.verifiedBootState == null ? null : named(h.verifiedBootState) + " (" + h.verifiedBootState + ")");
     add("deviceLocked", h.deviceLocked == null ? null : String(h.deviceLocked));
-    if (h.verifiedBootKey) hexRow(rows, "verifiedBootKey", h.verifiedBootKey);
-    if (h.verifiedBootHash) hexRow(rows, "verifiedBootHash", h.verifiedBootHash);
+    if (h.verifiedBootKey) hexRow(rows, "verifiedBootKey", h.verifiedBootKey, overrides["verifiedBootKey"] != null);
+    if (h.verifiedBootHash) hexRow(rows, "verifiedBootHash", h.verifiedBootHash, overrides["verifiedBootHash"] != null);
     add("osVersion", h.osVersion);
     add("osPatchLevel", h.osPatchLevel);
     add("vendorPatchLevel", h.vendorPatchLevel);
@@ -172,7 +174,7 @@ function harvestCard(status, actions = {}) {
     add("keymasterSecurityLevel", h.keymasterSecurityLevel == null ? null : secLevel(sbReal ? 2 : h.keymasterSecurityLevel));
     add("attestationVersion", sbReal ? h.strongBoxAttestationVersion : h.attestationVersion);
     add("keymasterVersion", h.keymasterVersion);
-    if (h.moduleHash) hexRow(rows, "moduleHash", h.moduleHash);
+    if (h.moduleHash) hexRow(rows, "moduleHash", h.moduleHash, overrides["moduleHash"] != null);
     // Device identity — only the ids the TEE actually attested (serial/imei are usually absent, and now
     // shown under Overrides as supplements rather than falsely claimed here).
     for (const key of ["brand", "device", "product", "manufacturer", "model", "serial", "imei", "meid", "imei2"]) {
@@ -188,7 +190,7 @@ function harvestCard(status, actions = {}) {
   return card;
 }
 
-// The Overrides group: every field we present in place of (or absent from) the raw capture, each with a
+// The Fabricated group: every field we present in place of (or absent from) the raw capture, each with a
 // source badge. Editable ones (synthesized level/version, all-zero boot key/hash) get an inline editor.
 function overridesGroup(overrides, actions) {
   const fields = ORDER.filter((f) => overrides[f]).concat(
@@ -196,8 +198,7 @@ function overridesGroup(overrides, actions) {
   );
   if (!fields.length) return null;
   const box = el("div");
-  box.appendChild(el("h3", { text: "Overrides" }));
-  box.appendChild(el("div", { class: "muted small", text: "Values we present to apps in place of the captured ones." }));
+  box.appendChild(el("h3", { text: "Fabricated" }));
   const rows = el("div", { class: "kv-list" });
   for (const field of fields) rows.appendChild(overrideRow(field, overrides[field], actions));
   box.appendChild(rows);
@@ -269,8 +270,8 @@ function secLevel(n) {
   return (typeof n === "number" && names[n] ? names[n] : String(n)) + " (" + n + ")";
 }
 
-function kvRow(label, val) {
-  return el("div", { class: "kv" }, [
+function kvRow(label, val, replaced) {
+  return el("div", { class: "kv" + (replaced ? " kv-replaced" : "") }, [
     el("span", { class: "kv-label", text: label }),
     el("span", { class: "kv-val", text: val }),
   ]);
@@ -278,12 +279,12 @@ function kvRow(label, val) {
 
 // A verified-boot key / hash / module hash: base64 in the record, shown as wrapping hex
 // so the raw bytes are visible. An all-zero value is flagged (it is what an unlocked
-// device reports, and worth spotting).
-function hexRow(rows, label, b64) {
+// device reports, and worth spotting). `replaced` struck + red when it has a fabricated counterpart.
+function hexRow(rows, label, b64, replaced) {
   const hex = b64 ? b64ToHex(b64) : null;
   const allZero = hex != null && hex.length > 0 && /^0+$/.test(hex);
   const flag = allZero ? el("span", { class: "chip warn small", text: "all zero" }) : null;
-  rows.appendChild(el("div", { class: "kv kv-stack" }, [
+  rows.appendChild(el("div", { class: "kv kv-stack" + (replaced ? " kv-replaced" : "") }, [
     el("span", { class: "kv-label" }, [label, flag]),
     el("span", { class: "mono kv-hex", text: hex || "—" }),
   ]));

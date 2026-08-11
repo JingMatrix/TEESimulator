@@ -76,7 +76,7 @@ export function create(mount, opts = {}) {
     else next[field] = value;
     const res = await overridesIo.save(next);
     if (!res.ok) { toast("Save failed: " + res.error); return; }
-    toast("Override saved — applying…");
+    toast("Fabricated value saved — applying…");
     await new Promise((r) => setTimeout(r, OVERRIDE_SETTLE_MS));
     await refreshHealth();
   }

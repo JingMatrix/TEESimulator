@@ -406,12 +406,16 @@ html, body { overscroll-behavior-y: contain; }
 .kv-stack { flex-direction: column; align-items: stretch; gap: 4px; }
 .kv-stack .kv-label { justify-content: flex-start; }
 .kv-hex { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; color: var(--fg); text-align: left; }
+/* A captured value that has a fabricated counterpart: dimmed + struck so it is clear it is what the
+ * device reported but NOT what we present (the presented value shows in the Fabricated group). */
+.kv-replaced .kv-val, .kv-replaced .kv-hex { color: var(--danger); text-decoration: line-through; }
+.kv-replaced .kv-label { color: var(--warn); }
 .harvest-body { display: flex; flex-direction: column; gap: 12px; }
 /* Level selector: the two chips split the line evenly, flat rather than pill-shaped. */
 .harvest-modes { display: flex; gap: 6px; }
 .harvest-modes .chip.clickable { flex: 1; justify-content: center; border-radius: var(--radius); }
 
-/* --- override source badges + inline editor (Harvest > Overrides) -------- */
+/* --- fabricated source badges + inline editor (Harvest > Fabricated) ----- */
 /* A small pill on each override row saying where the value comes from, so Captured vs Overrides reads
  * at a glance without any strike-through: required (forced for attestation), supplement (id read from the
  * OS), synthesized (no working hardware), edited (a user override is active). */
