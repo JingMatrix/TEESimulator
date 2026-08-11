@@ -1,19 +1,18 @@
-## 🚀 Release: TEESimulator v3.2 (Hotfix)
+## 🎉 TEESimulator 4.0 — a new foundation
 
-TEESimulator v3.2 is rolling out today as an hotfix. This release was pushed ahead of schedule because our recent GitHub build artifacts were expiring, and a severe Google Play Services (GMS) log flooding bug was significantly degrading device performance for many users. 📱⚡
+Ever since TEESimulator began, the community has watched me pour real effort into closing pre-existing detection points, release after release. But as AI-driven conformance scanners multiply and quick "harness fix" commits go viral, it has grown exhausting to fold in a stream of unproven, poorly-explained external patches — innovation stalled, and code quality slipped noticeably. 😮‍💨
 
-⚠️ **Important Development Update:**
-*   **Detections:** Due to time constraints, we haven't patched *all* the new detections currently in the wild. However, this hotfix does successfully address a few critical detection points. 🛡️
-*   **LSPosed ➡️ Vector:** I (JingMatrix) am currently dedicating my efforts to refactoring LSPosed into **Vector**. Consequently, TEESimulator's development pace will temporarily slow down. Please stay tuned and monitor the commit history to follow along with our progress! 🛠️👀
+So here is **TEESimulator 4.0**. 🚀 Instead of faking a hardware backend, it runs AOSP's own KeyMint reference implementation — the very trusted application that normally lives *inside* the TEE — **in-process**. This single change sweeps away countless detection points at once and, for the first time, brings first-class permanent key storage. 🔐
 
-Here is the changelog for this release:
+## ✨ Highlights
 
-🔧 **Stability & Performance**
-*   **🛑 GMS Log Flooding:** Mitigated massive log spam and battery drain (especially noticeable on WearOS or Nearby Share) by safely bypassing `list` hooks for GMS.
-*   **💥 Binder Leak Resolved:** Squashed a critical strong reference memory leak during binder transaction interception that caused random crashes.
+- **🧠 Reference KeyMint TA, in-process.** Attestations come straight from AOSP's `kmr-ta`, not hand-rolled certificates — so every emitted record matches a real device field-for-field.
+- **🎛️ Profiles and a WebUI.** Bundle a keybox, operation mode, patch/OS levels, and device identity into a named profile, assign it to your apps, and edit it all from the manager's WebUI — no text editor, no reboot.
+- **📱 Android 10 → 17.** Both the legacy `keystore` daemon (Android 10/11) and `keystore2` / KeyMint (Android 12+) are intercepted, and every key is attested at — and reports — its real security level and the version its OS release uses.
+- **🩹 Patch mode by default.** The real hardware still generates the key; only its attestation is re-signed under your keybox, keeping the genuine hardware-backed blob and its true contents.
 
-🛡️ **Anti-Detection & Emulation**
-*   **🔑 Pre-Existing Key Override:** TEESimulator now detects and replaces hardware keys that apps managed to request *before* the module was installed, ensuring all future operations remain under control.
-*   **🧩 Accurate `module_hash`:** Completely aligned the APEX module hashing logic with the official Android `keystore2` implementation (including direct `/apex` filesystem scanning and exact ASN.1 DER sorting).
-*   **📜 Certificate `KeyUsage` Fix:** Dynamically sets X.509 `KeyUsage` bits based on the actual key purpose to properly adhere to Android HAL specifications *(the first contribution of @Enginex0!)*.
-*   **⚙️ Core Improvements:** Enhanced KeyMint logging (parsing `ORIGIN`, `OS_VERSION`, etc.) and fixed Parcel position resets for cleaner internal error handling.
+## 💬 Feedback
+
+To get started, drop a keybox at `/data/adb/teesim/keybox.xml`, then assign your apps to a profile in the WebUI. 🗝️
+
+Please open an issue for any device-support or compatibility problems — it helps enormously. 🙏 This release has been tested on **Android 17 (Pixel 6)** and **Android 10 (the Android emulator)**.
