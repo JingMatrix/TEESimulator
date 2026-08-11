@@ -4,15 +4,26 @@
 // renderField(descriptor, value, onChange, context) -> HTMLElement
 //   value    the current value, already read at descriptor.path by the caller
 //   onChange (path, value) => ...  for scalar widgets (text/select/patch/keybox)
-//   context  { id, keyboxFiles, addApp(pkg), removeApp(pkg) }
+//   context  { id, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
+//              labelMap, installedSet, autoInclude, autoTakenBy }
 //            - id           stable element id, so a re-render can restore focus
 //            - keyboxFiles  choices for the 'keybox' widget
-//            - addApp/removeApp  the applist widget's structural callbacks
+//            - addApp/removeApp  the applist/scope widget's structural callbacks
+//            - openScope    the scope widget's "Configure scope" jump (opens the picker)
+//            - labelMap     optional Map(package -> human label) so a scope chip can show
+//                           the app's real name, not just its package
+//            - installedSet optional Set of installed package names, so a scope chip can
+//                           flag a package that is not currently installed on the device
+//            - autoInclude  whether this profile has auto-include on (scope face empty state)
+//            - autoTakenBy  for the auto-include toggle: the OTHER profile that already owns
+//                           auto-include (or null); when set, the switch renders disabled with
+//                           a "(used by <name>)" note, since only one profile may auto-include
 //
 // A new descriptor of an EXISTING type needs no edit here. A new type is one new
 // case below.
 
 import { el } from "./dom.js";
+import { UID_RE } from "../domain/schema.js";
 
 export function renderField(descriptor, value, onChange, context = {}) {
   switch (descriptor.type) {
@@ -24,6 +35,10 @@ export function renderField(descriptor, value, onChange, context = {}) {
       return labelled(descriptor, patchWidget(descriptor, value, onChange, context));
     case "applist":
       return labelled(descriptor, applistWidget(descriptor, value, context));
+    case "scope":
+      return labelled(descriptor, scopeWidget(descriptor, value, context));
+    case "toggle":
+      return toggleField(descriptor, value, onChange, context);
     case "text":
     default:
       return labelled(descriptor, textWidget(descriptor, value, onChange, context));
@@ -39,9 +54,12 @@ export function renderField(descriptor, value, onChange, context = {}) {
 // id rather than the id-less wrapper, otherwise those fields have no programmatic
 // label.
 function labelled(descriptor, control) {
+  // Prefer a real form control; but a compound widget (the scope face) has none — its only id-bearing
+  // focusable is the "Configure scope" <button id=ctx.id>, so fall back to the first element carrying
+  // an id, restoring the label→control association rather than emitting for=null.
   const focusable = control.matches("input, select, textarea")
     ? control
-    : control.querySelector("input, select, textarea");
+    : control.querySelector("input, select, textarea") || control.querySelector("[id]");
   return el("div", { class: "field" }, [
     el("label", { class: "field-label", for: (focusable && focusable.id) || null, text: descriptor.label }),
     control,
@@ -137,4 +155,85 @@ function applistWidget(d, value, ctx) {
   const add = el("button", { type: "button", class: "btn", text: "Add", onclick: submit });
 
   return el("div", {}, [chips, el("div", { class: "add-row" }, [input, add])]);
+}
+
+// A labelled switch: a checkbox styled as an iOS-style toggle. The visible track/thumb is
+// a sibling of the (visually hidden but full-size) checkbox, so a tap anywhere on the track
+// flips it and CSS drives the thumb off `:checked`. onChange gets the boolean, never a string.
+//
+// Auto-include is a whole-device catch-all, so at most one profile may own it: when another
+// profile already does, ctx.autoTakenBy names it and the switch renders disabled with a short
+// "(used by <name>)" note, so the conflict is legible before Save rejects it.
+// A compact settings ROW (not the three-line label/control/help stack): the title and its help sit
+// stacked on the left as a <label for> that also toggles, and the switch sits inline on the right.
+// The help doubles as the "used by <profile>" note when auto-include is locked to another profile.
+function toggleField(d, value, onChange, ctx) {
+  const checked = value === true;
+  const locked = d.key === "autoIncludeNewApps" && !!ctx.autoTakenBy && !checked;
+  const input = el("input", {
+    id: ctx.id, class: "switch-input", type: "checkbox", checked, disabled: locked,
+    role: "switch", "aria-checked": checked ? "true" : "false",
+    onchange: locked ? null : (e) => onChange(d.path, e.target.checked),
+  });
+  const sw = el("span", { class: "switch" + (checked ? " on" : "") + (locked ? " disabled" : "") }, [
+    input,
+    el("span", { class: "switch-track", "aria-hidden": "true" }, [el("span", { class: "switch-thumb" })]),
+  ]);
+  const sub = locked ? "Used by profile “" + ctx.autoTakenBy + "”" : d.help;
+  return el("div", { class: "field toggle-field" }, [
+    el("div", { class: "toggle-row" }, [
+      el("label", { class: "toggle-main", for: ctx.id }, [
+        el("span", { class: "field-label", text: d.label }),
+        sub ? el("span", { class: "field-help", text: sub }) : null,
+      ]),
+      sw,
+    ]),
+  ]);
+}
+
+// The scope field's compact read-only face inside the editor (v2, point 2). Selection happens
+// on the Scope page (ctx.openScope); here we only SUMMARISE it in the fewest words: a header row
+// with the count and a "Configure scope →" button, then a preview of at most a handful of app
+// chips (label only — no package sub-line, no long tally). Extra picks collapse into a "+K more"
+// chip. A not-installed / advanced entry gets a small warn dot, never a paragraph. It stays
+// resilient before the device app list is fetched: labelMap/installedSet are optional, so a chip
+// degrades to its raw package name.
+const SCOPE_PREVIEW_MAX = 6;
+
+function scopeWidget(d, value, ctx) {
+  const apps = Array.isArray(value) ? value : [];
+  const labelMap = ctx.labelMap || null;         // package -> human label
+  const installedSet = ctx.installedSet || null; // installed package names
+
+  const header = el("div", { class: "scope-field-head" }, [
+    el("span", { class: "scope-field-count", text: apps.length ? apps.length + (apps.length === 1 ? " app" : " apps") : "No apps" }),
+    el("button", { id: ctx.id, type: "button", class: "btn primary small", text: "Configure scope →", onclick: () => ctx.openScope && ctx.openScope() }),
+  ]);
+
+  const kids = [header];
+
+  if (apps.length) {
+    const shown = apps.slice(0, SCOPE_PREVIEW_MAX);
+    const chips = shown.map((entry) => {
+      const isUid = UID_RE.test(entry);
+      const missing = !isUid && installedSet && !installedSet.has(entry);
+      const label = isUid ? entry : ((labelMap && labelMap.get && labelMap.get(entry)) || entry);
+      return el("span", {
+        class: "chip scope-chip" + (isUid ? " advanced" : "") + (missing ? " warn" : ""),
+        title: isUid ? "Advanced: targets caller uid " + entry.slice(4)
+          : missing ? entry + " is not installed (a name-match applies if it installs later)" : entry,
+      }, [
+        (isUid || missing) ? el("span", { class: "scope-chip-dot", "aria-hidden": "true" }) : null,
+        el("span", { class: "chip-text" + (isUid ? " mono" : ""), text: label }),
+      ]);
+    });
+    if (apps.length > SCOPE_PREVIEW_MAX) {
+      chips.push(el("span", { class: "chip scope-chip more", text: "+" + (apps.length - SCOPE_PREVIEW_MAX) + " more" }));
+    }
+    kids.push(el("div", { class: "applist scope-preview" }, chips));
+  } else if (ctx.autoInclude) {
+    kids.push(el("span", { class: "muted small", text: "Auto-include on — new apps added automatically." }));
+  }
+
+  return el("div", { class: "scope-field" }, kids);
 }

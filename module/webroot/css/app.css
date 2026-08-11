@@ -448,3 +448,114 @@ html, body { overscroll-behavior-y: contain; }
 .linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .editor-note { margin: 0; }
 .resolve-hint.missing { color: var(--warn); }
+
+/* --- toggle switch (schema 'toggle' widget + Scope auto-include) --------- */
+/* A checkbox styled as an iOS-style switch: the real <input> lies invisible over the
+ * whole control so a tap anywhere flips it, and the track/thumb are driven off :checked. */
+.switch { position: relative; display: inline-flex; flex: none; width: 52px; height: 32px; align-self: flex-start; }
+.switch-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.switch-track { width: 100%; height: 100%; border-radius: 999px; background: var(--line); transition: background .15s; position: relative; }
+.switch-thumb { position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%; background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, .35); transition: transform .15s; }
+.switch-input:checked + .switch-track { background: var(--accent); }
+.switch-input:checked + .switch-track .switch-thumb { transform: translateX(20px); }
+.switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --- scope field face (inside the profile editor, v2 compact) ----------- */
+.scope-field { display: flex; flex-direction: column; gap: 10px; }
+.scope-field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.scope-field-count { font-weight: 600; font-size: 14px; }
+.scope-preview { gap: 6px; }
+.scope-chip { max-width: 100%; display: inline-flex; align-items: center; gap: 6px; }
+.scope-chip .chip-text { overflow-wrap: anywhere; }
+.scope-chip.more { color: var(--muted); font-weight: 600; }
+.scope-chip.advanced { border: 1px solid var(--accent); background: transparent; }
+.scope-chip.warn { border: 1px solid var(--warn); background: transparent; color: var(--warn); }
+/* The small state dot on a preview chip: accent for an advanced uid chip, warn for not-installed. */
+.scope-chip-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--warn); }
+.scope-chip.advanced .scope-chip-dot { background: var(--accent); }
+.chip-sub { color: var(--muted); font-size: 11px; }
+.chip-avatar-uid { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent-weak); color: var(--accent); font-size: 11px; font-weight: 700; }
+/* The auto-include toggle when another profile owns it: the switch plus a short "used by" note. */
+.toggle-locked { display: inline-flex; align-items: center; gap: 10px; }
+.switch.disabled { opacity: .5; }
+
+/* Compact toggle field: one row — title + help stacked on the left, switch inline on the right. */
+.toggle-field { gap: 0; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 44px; }
+.toggle-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
+.toggle-main .field-help { margin: 0; }
+
+/* --- scope picker page (drill-in) --------------------------------------- */
+/* Search row: a rounded field with a leading search-icon button and a trailing sort-icon button,
+ * both inside the field. Sticky so it rides the top of the scrolling body. */
+.scope-search { position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 4px 0; flex: none; }
+.scope-search-field { display: flex; align-items: center; gap: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+.scope-search-field:focus-within { border-color: var(--accent); }
+.scope-search-input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 10px 2px; color: var(--fg); font: inherit; outline: none; }
+/* The field container owns the focus affordance (its border turns accent); the input inside must show
+ * NO ring of its own. This :focus rule is needed to beat the base `.input:focus` outline it inherits. */
+.scope-search-input:focus { outline: none; box-shadow: none; border: 0; }
+.scope-search-btn, .scope-sort-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 50%; }
+.scope-search-btn { color: var(--accent); }
+.scope-sort-btn:hover { color: var(--accent); background: var(--accent-weak); }
+.scope-sort-btn:focus-visible, .scope-search-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Search + sort glyphs are inline SVG (svgIcon) inheriting currentColor from the button — no CSS icon. */
+.scope-search-btn svg, .scope-sort-btn svg { display: block; }
+
+/* Group filter: full-width segmented control, each seg spanning evenly. */
+.scope-filters { display: flex; align-self: stretch; max-width: 100%; flex: none; }
+.scope-filters .seg { flex: 1; padding: 8px 6px; white-space: nowrap; min-width: 0; }
+
+/* Ops row: the bulk selection verbs on the left, a live selected-count on the right. */
+.scope-ops { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; flex: none; padding: 2px 2px 0; }
+.scope-ops-btns { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.scope-ops-btns .linklike { min-height: 32px; }
+.linklike.danger { color: var(--danger); }
+
+.scope-status { display: flex; align-items: center; gap: 10px; padding: 12px 0; }
+.scope-pinned { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.scope-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+
+.scope-list { display: flex; flex-direction: column; gap: 6px; }
+.scope-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px; min-height: 56px; font: inherit; color: var(--fg); cursor: pointer; }
+.scope-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.scope-row.selected { border-color: var(--accent); background: var(--accent-weak); }
+.scope-row.claimed { opacity: .5; cursor: default; }
+.scope-row:disabled { cursor: default; }
+
+/* Row icon: the lazy <img> and its letter-avatar fallback share one 40x40 rounded box. The
+ * avatar is the ONE place a colour is computed inline (an hsl() from a hash of label/uid), so
+ * its white glyph is the sole intentional hard-coded colour in this file. */
+.scope-ico { flex: none; width: 40px; height: 40px; }
+.scope-ico-img { width: 40px; height: 40px; border-radius: 10px; object-fit: cover; background: var(--chip); display: block; }
+.scope-avatar { width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 16px; }
+/* The compact scope-face preview and any legacy caller still use .avatar; keep it as an alias. */
+.avatar { flex: none; width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 16px; }
+
+.scope-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.scope-label { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.scope-name { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.scope-pkg { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.scope-pill { font-size: 10px; padding: 2px 8px; }
+.scope-claimed { color: var(--muted); }
+/* Usage badges: a small accent dot when the app has asked for a key since boot, and a pill with
+ * the recorded request count. */
+.scope-recent-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--accent); }
+.scope-freq { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+
+/* The right-side selection box; a check appears when the row is in scope. */
+.scope-check { flex: none; width: 24px; height: 24px; border-radius: 6px; border: 2px solid var(--line); position: relative; }
+.scope-row.selected .scope-check, .scope-check.on { border-color: var(--accent); background: var(--accent); }
+.scope-row.selected .scope-check::after, .scope-check.on::after { content: ""; position: absolute; left: 7px; top: 3px; width: 6px; height: 11px; border: solid var(--accent-fg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+
+/* --- sort bottom-sheet (scope picker) ----------------------------------- */
+.sort-sheet { display: flex; flex-direction: column; gap: 12px; }
+.sort-list { display: flex; flex-direction: column; gap: 6px; }
+.sort-opt { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; font: inherit; color: var(--fg); cursor: pointer; }
+.sort-opt.on { border-color: var(--accent); background: var(--accent-weak); }
+.sort-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sort-opt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sort-opt-label { font-weight: 600; font-size: 14px; }
+.sort-opt-check { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line); position: relative; }
+.sort-opt-check.on { border-color: var(--accent); background: var(--accent); }
+.sort-opt-check.on::after { content: ""; position: absolute; left: 6px; top: 2px; width: 5px; height: 10px; border: solid var(--accent-fg); border-width: 0 2px 2px 0; transform: rotate(45deg); }

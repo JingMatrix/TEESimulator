@@ -16,6 +16,13 @@ export const VERSION = 1;
 // same regexes double as the shell-injection backstop (defence in depth — even
 // unmatched input stays quoted by bridge/shell.js).
 export const PKG_RE = /^[A-Za-z0-9_.]+$/;
+// A raw-uid targeting token (advanced): "uid:" followed by one or more digits, e.g.
+// "uid:10123". It lets a profile target a caller uid directly — a shared-uid app, or an
+// app whose package name is unknown — bypassing package-name resolution. An apps[] entry
+// is valid when it is EITHER a package name OR a uid token; APP_ENTRY_RE is that union and
+// is the per-item check the schema/validator use in place of the package-only PKG_RE.
+export const UID_RE = /^uid:\d+$/;
+export const APP_ENTRY_RE = /^([A-Za-z0-9_.]+|uid:\d+)$/;
 export const PROFILE_RE = /^[A-Za-z0-9_-]{1,32}$/;
 export const KEYBOX_RE = /^[A-Za-z0-9._-]+\.xml$/;
 // harvested | system_property | today | no | YYYY-MM | YYYY-MM-DD, with month 01-12
@@ -92,9 +99,14 @@ export const FIELDS = [
   { key: "imei2", path: ["imei2"], label: "IMEI2", group: "identity", type: "text", required: false, default: "" },
   // --- targeting ----------------------------------------------------------
   {
-    key: "apps", path: ["apps"], label: "Apps", group: "apps", type: "applist",
-    re: PKG_RE, required: true, default: [],
-    help: "Package names this profile attests for. At least one, unique across profiles.",
+    key: "apps", path: ["apps"], label: "Apps", group: "apps", type: "scope",
+    re: APP_ENTRY_RE, required: true, default: [],
+    help: "The apps this profile attests for.",
+  },
+  {
+    key: "autoIncludeNewApps", path: ["autoIncludeNewApps"], label: "Auto-include new apps",
+    group: "apps", type: "toggle", required: false, default: false,
+    help: "Target apps installed after now; existing apps stay untouched.",
   },
 ];
 
