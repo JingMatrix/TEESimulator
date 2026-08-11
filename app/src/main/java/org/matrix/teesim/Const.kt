@@ -14,7 +14,7 @@ object Const {
     val overridesFile = File(DATA_DIR, "overrides.json")
     val adminTokenFile = File(DATA_DIR, "admin.token")
 
-    /** Persistent per-package key-request frequency memory (Scope v2 usage stats). Keyed by package name
+    /** Persistent per-package key-request frequency memory (Scope picker usage stats). Keyed by package name
      *  because a uid can change across reinstalls; accumulated across boots from per-poll lib deltas. */
     val usageFile = File(DATA_DIR, "usage.json")
 

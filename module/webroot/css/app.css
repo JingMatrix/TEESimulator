@@ -460,7 +460,7 @@ html, body { overscroll-behavior-y: contain; }
 .switch-input:checked + .switch-track .switch-thumb { transform: translateX(20px); }
 .switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* --- scope field face (inside the profile editor, v2 compact) ----------- */
+/* --- scope field face (compact, inside the profile editor) -------------- */
 .scope-field { display: flex; flex-direction: column; gap: 10px; }
 .scope-field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .scope-field-count { font-weight: 600; font-size: 14px; }

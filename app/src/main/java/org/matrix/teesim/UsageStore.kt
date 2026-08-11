@@ -4,7 +4,7 @@ import java.io.File
 import org.json.JSONObject
 
 /**
- * The persistent key-request frequency memory behind Scope v2 (spec C2, [Const.usageFile]). Every uid
+ * The persistent key-request frequency memory behind the Scope picker ([Const.usageFile]). Every uid
  * that asks keystore for a key is recorded by the lib and polled by [App]; that poll turns per-uid
  * deltas into per-PACKAGE updates here. Package name (not uid) is the key because a uid is recycled on
  * reinstall/clear-data while the package identity the user recognises persists — so "com.foo asked for
@@ -137,7 +137,7 @@ object UsageStore {
         }
 
     /**
-     * Wipe the whole frequency memory (spec point 9 / route C5): clears both the persisted map and the
+     * Wipe the whole frequency memory (the /usage/clear route): clears both the persisted map and the
      * since-boot recency set and rewrites usage.json empty immediately (no debounce — the user asked for
      * it and expects it gone). Returns how many package entries were cleared.
      */

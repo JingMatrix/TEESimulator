@@ -283,7 +283,7 @@ object Control {
     }
 
     /**
-     * Poll the lib for its per-uid key-request usage (spec C1), mirroring [resign]'s request/reply
+     * Poll the lib for its per-uid key-request usage, mirroring [resign]'s request/reply
      * shape: write `{"type":"getUsage"}`, wait for the matching `usage` frame, and hand back its `apps`
      * array (one entry per uid that has requested a key since the lib loaded), or null on no connection /
      * timeout / malformed reply. Serialized by [usageLock] so at most one request is outstanding.

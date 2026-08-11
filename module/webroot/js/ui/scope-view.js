@@ -1,4 +1,4 @@
-// The Scope picker (v2): a full-screen drill-in that turns a profile's opaque list of
+// The Scope picker: a full-screen drill-in that turns a profile's opaque list of
 // package strings into a browsable, searchable, sortable view of the LIVE device app list.
 // It is the counterpart to config-view's editor drill-in and follows the exact same
 // contract — stateless, rebuilt on every call, no imports from data/* or bridge/*. The
@@ -14,7 +14,7 @@
 //               - apps            the DRAFT entry strings (packages + uid: tokens)
 //               - packages        the keyAdmin("packages") result, or null while loading; each
 //                                 row carries uid/packages/label/system/launchable/enabled plus
-//                                 the v2 usage columns installTime/freq/lastUsed/recent
+//                                 the usage columns installTime/freq/lastUsed/recent
 //               - claimedByOther  Map(entry -> owning profile name) for entries already claimed
 //                                 by ANOTHER profile (greyed out and inert here)
 //               - firstAppUid     Process.FIRST_APPLICATION_UID; uids below it warn

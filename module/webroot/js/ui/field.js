@@ -191,7 +191,7 @@ function toggleField(d, value, onChange, ctx) {
   ]);
 }
 
-// The scope field's compact read-only face inside the editor (v2, point 2). Selection happens
+// The scope field's compact read-only face inside the editor. Selection happens
 // on the Scope page (ctx.openScope); here we only SUMMARISE it in the fewest words: a header row
 // with the count and a "Configure scope →" button, then a preview of at most a handful of app
 // chips (label only — no package sub-line, no long tally). Extra picks collapse into a "+K more"

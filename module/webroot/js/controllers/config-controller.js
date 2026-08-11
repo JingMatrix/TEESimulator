@@ -20,7 +20,7 @@ import { renderScope } from "../ui/scope-view.js";
 import { el, clear, toast, confirmDialog, promptDialog, openOverlay, openSheet } from "../ui/dom.js";
 
 // How often the open Scope page re-fetches the device app list so fresh usage/recency data
-// flows in without a manual reload (point 10). Pull-to-refresh forces one immediately.
+// flows in without a manual reload. Pull-to-refresh forces one immediately.
 const SCOPE_REFRESH_MS = 9000;
 
 const IDENTITY_FIELDS = FIELDS.filter((f) => f.group === "identity");
@@ -44,7 +44,7 @@ export function create(mount) {
   // Scope page opens; it is cached for the life of the page so a second open is instant and
   // the editor's chips can show real app labels once it exists.
   //
-  // DRAFT model (point 3): the Scope page edits `scopeDraft`, a private copy of the profile's
+  // DRAFT model: the Scope page edits `scopeDraft`, a private copy of the profile's
   // apps, and never touches the profile directly. EVERY way out funnels through onScopeClosed,
   // which — when the draft changed and Done didn't already commit — asks whether to keep the
   // changes (committing into the in-memory profile; disk still only changes on the editor's Save).
@@ -266,7 +266,7 @@ export function create(mount) {
     renderScopeView();
     bindScopePull();
 
-    // Periodic refresh so fresh usage/recency data flows in while the page stays open (point 10).
+    // Periodic refresh so fresh usage/recency data flows in while the page stays open.
     clearInterval(scopeRefreshTimer);
     scopeRefreshTimer = setInterval(() => { if (scoping === name) fetchPackages(false); }, SCOPE_REFRESH_MS);
 
@@ -473,7 +473,7 @@ export function create(mount) {
     },
   };
 
-  // The sort bottom-sheet (point 8): four options, each with a one-line meaning. Selecting one
+  // The sort bottom-sheet: four options, each with a one-line meaning. Selecting one
   // sets scopeSort and re-renders. It is a plain sheet built here (the controller owns dom.js).
   function openSortSheet() {
     const OPTIONS = [

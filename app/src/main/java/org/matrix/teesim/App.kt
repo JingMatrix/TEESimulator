@@ -35,7 +35,7 @@ object App {
     // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
     private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
 
-    // How often the usage poll asks the lib for its per-uid key-request tallies (spec B4).
+    // How often the usage poll asks the lib for its per-uid key-request tallies.
     private const val USAGE_POLL_MS = 15_000L
     // Serializes the WHOLE fetch→delta→apply cycle of [pollUsageOnce]. Two callers race — the 15s poll
     // thread and KeyAdmin's /packages handler (its own thread) — and although Control.fetchUsage is

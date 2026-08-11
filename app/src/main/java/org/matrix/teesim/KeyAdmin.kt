@@ -42,7 +42,7 @@ import org.json.JSONObject
  * keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no such database) GET
  * /packages -> { ok, firstAppUid, apps:[ {uid, packages:[..], label, system, launchable, enabled,
  * installTime, freq, lastUsed, recent} ] } (every installed app, one entry per uid, for the Scope
- * v2 picker: installTime = epoch ms of first install; freq = persistent key-request count; lastUsed =
+ * picker: installTime = epoch ms of first install; freq = persistent key-request count; lastUsed =
  * epoch ms of last request; recent = requested a key since this boot) GET /icon?pkg=P&token=T -> raw
  * image/png (query-token auth, like /logs/download; 404 when the package has no icon) POST /usage/clear
  * -> { ok, cleared } (wipes the frequency memory) POST
@@ -350,7 +350,7 @@ object KeyAdmin {
         }
 
     /**
-     * Every installed app, one entry per uid, for the WebUI's Scope v2 picker (spec C3). The daemon runs
+     * Every installed app, one entry per uid, for the WebUI's Scope picker. The daemon runs
      * as root so [Packages.installedAppsByUid] sees all apps; `system` additionally folds in any uid
      * below the first app uid. Each entry also carries the usage face the picker sorts/badges on:
      * `installTime`, and (from [UsageStore], reduced over the entry's package names) `freq` (max count),
@@ -395,14 +395,14 @@ object KeyAdmin {
             .put("apps", arr)
     }
 
-    /** Wipe the persistent frequency memory (spec C5 / point 9). Returns how many entries were cleared. */
+    /** Wipe the persistent frequency memory. Returns how many entries were cleared. */
     private fun usageClear(): JSONObject {
         val cleared = UsageStore.clear()
         return JSONObject().put("ok", true).put("cleared", cleared)
     }
 
     /**
-     * Stream the rendered PNG icon for `?pkg=` (spec C4). Validates the package shape before touching
+     * Stream the rendered PNG icon for `?pkg=`. Validates the package shape before touching
      * PackageManager, answers 404 (as JSON) when the package has no icon or rendering fails, and relies
      * on [Packages.iconPng]'s in-memory cache so a scrolling list of <img> hits stays cheap.
      */

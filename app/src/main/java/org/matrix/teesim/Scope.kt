@@ -109,7 +109,7 @@ object Scope {
             }
         }
 
-        // Auto-include (v2, future-installs only): a user-app uid (>= FIRST_APP_UID) is folded in ONLY
+        // Auto-include (future-installs only): a user-app uid (>= FIRST_APP_UID) is folded in ONLY
         // when NONE of its package names was present at the baseline — i.e. the app was installed AFTER
         // TEESimulator first ran — and no OTHER profile claims it and this profile does not already name
         // it. The baseline (known_packages.json, seeded once) is what makes this "new apps only": every
@@ -176,7 +176,7 @@ object Scope {
     @Volatile private var baselineCache: Set<String>? = null
 
     /**
-     * The set of package names that existed when TEESimulator first ran (spec C6), read from
+     * The set of package names that existed when TEESimulator first ran, read from
      * [Const.knownPackagesFile]. Seeds the file — with every currently-installed package name — the first
      * time it is absent, then persists it, so the "future-installs only" auto-include has a fixed frame
      * of reference. Call once at daemon start (before the first resolve) to freeze the baseline at a

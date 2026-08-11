@@ -123,7 +123,7 @@ object Packages {
         return out
     }
 
-    /** Every installed package name on the device, for the auto-include baseline seed (spec C6). Empty on
+    /** Every installed package name on the device, for the auto-include baseline seed. Empty on
      *  failure so a broken enumeration never seeds an empty baseline that later mislabels everything new. */
     fun allInstalledPackageNames(): Set<String> =
         try {

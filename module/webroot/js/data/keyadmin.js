@@ -32,7 +32,7 @@
 //       true for a framework/system-flagged app or any uid below firstAppUid, `launchable`
 //       whether it has a launcher activity, `enabled` the representative app's state.
 //       firstAppUid is Process.FIRST_APPLICATION_UID (10000). Feeds the Scope picker.
-//       The v2 usage columns: `installTime` epoch ms of first install (0 unknown), `freq`
+//       The usage columns: `installTime` epoch ms of first install (0 unknown), `freq`
 //       the persistent count of key requests this app has made (max over its package names,
 //       0 if none), `lastUsed` epoch ms of the last request (0 if never), `recent` true when
 //       the app has asked for a key since THIS boot. These drive the Scope sort/badges.
