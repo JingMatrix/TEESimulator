@@ -92,23 +92,28 @@ export function renderKeyboxImport(state, actions) {
 }
 
 // ---- inspect drill-in ---------------------------------------------------
-export function renderKeyboxInspect(state, actions) {
+// The body is filled by fillKeyboxInspect so the controller can refill the SAME .drill-body element
+// on pull-to-refresh — keeping the scroll container (and its pull-to-refresh binding) in place.
+export function fillKeyboxInspect(body, state) {
   const { name = "", data = null } = state;
-
-  const body = el("div", { class: "drill-body" }, [
-    el("div", { class: "keyalias" }, [el("span", { class: "mono", text: name })]),
-  ]);
+  clear(body);
+  body.appendChild(el("div", { class: "keyalias" }, [el("span", { class: "mono", text: name })]));
 
   if (!data || data.ok === false) {
     body.appendChild(el("div", { class: "banner error" }, [
       el("div", { text: (data && data.error) || "Could not inspect this keybox." }),
     ]));
-  } else {
-    if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: "DeviceID: " + data.deviceId }));
-    const keys = Array.isArray(data.keys) ? data.keys : [];
-    if (!keys.length) body.appendChild(el("p", { class: "muted", text: "No <Key> blocks found in this keybox." }));
-    for (const k of keys) body.appendChild(keyBlock(k));
+    return;
   }
+  if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: "DeviceID: " + data.deviceId }));
+  const keys = Array.isArray(data.keys) ? data.keys : [];
+  if (!keys.length) body.appendChild(el("p", { class: "muted", text: "No <Key> blocks found in this keybox." }));
+  for (const k of keys) body.appendChild(keyBlock(k));
+}
+
+export function renderKeyboxInspect(state, actions) {
+  const body = el("div", { class: "drill-body" });
+  fillKeyboxInspect(body, state);
 
   return el("div", {}, [
     el("div", { class: "drill-head" }, [
@@ -137,16 +142,60 @@ function keyBlock(k) {
       : el("span", { class: "chip warn", text: "no private key" }),
   ]);
   const certs = Array.isArray(k.certs) ? k.certs : [];
-  return el("div", { class: "card kbi-key" }, [head, ...certs.map(certBlock)]);
+  return el("div", { class: "card kbi-key" }, [verdictBanner(k), head, ...certs.map(certBlock)]);
+}
+
+// The headline verdict for a chain: is this a genuine, live keybox that would pass hardware
+// attestation, or a revoked / software / broken one? Built from the daemon's chain-level fields.
+function verdictOf(k) {
+  const unchecked = k.revocationChecked === false;
+  if (k.revoked) {
+    return { tier: "bad", icon: "✕", title: "Revoked by Google",
+      sub: "A certificate in this chain is on Google's revocation list — attestations it signs are rejected by Play Integrity." };
+  }
+  if (k.chainVerified === false) {
+    return { tier: "bad", icon: "✕", title: "Chain does not verify",
+      sub: "A certificate signature in this chain is invalid, so it is not a usable attestation chain." };
+  }
+  const revNote = unchecked ? " · revocation list unavailable" : " · not revoked";
+  switch (k.rootAuthority) {
+    case "google":
+      return { tier: "good", icon: "✓", title: "Signed by Google",
+        sub: "Roots in the Google Hardware Attestation key" + revNote + "." };
+    case "knox":
+      return { tier: "good", icon: "✓", title: "Samsung Knox root",
+        sub: "Roots in a Samsung Knox attestation key" + revNote + "." };
+    case "aosp":
+      return { tier: "warn", icon: "!", title: "AOSP software root",
+        sub: "Rooted in the AOSP software test key — not a hardware-backed keybox; fails hardware attestation." };
+    default:
+      return { tier: "warn", icon: "?", title: "Unknown root",
+        sub: "Chain does not root in a recognized attestation authority" + (unchecked ? " · revocation list unavailable" : "") + "." };
+  }
+}
+
+function verdictBanner(k) {
+  const v = verdictOf(k);
+  return el("div", { class: "kbi-verdict kbi-verdict--" + v.tier }, [
+    el("span", { class: "kbi-verdict-icon", "aria-hidden": "true", text: v.icon }),
+    el("div", { class: "kbi-verdict-text" }, [
+      el("div", { class: "kbi-verdict-title", text: v.title }),
+      el("div", { class: "kbi-verdict-sub", text: v.sub }),
+    ]),
+  ]);
 }
 
 function certBlock(c) {
   if (c.error) {
     return el("div", { class: "kbi-cert" }, [el("div", { class: "err", text: "cert " + c.index + ": " + c.error })]);
   }
+  const authTier = c.rootAuthority === "google" || c.rootAuthority === "knox" ? "good" : "warn";
   const badges = el("div", { class: "chips" }, [
     el("span", { class: "chip", text: roleOf(c) }),
     el("span", { class: "chip mono", text: (c.keyAlgorithm || "?") + (c.keySize ? " " + c.keySize : "") }),
+    c.rootAuthority ? el("span", { class: "chip " + authTier, text: authorityLabel(c.rootAuthority) }) : null,
+    c.revoked ? el("span", { class: "chip danger", text: "revoked" }) : null,
+    c.signatureValid === false ? el("span", { class: "chip warn", text: "bad signature" }) : null,
     c.expired ? el("span", { class: "chip warn", text: "expired" }) : null,
     c.notYetValid ? el("span", { class: "chip warn", text: "not yet valid" }) : null,
   ]);
@@ -155,9 +204,20 @@ function certBlock(c) {
     kv("subject", c.subject),
     kv("issuer", c.issuer),
     kv("serial", c.serial),
+    c.revoked ? kv("revocation", (c.revocationStatus || "REVOKED") + (c.revocationReason ? " · " + c.revocationReason : "")) : null,
     kv("valid", fmtDate(c.notBefore) + "  →  " + fmtDate(c.notAfter)),
     kv("sigAlg", c.sigAlg),
   ]);
+}
+
+function authorityLabel(a) {
+  switch (a) {
+    case "google": return "Google root";
+    case "aosp": return "AOSP root";
+    case "knox": return "Knox root";
+    case "none": return "no root";
+    default: return "unknown root";
+  }
 }
 
 function roleOf(c) {

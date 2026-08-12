@@ -439,6 +439,25 @@ html, body { overscroll-behavior-y: contain; }
 .kbi-cert { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .kbi-key .kbi-cert:first-of-type { border-top: 0; padding-top: 0; }
 
+/* Chain verdict banner — the headline "is this keybox genuine / revoked" status. */
+.kbi-verdict { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--chip); border: 1px solid var(--line); border-left: 4px solid var(--muted); }
+.kbi-verdict--good { border-left-color: var(--ok); }
+.kbi-verdict--warn { border-left-color: var(--warn); }
+.kbi-verdict--bad { border-left-color: var(--danger); }
+.kbi-verdict-icon { flex: none; width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: var(--muted); }
+.kbi-verdict--good .kbi-verdict-icon { background: var(--ok); }
+.kbi-verdict--warn .kbi-verdict-icon { background: var(--warn); }
+.kbi-verdict--bad .kbi-verdict-icon { background: var(--danger); }
+.kbi-verdict-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.kbi-verdict-title { font-weight: 700; font-size: 14px; }
+.kbi-verdict--good .kbi-verdict-title { color: var(--ok); }
+.kbi-verdict--warn .kbi-verdict-title { color: var(--warn); }
+.kbi-verdict--bad .kbi-verdict-title { color: var(--danger); }
+.kbi-verdict-sub { color: var(--muted); font-size: 12px; line-height: 1.4; }
+
+/* A revoked cert deserves a stronger signal than the amber warn chips. */
+.chip.danger { color: var(--danger); font-weight: 700; }
+
 /* --- stored-key provenance lines ---------------------------------------- */
 .kmeta { color: var(--muted); font-size: 12px; word-break: break-word; }
 .kmeta b { color: var(--fg); font-weight: 600; }
