@@ -48,8 +48,10 @@ function foldSummary(group, fields, profile, hasErrors) {
   return nodes;
 }
 
-// A cue under a level / identity field: what an empty value (harvested) or a
-// `system_property` value resolves to, mirroring the keybox "(missing)" cue.
+// A cue under a level / identity field: what an empty value resolves to — the harvested value,
+// meaning the raw capture OR the value fabricated at harvest (e.g. a serial/imei/meid read from the
+// OS because the leaf never carries it) — or, when neither exists, that the tag will be omitted. A
+// `system_property` value gets its own cue. Mirrors the keybox "(missing)" cue.
 function resolveHint(d, value, resolved) {
   if (!Object.prototype.hasOwnProperty.call(resolved, d.key)) return null;
   const v = value == null ? "" : String(value).trim();
@@ -58,7 +60,7 @@ function resolveHint(d, value, resolved) {
     const has = rv != null && rv !== "";
     return el("div", {
       class: "field-help resolve-hint" + (has ? "" : " missing"),
-      text: has ? "harvested → " + rv : "not captured at harvest — this tag will be omitted",
+      text: has ? "harvested → " + rv : "not harvested — this tag will be omitted",
     });
   }
   if (v === "system_property") {

@@ -248,8 +248,11 @@ fn patch_key_description(key_desc: &[u8], ov: &PatchOverrides) -> Result<Vec<u8>
         (TAG_BOOT_PATCHLEVEL, explicit_integer(TAG_BOOT_PATCHLEVEL, ov.boot_patchlevel)),
     ];
     if let Some(ids) = ov.attestation_ids {
-        // A profile field left empty means "not supplied" — leave whatever the real leaf holds rather
-        // than blanking a genuine value the app requested.
+        // The daemon resolved each id before we saw it: an explicit profile value, else the harvest
+        // baseline — the raw capture, or (for serial/imei/imei2/meid, which a real leaf never attests)
+        // the value read from the OS at harvest. So an empty value here means neither the profile nor
+        // the harvest supplied that id; leave whatever the real leaf holds rather than blanking a
+        // genuine value the app requested.
         let id_tags: [(u32, &[u8]); 9] = [
             (TAG_ATTESTATION_ID_BRAND, &ids.brand),
             (TAG_ATTESTATION_ID_DEVICE, &ids.device),

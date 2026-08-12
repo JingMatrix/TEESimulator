@@ -90,8 +90,9 @@ impl Ta {
     }
 
     /// generateKey. The returned key blob carries our marker. `security_level` is
-    /// the level of the HAL the request came through; the attestation is emitted
-    /// at that level (see `override_security_level`).
+    /// the level of the HAL the request came through; the attestation is emitted at
+    /// that level, with the KeyMint version harvested for it (see
+    /// `override_attestation_identity`).
     pub fn generate_key(
         &mut self,
         key_params: Vec<KeyParam>,
@@ -117,8 +118,9 @@ impl Ta {
     }
 
     /// importKey. The returned key blob carries our marker. `security_level` is
-    /// the level of the HAL the request came through; the attestation is emitted
-    /// at that level (see `override_security_level`).
+    /// the level of the HAL the request came through; the attestation is emitted at
+    /// that level, with the KeyMint version harvested for it (see
+    /// `override_attestation_identity`).
     pub fn import_key(
         &mut self,
         key_params: Vec<KeyParam>,
