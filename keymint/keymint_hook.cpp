@@ -119,19 +119,30 @@ bool IsRkpProvisioning(AIBinder* binder) {
   return desc && std::strcmp(desc, "android.security.rkp.IRemoteProvisioning") == 0;
 }
 
-// Whether TEE is RKP-only. We must NEVER write this property (a global change is an obvious detection
-// point) — we only read it, once, to gate the denial: on an rkp-only device, denying RKP would fail
-// key generation outright, so there we let it through. Default (unset) is hybrid == safe to deny.
-bool RkpOnlyTee() {
-  static const bool value = [] {
-    char buf[PROP_VALUE_MAX] = {0};
-    int n = __system_property_get("remote_provisioning.tee.rkp_only", buf);
-    bool only = n > 0 && (std::strcmp(buf, "true") == 0 || std::strcmp(buf, "1") == 0);
-    LOGI("RKP: remote_provisioning.tee.rkp_only=%s; target-app RKP denial %s", n > 0 ? buf : "<unset>",
-         only ? "DISABLED (rkp-only device; would break generation)" : "enabled");
-    return only;
-  }();
-  return value;
+bool IsRkpOnlyProp(const char* name) {
+  return name && (std::strcmp(name, "remote_provisioning.tee.rkp_only") == 0 ||
+                  std::strcmp(name, "remote_provisioning.strongbox.rkp_only") == 0);
+}
+
+// keystore2 treats remote_provisioning.*.rkp_only=true as "RKP failure is fatal" — so on a
+// broken-TEE / OUT_OF_KEYS unit the attested generateKey never reaches KeyMint (Duck: "Failed to
+// generate key pair", chain length 0). We must NEVER resetprop those globally (detection). Instead
+// PLT-hook the libc property readers inside this process only and report them unset, so keystore2
+// uses hybrid fallback (RKP miss -> Ok(None) -> our KeyMint path). Installed before any RKP read.
+int (*real_system_property_get)(const char*, char*) = nullptr;
+const prop_info* (*real_system_property_find)(const char*) = nullptr;
+
+int HookedSystemPropertyGet(const char* name, char* value) {
+  if (IsRkpOnlyProp(name)) {
+    if (value) value[0] = '\0';
+    return 0;
+  }
+  return real_system_property_get ? real_system_property_get(name, value) : 0;
+}
+
+const prop_info* HookedSystemPropertyFind(const char* name) {
+  if (IsRkpOnlyProp(name)) return nullptr;
+  return real_system_property_find ? real_system_property_find(name) : nullptr;
 }
 
 // Return (creating if needed) the local device that wraps `proxy`.
@@ -178,7 +189,9 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
     // Deny a target app's remote-provisioning lookup so keystore2 attaches no real attest key. The
     // RKP resolution runs on this same binder thread (a current-thread tokio runtime block_on),
     // while keystore2 is still serving the app's generateKey, so getCallingUid is the app's uid.
-    if (IsRkpProvisioning(binder) && !RkpOnlyTee()) {
+    // Safe on rkp_only hardware too: HookedSystemProperty* makes keystore2 treat the device as
+    // hybrid, so this failure becomes Ok(None) rather than OUT_OF_KEYS.
+    if (IsRkpProvisioning(binder)) {
       int32_t uid = static_cast<int32_t>(AIBinder_getCallingUid());
       if (teesim_is_target_uid(uid)) {
         LOGI("RKP: denying IRemoteProvisioning transact code=%u for target uid=%d "
@@ -218,22 +231,37 @@ extern "C" bool teesim_hook_install() {
 
   const auto maps = lsplt::MapInfo::Scan();
 
-  // Register the AIBinder_transact hook across a chosen set of modules and commit. `exe_only`
-  // limits it to the main executable; otherwise every ELF module (main exe + .so) is probed.
-  auto register_and_commit = [&](bool exe_only) {
+  // Register hooks across a chosen set of modules and commit. `exe_only` limits it to the main
+  // executable; otherwise every ELF module (main exe + .so) is probed.
+  auto register_and_commit = [&](bool exe_only, const char* sym, void* hook, void** backup) {
     std::set<std::pair<dev_t, ino_t>> seen;
     for (const auto& m : maps) {
       if (m.path.empty() || m.inode == 0) continue;
       if (exe_only ? (m.path != exe) : !IsHookableElf(m.path, exe)) continue;
       if (!seen.insert({m.dev, m.inode}).second) continue;
-      lsplt::RegisterHook(m.dev, m.inode, "AIBinder_transact",
-                          reinterpret_cast<void*>(HookedTransact),
-                          reinterpret_cast<void**>(&real_transact));
+      lsplt::RegisterHook(m.dev, m.inode, sym, hook, backup);
     }
     // CommitHook returns false when a probed module doesn't import the symbol, which is
     // expected; success is that the caller's slot was patched (backup set).
     lsplt::CommitHook();
   };
+
+  // Mask rkp_only inside this process before keystore2 caches it (see HookedSystemProperty*).
+  // libc is the usual importer; also try the main executable. Failure is non-fatal: hybrid
+  // devices already work, and rkp_only+working-RKP still needs the binder denial below.
+  auto install_prop = [&](const char* sym, void* hook, void** backup) {
+    *backup = nullptr;
+    register_and_commit(/*exe_only=*/false, sym, hook, backup);
+    if (*backup) {
+      LOGI("hook: %s patched (rkp_only masked in-process)", sym);
+      return;
+    }
+    LOGI("hook: %s not found (rkp_only mask skipped)", sym);
+  };
+  install_prop("__system_property_get", reinterpret_cast<void*>(HookedSystemPropertyGet),
+               reinterpret_cast<void**>(&real_system_property_get));
+  install_prop("__system_property_find", reinterpret_cast<void*>(HookedSystemPropertyFind),
+               reinterpret_cast<void**>(&real_system_property_find));
 
   // The transaction we intercept — keystore2 forwarding to the real KeyMint — is issued from
   // the main executable, which is where AIBinder_transact is imported (keystore2's binder client
@@ -241,13 +269,16 @@ extern "C" bool teesim_hook_install() {
   // (and having LSPlt warn about) every unrelated .so. Only if the importer isn't the executable
   // on some build do we widen to a full ELF scan, so coverage is never lost.
   if (!exe.empty()) {
-    register_and_commit(/*exe_only=*/true);
+    register_and_commit(/*exe_only=*/true, "AIBinder_transact",
+                        reinterpret_cast<void*>(HookedTransact),
+                        reinterpret_cast<void**>(&real_transact));
     if (real_transact != nullptr) {
       LOGI("hook: AIBinder_transact patched in the main executable (%s)", exe.c_str());
       return true;
     }
   }
-  register_and_commit(/*exe_only=*/false);
+  register_and_commit(/*exe_only=*/false, "AIBinder_transact", reinterpret_cast<void*>(HookedTransact),
+                      reinterpret_cast<void**>(&real_transact));
   LOGI("hook: AIBinder_transact %s after full ELF scan",
        real_transact != nullptr ? "patched" : "not found (no importer)");
   return real_transact != nullptr;
