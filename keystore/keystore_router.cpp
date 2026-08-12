@@ -39,17 +39,29 @@
 
 using namespace android;
 
-// IKeystoreService transaction codes (Android 10/11).
-enum {
-  TX_generateKey = 18,
-  TX_getKeyCharacteristics = 19,
-  TX_begin = 22,
-  TX_update = 23,
-  TX_finish = 24,
-  TX_abort = 25,
-  TX_exportKey = 21,
-  TX_attestKey = 29,
+// IKeystoreService transaction codes. The interface is otherwise identical across
+// Android 10 and 11, but R dropped reset() (ordinal 7 on Q) from the AIDL, so every
+// later method — all the ones we intercept — shifts down by one. Picking the wrong
+// table silently hijacks the neighbouring method: on an R device the Q codes make us
+// answer getKeyCharacteristics as if it were generateKey while the real generateKey
+// (one ordinal lower) runs untouched in keystore. Selected from the API level below.
+struct TxCodes {
+  uint32_t generateKey, getKeyCharacteristics, exportKey, attestKey, begin, update, finish, abort;
 };
+constexpr TxCodes kTxQ = {18, 19, 21, 29, 22, 23, 24, 25};  // Android 10 (API 29)
+constexpr TxCodes kTxR = {17, 18, 20, 28, 21, 22, 23, 24};  // Android 11 (API 30)
+
+// True on Android 11+. Besides the ordinal shift, R inserted a `byte[] input` before
+// `signature` in finish(), so the two releases also parse that request differently.
+bool IsAndroidR() {
+  static const bool is_r = teesim_android_api() >= 30;
+  return is_r;
+}
+
+const TxCodes& Codes() {
+  static const TxCodes& codes = IsAndroidR() ? kTxR : kTxQ;
+  return codes;
+}
 
 // KeyMint/Keymaster tag values (shared) and enum constants we need.
 enum {
@@ -735,7 +747,11 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   sp<IBinder> token = in.readStrongBinder();
   std::vector<std::vector<uint8_t>> blobs;
   if (in.readInt32() == 1) ReadKeymasterArguments(in, blobs);  // op params (unused)
-  std::vector<uint8_t> signature = ReadByteArray(in);          // supplied for verify
+  // R added a leading `byte[] input` (single-shot finish) ahead of the signature; Q
+  // has only the signature. Read input first on R so `signature` lands on the right field.
+  std::vector<uint8_t> input;
+  if (IsAndroidR()) input = ReadByteArray(in);
+  std::vector<uint8_t> signature = ReadByteArray(in);  // supplied for verify
 
   int64_t op_handle = 0;
   TaPtr ta;
@@ -743,7 +759,8 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_finish(ta.get(), op_handle, nullptr, 0, signature.data(), signature.size(),
+  int32_t rc = teesim_km_finish(ta.get(), op_handle, input.data(), input.size(), signature.data(),
+                                signature.size(),
                                 /*auth_token=*/nullptr, /*timestamp_token=*/nullptr,
                                 /*confirmation_token=*/nullptr, 0, &out, &out_len);
   std::vector<uint8_t> output;
@@ -755,7 +772,7 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   }
   LOGI("keystore: finish output=%zu", output.size());
 
-  DeliverOperationResult(cb, rc, token, 0, output);
+  DeliverOperationResult(cb, rc, token, static_cast<int32_t>(input.size()), output);
   ReplyStatus(reply, KS_NO_ERROR);
   return true;
 }
@@ -837,35 +854,27 @@ extern "C" bool teesim_cfg_resign(const char* /*profile_id*/, const uint8_t* /*l
 // The interception handler installed for the keystore service binder.
 extern "C" bool teesim_ks_handle(uint32_t code, const Parcel& data, Parcel* reply,
                                   status_t& result) {
-  switch (code) {
-    case TX_generateKey:
-    case TX_getKeyCharacteristics:
-    case TX_exportKey:
-    case TX_attestKey:
-    case TX_begin:
-    case TX_update:
-    case TX_finish:
-    case TX_abort:
-      break;
-    default:
-      return false;
-  }
+  // The ordinals are release-specific, so this dispatch runs against the resolved table
+  // rather than a compile-time switch (see TxCodes).
+  const TxCodes& tx = Codes();
+  if (code != tx.generateKey && code != tx.getKeyCharacteristics && code != tx.exportKey &&
+      code != tx.attestKey && code != tx.begin && code != tx.update && code != tx.finish &&
+      code != tx.abort)
+    return false;
   int uid = IPCThreadState::self()->getCallingUid();
   if (!IsTarget(uid)) return false;
   Reader r(data);
   if (!r.p.enforceInterface(kServiceDescriptor)) return false;
 
   bool done = false;
-  switch (code) {
-    case TX_generateKey:           done = HandleGenerateKey(uid, r.p, reply); break;
-    case TX_getKeyCharacteristics: done = HandleGetKeyCharacteristics(uid, r.p, reply); break;
-    case TX_exportKey:             done = HandleExportKey(uid, r.p, reply); break;
-    case TX_attestKey:             done = HandleAttestKey(uid, r.p, reply); break;
-    case TX_begin:                 done = HandleBegin(uid, r.p, reply); break;
-    case TX_update:                done = HandleUpdate(uid, r.p, reply); break;
-    case TX_finish:                done = HandleFinish(uid, r.p, reply); break;
-    case TX_abort:                 done = HandleAbort(uid, r.p, reply); break;
-  }
+  if (code == tx.generateKey)                done = HandleGenerateKey(uid, r.p, reply);
+  else if (code == tx.getKeyCharacteristics) done = HandleGetKeyCharacteristics(uid, r.p, reply);
+  else if (code == tx.exportKey)             done = HandleExportKey(uid, r.p, reply);
+  else if (code == tx.attestKey)             done = HandleAttestKey(uid, r.p, reply);
+  else if (code == tx.begin)                 done = HandleBegin(uid, r.p, reply);
+  else if (code == tx.update)                done = HandleUpdate(uid, r.p, reply);
+  else if (code == tx.finish)                done = HandleFinish(uid, r.p, reply);
+  else if (code == tx.abort)                 done = HandleAbort(uid, r.p, reply);
   if (done) result = OK;
   return done;
 }

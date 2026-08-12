@@ -402,6 +402,8 @@ void *ServerThread(void *) {
 
 }  // namespace
 
+extern "C" int teesim_android_api(void) { return AndroidApi(); }
+
 extern "C" void teesim_control_start(void) {
   static bool started = false;
   if (started) return;
