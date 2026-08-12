@@ -3,7 +3,7 @@
 // tests/domain.test.mjs, which is why nothing here touches the DOM or the bridge.
 
 import {
-  FIELDS, KEYBOX_RE, PKG_RE, PROFILE_RE, VERSION,
+  FIELDS, KEYBOX_RE, APP_ENTRY_RE, PROFILE_RE, VERSION,
 } from "./schema.js";
 import { getPath } from "./path.js";
 
@@ -24,14 +24,19 @@ export function validateProfile(name, profile) {
   for (const f of FIELDS) {
     const value = getPath(profile, f.path);
 
-    if (f.type === "applist") {
+    if (f.type === "applist" || f.type === "scope") {
       const apps = Array.isArray(value) ? value : [];
-      if (f.required && apps.length < 1) {
-        errors.push({ field: f.key, msg: "At least one app is required." });
+      // "At least one app" no longer holds when auto-include covers the profile: an empty
+      // apps list is fine precisely when autoIncludeNewApps is on (the daemon then targets
+      // every unclaimed user app, so there is nothing to hand-pick).
+      const autoIncludes = profile.autoIncludeNewApps === true;
+      if (f.required && apps.length < 1 && !autoIncludes) {
+        errors.push({ field: f.key, msg: "At least one app is required (or turn on Auto-include new apps)." });
       }
-      for (const pkg of apps) {
-        if (typeof pkg !== "string" || !PKG_RE.test(pkg)) {
-          errors.push({ field: f.key, msg: `Invalid package name: ${pkg}` });
+      // Each entry is a package name OR a raw uid: token (APP_ENTRY_RE), not package-only.
+      for (const entry of apps) {
+        if (typeof entry !== "string" || !APP_ENTRY_RE.test(entry)) {
+          errors.push({ field: f.key, msg: `Invalid app entry: ${entry}` });
         }
       }
       continue;
@@ -43,6 +48,11 @@ export function validateProfile(name, profile) {
       }
       continue;
     }
+
+    // A toggle carries a boolean, not a string, so it is never format-checked (its regex-less
+    // descriptor already skips the scalar branch below, but guard explicitly so a future
+    // required/re on a non-string type can't misfire against the empty-string check).
+    if (f.type === "toggle") continue;
 
     // Generic scalar. Format is checked only when a value is present, so an
     // optional field left blank is fine; presence is a separate, explicit flag.
@@ -98,9 +108,23 @@ export function validateConfig(config) {
       for (const name of claimants) {
         errors.push({
           profile: name, field: "apps",
-          msg: `Package ${pkg} is claimed by ${claimants.length} profiles; it must be unique.`,
+          msg: `App entry ${pkg} is claimed by ${claimants.length} profiles; it must be unique.`,
         });
       }
+    }
+  }
+
+  // Auto-include is a whole-device catch-all ("every unclaimed user app"), so two profiles
+  // both asking for it would fight over the same apps — the daemon allows at most one. Flag
+  // every offender so the user sees exactly which profiles to reconcile.
+  const autoProfiles = Object.keys(profiles).filter(
+    (name) => profiles[name] && profiles[name].autoIncludeNewApps === true);
+  if (autoProfiles.length > 1) {
+    for (const name of autoProfiles) {
+      errors.push({
+        profile: name, field: "autoIncludeNewApps",
+        msg: `Only one profile may auto-include new apps; ${autoProfiles.length} do.`,
+      });
     }
   }
 

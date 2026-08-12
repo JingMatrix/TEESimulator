@@ -23,6 +23,22 @@
 //   keyAdmin("keysDbDelete", { ids }) -> { ok, deleted, requested }
 //       remove those keyentry ids from keystore2; the daemon re-verifies each is one of
 //       our marked target-app keys before deleting, so a stray id is a no-op.
+//   keyAdmin("packages")             -> { ok, firstAppUid,
+//                                          apps:[{ uid, packages:[…], label, system,
+//                                                  launchable, enabled, installTime, freq,
+//                                                  lastUsed, recent }] }
+//       the live device app list, ONE entry per uid (packages sharing a uid are collapsed;
+//       `packages` lists them all, sorted). `label` is the best human name, `system` is
+//       true for a framework/system-flagged app or any uid below firstAppUid, `launchable`
+//       whether it has a launcher activity, `enabled` the representative app's state.
+//       firstAppUid is Process.FIRST_APPLICATION_UID (10000). Feeds the Scope picker.
+//       The usage columns: `installTime` epoch ms of first install (0 unknown), `freq`
+//       the persistent count of key requests this app has made (max over its package names,
+//       0 if none), `lastUsed` epoch ms of the last request (0 if never), `recent` true when
+//       the app has asked for a key since THIS boot. These drive the Scope sort/badges.
+//   keyAdmin("usageClear")           -> { ok, cleared }
+//       wipes the daemon's persisted frequency memory (usage.json). The Scope page's "Clear
+//       usage" button calls this; `cleared` is how many package entries were dropped.
 //   keyAdmin("inspect", { alias })   -> { ok, alias, cert{…}, attestation:{…}|null }
 //   keyAdmin("delete",  { alias })   -> { ok, deleted }
 //   keyAdmin("logs", { after, max }) -> { ok, lines:[{ seq, level, tag, text }], nextAfter }
@@ -73,6 +89,17 @@ function getToken() {
 export const API_BASE = BASE;
 export function adminToken() {
   return getToken();
+}
+
+// GET /icon?pkg=<package>&token=<token> -> raw PNG (the daemon renders the app icon and
+// caches it). A browser <img> cannot set the X-Teesim-Token header, so — exactly like the
+// log-download route — the token rides in the query string. The URL is what an <img src> or
+// CSS background points at; this seam owns the base+token so the view never names either.
+// The Scope controller prefetches adminToken() once and then builds row URLs synchronously,
+// but this async helper is here for any caller that just wants one URL without that dance.
+export async function iconUrlAsync(pkg) {
+  const t = await getToken();
+  return BASE + "/icon?pkg=" + encodeURIComponent(pkg || "") + "&token=" + encodeURIComponent(t || "");
 }
 
 // One request helper: attach the token header, parse JSON, and convert any non-200
@@ -143,6 +170,10 @@ export async function keyAdmin(action, args = {}) {
       return request("GET", "/keys");
     case "keysDb":
       return request("GET", "/keys/db");
+    case "packages":
+      return request("GET", "/packages");
+    case "usageClear":
+      return request("POST", "/usage/clear");
     case "keysDbDelete":
       return request("POST", "/keys/db/delete" + idsQuery(args));
     case "inspect":

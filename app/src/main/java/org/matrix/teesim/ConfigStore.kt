@@ -13,6 +13,10 @@ object ConfigStore {
 
     class ConfigException(message: String) : Exception(message)
 
+    // The two accepted apps[] entry shapes: a package name, or the advanced raw-uid token uid:N.
+    private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
+    private val UID_RE = Regex("^uid:\\d+$")
+
     /** One profile as written by the WebUI, before resolution against the device. */
     data class ProfileConfig(
         val id: String,
@@ -32,6 +36,11 @@ object ConfigStore {
         val meid: String,
         val imei2: String,
         val apps: List<String>,
+        // When true, the profile ALSO targets every installed user app (uid >= first app uid) that no
+        // OTHER profile claims — including apps installed later, since the daemon re-resolves on each
+        // package change. At most one profile may set this (checked below); it lets the apps list be
+        // empty, the auto set covering it.
+        val autoIncludeNewApps: Boolean,
     )
 
     data class Config(val version: Int, val profiles: List<ProfileConfig>)
@@ -56,7 +65,9 @@ object ConfigStore {
                 ?: throw ConfigException("config.json has no \"profiles\" object")
         if (profilesObj.length() == 0) throw ConfigException("config.json has no profiles")
 
-        val seenApps = HashMap<String, String>() // package -> owning profile id
+        val seenApps = HashMap<String, String>() // apps[] entry (package or uid:N) -> owning profile id
+        val seenUids = HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
+        var autoIncludeProfiles = 0 // how many profiles set autoIncludeNewApps (at most one allowed)
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -82,14 +93,60 @@ object ConfigStore {
                 p.optJSONArray("apps")?.let { arr ->
                     (0 until arr.length()).map { arr.getString(it).trim() }
                 } ?: emptyList()
-            if (apps.isEmpty()) throw ConfigException("profile '$id' has no apps")
-            for (pkg in apps) {
-                val prev = seenApps.put(pkg, id)
+
+            // A profile that auto-includes every user app may legitimately name no apps of its own;
+            // otherwise it must target at least one, or it routes nothing.
+            val autoIncludeNewApps = p.optBoolean("autoIncludeNewApps", false)
+            if (autoIncludeNewApps) autoIncludeProfiles++
+            if (autoIncludeProfiles > 1)
+                throw ConfigException(
+                    "profile '$id' also sets autoIncludeNewApps, but at most one profile may " +
+                        "auto-include new apps (two would both claim every unowned user app)"
+                )
+            if (apps.isEmpty() && !autoIncludeNewApps)
+                throw ConfigException("profile '$id' has no apps (and does not auto-include new apps)")
+
+            // Each apps[] entry is either a package name or the advanced raw-uid token uid:N. Validate
+            // the shape here so a typo can't silently slip through to routing, and keep the per-entry
+            // uniqueness (a package name OR a uid token may live in only one profile — the router needs
+            // exactly one owner per caller).
+            for (entry in apps) {
+                if (PKG_RE.matches(entry)) {
+                    // a plain package name — nothing further to validate
+                } else if (UID_RE.matches(entry)) {
+                    val n = entry.substring(4).toIntOrNull()
+                    if (n == null || n < 0)
+                        throw ConfigException(
+                            "profile '$id' app entry '$entry' is not a valid uid:N token (N must be a non-negative integer)"
+                        )
+                } else {
+                    throw ConfigException(
+                        "profile '$id' app entry '$entry' is neither a package name nor a uid:N token"
+                    )
+                }
+                val prev = seenApps.put(entry, id)
                 if (prev != null && prev != id)
                     throw ConfigException(
-                        "package '$pkg' appears in both profile '$prev' and '$id' " +
-                            "(routing requires one profile per package)"
+                        "app entry '$entry' appears in both profile '$prev' and '$id' " +
+                            "(routing requires one profile per package/uid)"
                     )
+                // The literal-string check above misses two entries that DIFFER textually but resolve to
+                // the SAME caller uid — a package vs a uid:N token (com.foo vs uid:10123), or two packages
+                // that share a uid (a sharedUserId pair). Both would put two profiles' keyboxes on one
+                // caller (last-writer-wins in routing). Reject on the effective uid too, when it resolves.
+                val uid =
+                    when {
+                        UID_RE.matches(entry) -> entry.substring(4).toIntOrNull() ?: -1
+                        else -> Packages.uidForPackage(entry)
+                    }
+                if (uid >= 0) {
+                    val prevUid = seenUids.put(uid, id)
+                    if (prevUid != null && prevUid != id)
+                        throw ConfigException(
+                            "app entry '$entry' resolves to uid $uid, already claimed by profile " +
+                                "'$prevUid' (one profile per caller uid)"
+                        )
+                }
             }
 
             profiles.add(
@@ -116,6 +173,7 @@ object ConfigStore {
                     meid = p.optString("meid", ""),
                     imei2 = p.optString("imei2", ""),
                     apps = apps,
+                    autoIncludeNewApps = autoIncludeNewApps,
                 )
             )
         }

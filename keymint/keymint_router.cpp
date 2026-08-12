@@ -12,6 +12,8 @@
 #include <aidl/android/hardware/security/keymint/BnKeyMintOperation.h>
 #include <android/binder_ibinder.h>  // AIBinder_getCallingUid
 
+#include <ctime>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -66,6 +68,41 @@ int32_t g_stage_vb_state = 0;
 bool g_stage_strongbox_ok = false;
 int32_t g_stage_attest_version_tee = 400;
 int32_t g_stage_attest_version_strongbox = 400;
+
+// --- Per-caller usage stats --------------------------------------------------
+// Every app that asks us for a key this boot is recorded here from generateKey,
+// so the daemon can surface a "Recent" group and a frequency ordering in the
+// scope picker. Keyed by caller uid because a uid outlives a single request; the
+// daemon maps uid->package (uids get reassigned across installs, packages are
+// stable). This is a hot path, so the record is a short locked map update with
+// no I/O — never touch the crypto path's latency.
+struct UsageEntry {
+  uint64_t count = 0;         // cumulative generateKey requests from this uid since load
+  uint64_t last_boot_ms = 0;  // CLOCK_BOOTTIME (ms) of the most recent request
+  std::string pkg;            // best-effort package hint, usually empty (daemon resolves uid->pkg)
+};
+std::mutex g_usage_mu;
+std::map<int32_t, UsageEntry> g_usage;
+
+// Milliseconds on CLOCK_BOOTTIME: a monotonic clock that keeps counting across
+// suspend, matching the daemon's SystemClock.elapsedRealtime so it can convert
+// our lastBootMs back to a wall-clock instant.
+uint64_t NowBootMs() {
+  struct timespec ts{};
+  clock_gettime(CLOCK_BOOTTIME, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000u + static_cast<uint64_t>(ts.tv_nsec) / 1000000u;
+}
+
+// Record one key request from `caller_uid` (target or not). Cheap by design: the
+// daemon does the uid->package resolution, so we only bump the count and stamp
+// the time. A caller with no valid uid (-1) is skipped.
+void RecordUsage(int32_t caller_uid) {
+  if (caller_uid < 0) return;
+  std::lock_guard<std::mutex> lk(g_usage_mu);
+  UsageEntry& e = g_usage[caller_uid];
+  ++e.count;
+  e.last_boot_ms = NowBootMs();
+}
 
 // RAII guard: mark the current thread as forwarding to the real HAL.
 struct ForwardGuard {
@@ -424,6 +461,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                  const std::optional<AttestationKey>& attestationKey,
                                  KeyCreationResult* out) override {
     const uid_t caller_uid = AIBinder_getCallingUid();
+    RecordUsage(static_cast<int32_t>(caller_uid));  // every app that asks for a key, for the daemon's usage view
     RequestTarget t = ProfileForRequest(keyParams, caller_uid);
     LOGI("generateKey: level=%d, %zu param(s), caller_uid=%d, caller_attest_key=%d, target=%d, "
          "patch_mode=%d, strongbox_ok=%d",
@@ -810,6 +848,37 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
 // --- C entry points ----------------------------------------------------------
 
 extern "C" const char* teesim_hook_name(void) { return "keymint"; }
+
+// Snapshot the usage map as a JSON array (see control.h). Built under the usage
+// lock only; no crypto state is touched, so the daemon can poll this freely.
+extern "C" char* teesim_usage_json_alloc(void) {
+  std::string out = "[";
+  {
+    std::lock_guard<std::mutex> lk(g_usage_mu);
+    bool first = true;
+    for (const auto& kv : g_usage) {
+      if (!first) out += ",";
+      first = false;
+      out += "{\"uid\":";
+      out += std::to_string(kv.first);
+      out += ",\"count\":";
+      out += std::to_string(kv.second.count);
+      out += ",\"lastBootMs\":";
+      out += std::to_string(kv.second.last_boot_ms);
+      out += ",\"pkg\":\"";
+      // pkg is a plain package name or empty, but escape the JSON-significant bytes defensively.
+      for (char c : kv.second.pkg) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+      }
+      out += "\"}";
+    }
+  }
+  out += "]";
+  char* buf = static_cast<char*>(malloc(out.size() + 1));
+  if (buf) memcpy(buf, out.c_str(), out.size() + 1);
+  return buf;
+}
 
 // Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
 // the control thread before the swap; only teesim_cfg_commit touches live tables.

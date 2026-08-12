@@ -51,9 +51,21 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
    regardless of package. The record is cached to `harvested.json`, and each parsed field is logged.
 2. **`ConfigStore`** parses, validates, and `FileObserver`-watches `config.json`; **`Resolver`**
    turns a validated config plus the frozen harvest, system properties, and the clock into the
-   full-replace `config` message the native lib applies — resolving package names to uids
-   (**`Packages`**), the patch mini-language, and the harvested device ids and security level.
+   full-replace `config` message the native lib applies — resolving the profile's targets via
+   **`Scope`**, the patch mini-language, and the harvested device ids and security level.
    **`PackageWatch`** re-resolves and re-pushes on `PACKAGE_ADDED/REMOVED/REPLACED`.
+
+   **`Scope`** is the one place a profile's `apps[]` becomes the two wire arrays the native router
+   matches on — `packages[]` (attestation package-name match, kept verbatim so a not-yet-installed
+   name still matches once the app lands) and `uids[]` (caller-uid match, the effective set with no
+   `-1`). An `apps[]` entry is a package name, an advanced `uid:N` token that targets a caller uid
+   directly (for a shared-uid app or one whose package is unknown), or — per profile —
+   `autoIncludeNewApps`, which folds in only apps installed AFTER a one-time baseline snapshot
+   (`known_packages.json`, seeded from the currently-installed set the first time the daemon runs), so
+   genuinely new apps are covered without an edit while existing apps are never silently captured. Every
+   entry is logged as it resolves (`Scope[<id>]: 'com.foo' -> uid 10123`, `-> NOT INSTALLED (dropped)`),
+   and a uid below the app range (a `shell`/`system_server`-style uid) is flagged with a warning — the
+   instrumentation that makes "which app is actually intercepted" answerable from the log.
 3. **`Injector`** finds the keystore daemon's pid (`keystore2` on API ≥ 31, `keystore` on 10/11),
    runs the packaged `inject` binary to load the right interceptor, and re-injects whenever the
    pid changes; it confirms the library actually checked in over `@teesim` and warns otherwise
@@ -91,7 +103,19 @@ The root-manager WebUI talks to the daemon over a tiny loopback HTTP endpoint, s
 has a real `Context` and root that the webview alone does not:
 
 - **`KeyAdmin`** — HTTP/1.1 on `127.0.0.1:8790`, gated by a random token in a root-only file
-  (`admin.token`). It serves the WebUI's status, key, keybox, logs, and canary routes.
+  (`admin.token`). It serves the WebUI's status, key, keybox, logs, and canary routes, plus the
+  **Scope** app-picker's routes: **`GET /packages`** (the installed-app list collapsed by uid — label,
+  packages, system / launchable / enabled, install time, plus per-app request frequency, last-used, and
+  a since-boot "recent" flag), **`GET /icon`** (a rendered app icon PNG, token-in-query so an `<img>`
+  can load it, cached in memory), and **`POST /usage/clear`** (wipe the frequency memory). So a
+  profile's targets are chosen from the live device — searchable, sortable by real usage, with icons —
+  rather than typed as raw package names.
+- **`UsageStore`** — the per-package frequency/recency memory behind the picker's "Recent" group and
+  its frequency/recently-used sorts. The injected interceptor tallies each `generateKey` caller uid in
+  memory (a short locked bump, never any I/O on the crypto path); the daemon polls that snapshot over
+  the control socket (`getUsage`, ~15s), resolves each uid to a package, and folds the per-uid delta
+  into `usage.json` keyed by package — a persisted per-uid cursor keeps the accumulation exact across
+  daemon restarts, and "recent" is the in-memory set seen since this boot.
 - **`KeystoreDb`** — on API ≥ 31, snapshots keystore2's SQLite database and reads the `keyentry`
   table so the WebUI can list the keys targeted apps actually created (they live in each app's
   own namespace, which the daemon's `AndroidKeyStore` can't enumerate).

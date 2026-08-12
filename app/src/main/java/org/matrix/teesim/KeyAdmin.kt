@@ -39,7 +39,13 @@ import org.json.JSONObject
  * { ok, version, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
  * cert{...}} ] } GET /keys/db -> { ok, available, apiLevel, keys:[ {id, alias, uid, package, state, class,
  * created?, keybox?, keyAlgorithm?, purposes?} ] } (target-app keys with a stored attestation cert, from
- * keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no such database) POST
+ * keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no such database) GET
+ * /packages -> { ok, firstAppUid, apps:[ {uid, packages:[..], label, system, launchable, enabled,
+ * installTime, freq, lastUsed, recent} ] } (every installed app, one entry per uid, for the Scope
+ * picker: installTime = epoch ms of first install; freq = persistent key-request count; lastUsed =
+ * epoch ms of last request; recent = requested a key since this boot) GET /icon?pkg=P&token=T -> raw
+ * image/png (query-token auth, like /logs/download; 404 when the package has no icon) POST /usage/clear
+ * -> { ok, cleared } (wipes the frequency memory) POST
  * /keys/db/delete?ids=1,2,3 -> { ok, deleted, requested } (removes those keyentry ids from keystore2,
  * marker- and target-verified) GET /keys/inspect?alias=A -> { ok, alias, attestation{...} | null }
  * POST /keys/delete?alias=A -> { ok, deleted } GET /logs?after=N&max=M
@@ -51,6 +57,9 @@ import org.json.JSONObject
 object KeyAdmin {
 
     private const val ATTEST_OID = "1.3.6.1.4.1.11129.2.1.17"
+    // A plausible package name for the /icon query, so a caller can't smuggle path/argument junk through
+    // ?pkg= into PackageManager. Same shape ConfigStore validates apps[] package entries with.
+    private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
     // Upper bound on a request body (bytes). The admin socket is localhost + token-authed, but a bogus
     // Content-Length should still never be trusted as an allocation size.
     private const val MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -169,6 +178,17 @@ object KeyAdmin {
                 downloadLogs(out, dlQuery)
                 return
             }
+            // App icons are loaded by a browser <img src>, which likewise cannot set the token header,
+            // so /icon authenticates by ?token= exactly like /logs/download and streams a raw PNG.
+            if (method == "GET" && rawPath.substringBefore('?') == "/icon") {
+                val iconQuery = parseQuery(rawPath.substringAfter('?', ""))
+                if (iconQuery["token"] != token) {
+                    respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
+                    return
+                }
+                serveIcon(out, iconQuery)
+                return
+            }
             if (headerToken == null || headerToken != token) {
                 respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
                 return
@@ -210,6 +230,8 @@ object KeyAdmin {
                         method == "GET" && path == "/status" -> status()
                         method == "GET" && path == "/keys" -> listKeys()
                         method == "GET" && path == "/keys/db" -> keysDb()
+                        method == "GET" && path == "/packages" -> packages()
+                        method == "POST" && path == "/usage/clear" -> usageClear()
                         method == "POST" && path == "/keys/db/delete" -> deleteDbKeys(query)
                         method == "GET" && path == "/keys/inspect" ->
                             inspect(query["alias"] ?: error("alias required"))
@@ -313,21 +335,89 @@ object KeyAdmin {
         return JSONObject().put("ok", true).put("deleted", n).put("requested", ids.size)
     }
 
-    /** uid -> package for every installed app named across the live config's profiles. */
-    private fun targetUidToPackage(): Map<Int, String> {
-        val cfg =
-            try {
-                ConfigStore.load()
-            } catch (e: Exception) {
-                SystemLogger.warning("KeyAdmin: config load failed for /keys/db", e)
-                return emptyMap()
-            }
-        val map = HashMap<Int, String>()
-        for (p in cfg.profiles) for (pkg in p.apps) {
-            val uid = Packages.uidForPackage(pkg)
-            if (uid >= 0) map[uid] = pkg
+    /**
+     * uid -> a representative package name for every effective target across the live config, via
+     * [Scope.uidToPackage] (which folds in raw uid:N tokens and auto-included apps, mapping the
+     * package-less ones to their uid:token). Keeps the try/catch + empty-map fallback so a broken
+     * config just yields an empty stored-keys view rather than a 500.
+     */
+    private fun targetUidToPackage(): Map<Int, String> =
+        try {
+            Scope.uidToPackage(ConfigStore.load())
+        } catch (e: Exception) {
+            SystemLogger.warning("KeyAdmin: config load failed for /keys/db", e)
+            emptyMap()
         }
-        return map
+
+    /**
+     * Every installed app, one entry per uid, for the WebUI's Scope picker. The daemon runs
+     * as root so [Packages.installedAppsByUid] sees all apps; `system` additionally folds in any uid
+     * below the first app uid. Each entry also carries the usage face the picker sorts/badges on:
+     * `installTime`, and (from [UsageStore], reduced over the entry's package names) `freq` (max count),
+     * `lastUsed` (max epoch), `recent` (any package seen this boot). Sorted server-side by label then uid;
+     * the client re-sorts per its chosen order. A best-effort usage poll runs first so the freq/recent
+     * columns reflect the very latest requests without waiting for the 15s background poll.
+     */
+    private fun packages(): JSONObject {
+        try {
+            App.pollUsageOnce()
+        } catch (e: Exception) {
+            SystemLogger.verbose("KeyAdmin: pre-/packages usage poll skipped: ${e.message}")
+        }
+        val firstAppUid = Packages.firstAppUid()
+        val entries =
+            Packages.installedAppsByUid().sortedWith(
+                compareBy({ it.label.lowercase() }, { it.uid })
+            )
+        val arr = JSONArray()
+        for (e in entries) {
+            val freq = e.packages.maxOfOrNull { UsageStore.freqOf(it) } ?: 0L
+            val lastUsed = e.packages.maxOfOrNull { UsageStore.lastUsedOf(it) } ?: 0L
+            val recent = e.packages.any { UsageStore.isRecent(it) }
+            arr.put(
+                JSONObject()
+                    .put("uid", e.uid)
+                    .put("packages", JSONArray(e.packages))
+                    .put("label", e.label)
+                    .put("system", e.system || e.uid < firstAppUid)
+                    .put("launchable", e.launchable)
+                    .put("enabled", e.enabled)
+                    .put("installTime", e.installTime)
+                    .put("freq", freq)
+                    .put("lastUsed", lastUsed)
+                    .put("recent", recent)
+            )
+        }
+        SystemLogger.info("KeyAdmin: /packages -> ${entries.size} uid entr(ies), firstAppUid=$firstAppUid")
+        return JSONObject()
+            .put("ok", true)
+            .put("firstAppUid", firstAppUid)
+            .put("apps", arr)
+    }
+
+    /** Wipe the persistent frequency memory. Returns how many entries were cleared. */
+    private fun usageClear(): JSONObject {
+        val cleared = UsageStore.clear()
+        return JSONObject().put("ok", true).put("cleared", cleared)
+    }
+
+    /**
+     * Stream the rendered PNG icon for `?pkg=`. Validates the package shape before touching
+     * PackageManager, answers 404 (as JSON) when the package has no icon or rendering fails, and relies
+     * on [Packages.iconPng]'s in-memory cache so a scrolling list of <img> hits stays cheap.
+     */
+    private fun serveIcon(out: OutputStream, query: Map<String, String>) {
+        val pkg = query["pkg"]
+        if (pkg == null || !PKG_RE.matches(pkg)) {
+            respond(out, 400, JSONObject().put("ok", false).put("error", "bad pkg"))
+            return
+        }
+        val png = Packages.iconPng(pkg)
+        if (png == null) {
+            respond(out, 404, JSONObject().put("ok", false).put("error", "no icon"))
+            return
+        }
+        respondRaw(out, 200, "image/png", listOf("Cache-Control: max-age=86400"), png)
     }
 
     private fun inspect(alias: String): JSONObject {
