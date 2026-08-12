@@ -42,6 +42,14 @@ object RevocationList {
     /** True when we hold a revocation list (fresh or stale) to check against. */
     fun available(): Boolean = ensureEntries() != null
 
+    /** Force a fresh fetch straight from the server — bypassing the TTL and any edge cache — then
+     *  report availability. Backs the keybox inspector's pull-to-refresh, so a re-verify sees the
+     *  live list rather than a copy a CDN has been serving for hours. */
+    fun forceRefresh(): Boolean {
+        fetchNow()
+        return entries != null
+    }
+
     /** Kick a load/refresh at daemon start-up so the first inspect already has the list. */
     fun warm() {
         Thread(
@@ -88,7 +96,10 @@ object RevocationList {
     /** Fetch synchronously and adopt the result; leaves any existing copy on failure. */
     private fun fetchNow() {
         try {
-            val raw = httpGet(STATUS_URL)
+            // A unique query defeats any edge/CDN cache — Google serves this list with a one-day
+            // max-age, so a plain GET can return a copy hours stale (a real Age header seen in the
+            // wild). We want the live list here, and the disk copy is our own caching layer.
+            val raw = httpGet("$STATUS_URL?ts=${System.currentTimeMillis()}")
             val parsed = JSONObject(raw).getJSONObject("entries")
             entries = parsed
             loadedAt = System.currentTimeMillis()
@@ -128,7 +139,10 @@ object RevocationList {
         c.connectTimeout = 8000
         c.readTimeout = 8000
         c.instanceFollowRedirects = true
+        c.useCaches = false
         c.setRequestProperty("Accept", "application/json")
+        c.setRequestProperty("Cache-Control", "no-cache")
+        c.setRequestProperty("Pragma", "no-cache")
         c.setRequestProperty("User-Agent", "TEESimulator")
         c.inputStream.use {
             return it.readBytes().toString(Charsets.UTF_8)

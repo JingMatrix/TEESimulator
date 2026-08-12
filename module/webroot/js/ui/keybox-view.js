@@ -92,23 +92,28 @@ export function renderKeyboxImport(state, actions) {
 }
 
 // ---- inspect drill-in ---------------------------------------------------
-export function renderKeyboxInspect(state, actions) {
+// The body is filled by fillKeyboxInspect so the controller can refill the SAME .drill-body element
+// on pull-to-refresh — keeping the scroll container (and its pull-to-refresh binding) in place.
+export function fillKeyboxInspect(body, state) {
   const { name = "", data = null } = state;
-
-  const body = el("div", { class: "drill-body" }, [
-    el("div", { class: "keyalias" }, [el("span", { class: "mono", text: name })]),
-  ]);
+  clear(body);
+  body.appendChild(el("div", { class: "keyalias" }, [el("span", { class: "mono", text: name })]));
 
   if (!data || data.ok === false) {
     body.appendChild(el("div", { class: "banner error" }, [
       el("div", { text: (data && data.error) || "Could not inspect this keybox." }),
     ]));
-  } else {
-    if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: "DeviceID: " + data.deviceId }));
-    const keys = Array.isArray(data.keys) ? data.keys : [];
-    if (!keys.length) body.appendChild(el("p", { class: "muted", text: "No <Key> blocks found in this keybox." }));
-    for (const k of keys) body.appendChild(keyBlock(k));
+    return;
   }
+  if (data.deviceId) body.appendChild(el("div", { class: "muted small", text: "DeviceID: " + data.deviceId }));
+  const keys = Array.isArray(data.keys) ? data.keys : [];
+  if (!keys.length) body.appendChild(el("p", { class: "muted", text: "No <Key> blocks found in this keybox." }));
+  for (const k of keys) body.appendChild(keyBlock(k));
+}
+
+export function renderKeyboxInspect(state, actions) {
+  const body = el("div", { class: "drill-body" });
+  fillKeyboxInspect(body, state);
 
   return el("div", {}, [
     el("div", { class: "drill-head" }, [

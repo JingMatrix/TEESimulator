@@ -35,10 +35,12 @@ object KeyboxInspector {
         return name
     }
 
-    fun inspect(rawName: String): JSONObject {
+    fun inspect(rawName: String, forceRefresh: Boolean = false): JSONObject {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)
         if (!file.isFile) return fail("no such keybox: $name")
+        // Pull-to-refresh on the detail page re-fetches Google's revocation list before re-checking.
+        if (forceRefresh) RevocationList.forceRefresh()
         return try {
             val doc = newSafeBuilder().parse(file)
             val root = doc.documentElement

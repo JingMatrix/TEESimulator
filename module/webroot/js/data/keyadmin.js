@@ -45,7 +45,9 @@
 //   keyAdmin("logsWrite", { dir, name, text }) -> { ok, path } | { ok:false, error }
 //       the daemon (root) writes `text` to <dir>/<safe(name)>, creating dir; it names and
 //       places the file since the WebView ignores download filenames and Content-Disposition.
-//   keyAdmin("keyboxInspect", { name }) -> { ok, name, deviceId, revocationListAvailable,
+//   keyAdmin("keyboxInspect", { name, refresh? }) -> { ok, name, deviceId, revocationListAvailable,
+//       refresh:true forces the daemon to re-fetch Google's revocation list (fresh, cache-busted)
+//       before re-checking — the inspector's pull-to-refresh sets it.
 //                                          keys:[{ algorithm, privateKeyPresent, chainLength, linkage,
 //                                                  rootAuthority, googleSigned, chainVerified, revoked,
 //                                                  revocationChecked,
@@ -192,7 +194,9 @@ export async function keyAdmin(action, args = {}) {
     case "logsWrite":
       return request("POST", "/logs/write" + logsWriteQuery(args), args.text);
     case "keyboxInspect":
-      return request("GET", "/keybox/inspect" + nameQuery(args));
+      // refresh:true has the daemon re-fetch Google's revocation list (fresh, cache-busted) before
+      // re-checking — the keybox inspector's pull-to-refresh sets it.
+      return request("GET", "/keybox/inspect" + nameQuery(args) + (args.refresh ? "&refresh=1" : ""));
     case "canary":
       return request("GET", "/canary");
     case "canaryInstall":

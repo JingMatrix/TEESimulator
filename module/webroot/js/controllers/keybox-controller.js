@@ -5,7 +5,7 @@
 
 import { listKeyboxes, importKeybox, renameKeybox, deleteKeybox } from "../data/keybox-io.js";
 import { keyAdmin } from "../data/keyadmin.js";
-import { renderKeyboxes, renderKeyboxImport, renderKeyboxInspect } from "../ui/keybox-view.js";
+import { renderKeyboxes, renderKeyboxImport, renderKeyboxInspect, fillKeyboxInspect } from "../ui/keybox-view.js";
 import { toast, confirmDialog, promptDialog, openSheet, openOverlay } from "../ui/dom.js";
 import { attachPullToRefresh } from "../ui/pull-refresh.js";
 
@@ -57,9 +57,29 @@ export function create(mount) {
       return;
     }
     const content = renderKeyboxInspect({ name, data }, { close: () => closeInspect() });
-    inspectOverlay = openOverlay(content, { variant: "panel", label: "Keybox", onClose: () => { inspectOverlay = null; } });
+    const body = content.querySelector(".drill-body");
+    let detachPtr = null;
+    inspectOverlay = openOverlay(content, {
+      variant: "panel", label: "Keybox",
+      onClose: () => { if (detachPtr) detachPtr(); detachPtr = null; inspectOverlay = null; },
+    });
+    // Pull down on the detail page to re-fetch Google's revocation list and re-verify in place.
+    // The spinner must clear the overlay (z-index 40), and detachPtr removes the fixed dot on close.
+    detachPtr = attachPullToRefresh(body, () => refreshInspect(name, body), { scroller: body, zIndex: 41 });
     const title = content.querySelector(".drill-title");
     if (title) title.focus();
+  }
+
+  // Re-inspect with a forced, cache-busted revocation-list refresh, then refill the same body node.
+  async function refreshInspect(name, body) {
+    let data;
+    try {
+      data = await keyAdmin("keyboxInspect", { name, refresh: true });
+    } catch (e) {
+      toast("Refresh failed: " + (e && e.message ? e.message : String(e)));
+      return;
+    }
+    fillKeyboxInspect(body, { name, data });
   }
 
   function closeInspect() {

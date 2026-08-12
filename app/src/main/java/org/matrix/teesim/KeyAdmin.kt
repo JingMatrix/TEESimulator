@@ -243,7 +243,10 @@ object KeyAdmin {
                             delete(query["alias"] ?: error("alias required"))
                         method == "GET" && path == "/logs" -> logs(query)
                         method == "GET" && path == "/keybox/inspect" ->
-                            KeyboxInspector.inspect(query["name"] ?: error("name required"))
+                            KeyboxInspector.inspect(
+                                query["name"] ?: error("name required"),
+                                query["refresh"] == "1",
+                            )
                         method == "GET" && path == "/canary" -> Updater.status()
                         method == "POST" && path == "/canary/install" ->
                             Updater.install(
