@@ -34,10 +34,24 @@ target_link_libraries(inject PRIVATE lsplt log)
 target_link_options(inject PRIVATE -static-libstdc++)
 
 # --- KeyMint AIDL, generated with the NDK backend ---------------------------
-find_program(AIDL_BIN aidl)
+# fromBinder's local-binder fallback (checked below) only exists in aidl from build-tools >= 35, so
+# prefer the newest installed build-tools over whatever aidl happens to be first on PATH or first in
+# the (alphabetically sorted) glob -- e.g. a leftover 34.0.0 sorts before 36.0.0 and silently wins.
+# AIDL_BIN is a plain variable, not a find_program cache entry, so it is recomputed on every configure
+# and never sticks to a stale detection; an explicit -DAIDL_BIN=... on the command line still wins.
 if(NOT AIDL_BIN AND DEFINED ENV{ANDROID_HOME})
   file(GLOB _bt $ENV{ANDROID_HOME}/build-tools/*)
-  find_program(AIDL_BIN aidl PATHS ${_bt} NO_DEFAULT_PATH)
+  list(SORT _bt COMPARE NATURAL ORDER DESCENDING)
+  foreach(_d ${_bt})
+    if(EXISTS ${_d}/aidl)
+      set(AIDL_BIN ${_d}/aidl)
+      break()
+    endif()
+  endforeach()
+endif()
+if(NOT AIDL_BIN)
+  find_program(_aidl_on_path aidl)
+  set(AIDL_BIN ${_aidl_on_path})
 endif()
 if(NOT AIDL_BIN)
   message(FATAL_ERROR "aidl not found; set -DAIDL_BIN=/path/to/aidl")
