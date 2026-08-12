@@ -148,13 +148,46 @@ object Packages {
         iconCache.get(pkg)?.let {
             return it
         }
+        val drawable = loadIconDrawable(pkg) ?: return null
         return try {
-            val drawable: Drawable = pm.getApplicationIcon(pkg)
             val png = drawableToPng(drawable)
             if (png != null) iconCache.put(pkg, png)
             png
         } catch (e: Exception) {
-            SystemLogger.warning("iconPng($pkg) failed", e)
+            SystemLogger.warning("iconPng($pkg): render failed", e)
+            null
+        }
+    }
+
+    /**
+     * The icon drawable for [pkg], null when unavailable. Loads the app's own declared icon resource
+     * straight from its [android.content.res.Resources], deliberately NOT via
+     * [PackageManager.getApplicationIcon].
+     *
+     * On stock AOSP getApplicationIcon returns the real icon, but on some OEM ROMs (notably ColorOS)
+     * it is intercepted by a themed UX-icon loader (OplusUXIconLoader) that reads Settings.Global to
+     * pick its icon pack. This daemon is a bare app_process, not AMS-registered, so resolving the
+     * settings content provider throws "Unable to find app for caller"; the OEM layer then swallows
+     * that failure and hands back a generic placeholder for most apps (and outright throws for a few),
+     * so every tile shows a default icon rather than the real one (issue #214). Reading the app's icon
+     * resource directly sidesteps the OEM path entirely and yields the real icon on every device.
+     * getApplicationIcon is kept only as a last resort for apps that declare no icon resource.
+     */
+    private fun loadIconDrawable(pkg: String): Drawable? {
+        try {
+            val ai = pm.getApplicationInfo(pkg, 0)
+            if (ai.icon != 0) {
+                pm.getResourcesForApplication(ai).getDrawable(ai.icon, null)?.let {
+                    return it
+                }
+            }
+        } catch (e: Exception) {
+            SystemLogger.warning("iconPng($pkg): resource icon load failed, trying getApplicationIcon", e)
+        }
+        return try {
+            pm.getApplicationIcon(pkg)
+        } catch (e: Exception) {
+            SystemLogger.warning("iconPng($pkg): getApplicationIcon failed", e)
             null
         }
     }
