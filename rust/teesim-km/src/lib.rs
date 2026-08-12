@@ -195,8 +195,12 @@ impl Ta {
             keys: Box::new(device::Keys),
             sign_info: Some(Box::new(sign_info.clone())),
             attest_ids,
-            // Rollback-resistant keys are declined (no secure-deletion store).
-            sdd_mgr: None,
+            // In-memory secure-deletion slots so UsageCountLimit(1) / RollbackResistance are
+            // KeyMint-enforced. Without this, UsageCountLimit is left to keystore2 (often a no-op
+            // for our blobs) and Duck's single-use EC probe sees a second use succeed. Slots are
+            // lost on process restart — fine for an in-process TA; single-use keys are deleted on
+            // first finish anyway.
+            sdd_mgr: Some(Box::new(kmr_common::keyblob::sdd_mem::InMemorySlotManager::<256>::default())),
             bootloader: Box::new(BootloaderDone),
             sk_wrapper: None,
             tup: Box::new(TrustedPresenceUnsupported),
