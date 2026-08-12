@@ -81,6 +81,18 @@ pub struct Ta {
     /// HAL the request came through, so a generated key claims the real device's version.
     attest_version_tee: i32,
     attest_version_strongbox: i32,
+    /// Profile OS / vendor / boot security levels. Patch mode writes these into a real leaf's
+    /// attestation (see `patch_attestation`) so a patched record reports the profile's — typically
+    /// fresh — patch level rather than the device's genuine, often stale, one. Generation feeds the
+    /// same values through kmr-ta's hal/boot info, so both modes report an identical patch level.
+    os_version: u32,
+    os_patchlevel: u32,
+    vendor_patchlevel: u32,
+    boot_patchlevel: u32,
+    /// Device IDs the profile vouches for, or `None` when it declines ID attestation. Patch mode
+    /// overwrites the matching ID tags a real leaf carries (when the app requested ID attestation)
+    /// with these, so a patched record vouches the profile's identity, never the device's real one.
+    attestation_ids: Option<AttestationIdInfo>,
 }
 
 /// Everything beyond the crypto backend that shapes a profile's attestation
@@ -172,7 +184,9 @@ impl Ta {
             supported_num_of_keys_in_csr: MINIMUM_SUPPORTED_KEYS_IN_CSR,
         };
 
-        // Device-ID attestation is offered only when the profile supplies IDs.
+        // Device-ID attestation is offered only when the profile supplies IDs. Patch mode reuses the
+        // same IDs to overwrite a real leaf's ID tags, so retain a copy before this moves them.
+        let attestation_ids = cfg.attestation_ids.clone();
         let attest_ids: Option<Box<dyn RetrieveAttestationIds>> = cfg
             .attestation_ids
             .map(|ids| Box::new(device::AttestIds(ids)) as Box<dyn RetrieveAttestationIds>);
@@ -232,6 +246,11 @@ impl Ta {
             patch_rot,
             attest_version_tee: cfg.attest_version_tee,
             attest_version_strongbox: cfg.attest_version_strongbox,
+            os_version: cfg.os_version,
+            os_patchlevel: cfg.os_patchlevel,
+            vendor_patchlevel: cfg.vendor_patchlevel,
+            boot_patchlevel: cfg.boot_patchlevel,
+            attestation_ids,
         })
     }
 

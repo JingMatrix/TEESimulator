@@ -28,8 +28,9 @@ export const KEYBOX_RE = /^[A-Za-z0-9._-]+\.xml$/;
 // harvested | system_property | today | no | YYYY-MM | YYYY-MM-DD, with month 01-12
 // and day 01-31 so impossible calendar values (month 00/13, day 00/32+) are rejected.
 // The literal tokens YYYY / MM / DD are also allowed in a date and resolved to today by
-// the daemon, so "YYYY-MM-05" means "the 5th of the current month". `harvested` reuses
-// the value captured from the real TEE; `system_property` reads the build property.
+// the daemon, so "YYYY-MM-05" means "the 5th of the current month". `harvested` reuses the
+// value harvested from the device (captured from the real TEE, or fabricated when the harvest
+// could not read one); `system_property` reads the build property.
 export const PATCH_RE = /^(today|no|harvested|system_property|(\d{4}|YYYY)-(0[1-9]|1[0-2]|MM)(-(0[1-9]|[12]\d|3[01]|DD))?)$/;
 // harvested | system_property | "16" | "16.0.0" | packed integer like "160000"
 export const OSVER_RE = /^(harvested|system_property|\d+(\.\d+){0,2})$/;

@@ -1,22 +1,25 @@
 // Patch-mode attestation re-signing.
 //
 // In patch mode the real hardware generates and attests a key; we keep its (genuine, hardware-backed)
-// key blob and re-sign only the attestation leaf under the profile's keybox, replacing the root of
-// trust with the profile's locked/Verified one. Everything else in the real leaf — the attested
-// public key, the challenge, the KeyMint version fields and the tee-enforced authorization list — is
-// preserved, so the record carries authentic hardware attestation content behind a keybox-rooted,
-// locked chain.
+// key blob and re-sign only the attestation leaf under the profile's keybox. Two kinds of field are
+// rewritten to the profile's values: the root of trust (to the profile's locked/Verified one) and the
+// OS / vendor / boot security levels (so a patched record does not leak the device's real, often
+// stale, patch level, which would otherwise cost it Play Integrity's STRONG verdict). Everything else
+// in the real leaf — the attested public key, the challenge, the KeyMint version fields and the rest
+// of the authorization lists — is preserved, so the record carries authentic hardware attestation
+// content behind a keybox-rooted, locked chain.
 //
 // kmr-ta builds attestation leaves too, but its cert module is private and its signing key is not
 // exposed, so this path re-implements the small amount of X.509 assembly it needs with `x509-cert`
-// (for the certificate structure) and hand-written DER (for the one field, the root of trust, that
-// x509-cert cannot reach because it lives under a high-number `[704]` context tag). Signing reuses
-// the same BoringSSL backend and keybox key that generation uses.
+// (for the certificate structure) and hand-written DER (for the fields — the root of trust and the
+// patch levels — that x509-cert cannot reach because they live under high-number context tags).
+// Signing reuses the same BoringSSL backend and keybox key that generation uses.
 
 use crate::{Ta, OpError};
 use kmr_common::crypto::{rsa, AccumulatingOperation, Ec, KeyMaterial, Rsa, Sha256};
 use kmr_crypto_boring::{ec::BoringEc, rsa::BoringRsa, sha256::BoringSha256};
 use kmr_wire::keymint::Digest;
+use kmr_wire::types::AttestationIdInfo;
 use x509_cert::der::asn1::{BitString, ObjectIdentifier, OctetString};
 use x509_cert::der::{Decode, Encode};
 use x509_cert::spki::AlgorithmIdentifierOwned;
@@ -80,13 +83,30 @@ impl Ta {
             parameters: None,
         };
 
-        // Splice the profile's root of trust into the attestation extension.
+        // Rewrite the profile-controlled fields (root of trust, patch levels, device IDs) so the
+        // patched record reports the profile's identity rather than the device's real, often stale one.
         let exts = tbs.extensions.as_mut().ok_or_else(|| err("leaf has no extensions"))?;
         let ext = exts
             .iter_mut()
             .find(|e| e.extn_id == ATTESTATION_EXT_OID)
             .ok_or_else(|| err("leaf has no KeyMint attestation extension"))?;
-        let patched = splice_root_of_trust(ext.extn_value.as_bytes(), &self.patch_rot)?;
+        let overrides = PatchOverrides {
+            root_of_trust: &self.patch_rot,
+            os_version: self.os_version,
+            os_patchlevel: self.os_patchlevel,
+            vendor_patchlevel: self.vendor_patchlevel,
+            boot_patchlevel: self.boot_patchlevel,
+            attestation_ids: self.attestation_ids.as_ref(),
+        };
+        log::info!(
+            "teesim_km: patch_attestation applying profile: os_version={} os_patchlevel={} vendor_patchlevel={} boot_patchlevel={} ids={}",
+            self.os_version,
+            self.os_patchlevel,
+            self.vendor_patchlevel,
+            self.boot_patchlevel,
+            if self.attestation_ids.is_some() { "profile" } else { "device" }
+        );
+        let patched = patch_key_description(ext.extn_value.as_bytes(), &overrides)?;
         ext.extn_value = OctetString::new(patched).map_err(wrap("rewrap key description"))?;
 
         // Re-root the leaf at the keybox and re-sign the modified tbsCertificate.
@@ -160,13 +180,54 @@ pub(crate) fn build_root_of_trust(vb_key: &[u8], locked: bool, state: i32, vb_ha
     tlv(&[0x30], &body)
 }
 
-// `[704] EXPLICIT` — the context tag the RootOfTrust sits under in an AuthorizationList. Tag number
-// 704 needs the high-tag-number form: 0xBF (context, constructed, 0x1F) then 704 as base-128.
-const ROT_TAG: &[u8] = &[0xBF, 0x85, 0x40];
+// `AuthorizationList` context-tag numbers this module rewrites. The root of trust and the OS / vendor
+// / boot levels live in the tee-enforced list of a real hardware leaf, and are inserted there if
+// absent. The device-ID tags (710..=717, 723) appear only when the app requested ID attestation, so
+// they are replaced in place but never inserted — adding an ID the caller did not ask for would not
+// match what generation emits. Patch mode replaces the device's genuine values with the profile's so
+// a patched record matches what generation would have emitted.
+const TAG_ROOT_OF_TRUST: u32 = 704;
+const TAG_OS_VERSION: u32 = 705;
+const TAG_OS_PATCHLEVEL: u32 = 706;
+const TAG_VENDOR_PATCHLEVEL: u32 = 718;
+const TAG_BOOT_PATCHLEVEL: u32 = 719;
+const TAG_ATTESTATION_ID_BRAND: u32 = 710;
+const TAG_ATTESTATION_ID_DEVICE: u32 = 711;
+const TAG_ATTESTATION_ID_PRODUCT: u32 = 712;
+const TAG_ATTESTATION_ID_SERIAL: u32 = 713;
+const TAG_ATTESTATION_ID_IMEI: u32 = 714;
+const TAG_ATTESTATION_ID_MEID: u32 = 715;
+const TAG_ATTESTATION_ID_MANUFACTURER: u32 = 716;
+const TAG_ATTESTATION_ID_MODEL: u32 = 717;
+const TAG_ATTESTATION_ID_SECOND_IMEI: u32 = 723;
 
-/// Replace the RootOfTrust inside a DER `KeyDescription`'s hardware-enforced AuthorizationList with
-/// `rot_seq` (a bare `RootOfTrust` SEQUENCE). Every other field is copied verbatim.
-fn splice_root_of_trust(key_desc: &[u8], rot_seq: &[u8]) -> Result<Vec<u8>, OpError> {
+/// Tags that patch mode inserts (in ascending order) into the tee-enforced list when a real leaf omits
+/// them. Every other override is replace-only.
+const INSERTABLE_TAGS: [u32; 5] = [
+    TAG_ROOT_OF_TRUST,
+    TAG_OS_VERSION,
+    TAG_OS_PATCHLEVEL,
+    TAG_VENDOR_PATCHLEVEL,
+    TAG_BOOT_PATCHLEVEL,
+];
+
+/// Profile values patch mode writes into a real leaf's `KeyDescription`, replacing the device's own.
+pub(crate) struct PatchOverrides<'a> {
+    /// A bare DER `RootOfTrust` SEQUENCE (see `build_root_of_trust`).
+    pub root_of_trust: &'a [u8],
+    pub os_version: u32,
+    pub os_patchlevel: u32,
+    pub vendor_patchlevel: u32,
+    pub boot_patchlevel: u32,
+    /// Device IDs the profile vouches for, or `None` when it declines ID attestation.
+    pub attestation_ids: Option<&'a AttestationIdInfo>,
+}
+
+/// Rewrite the profile-controlled fields of a DER `KeyDescription`: the root of trust, the OS / vendor
+/// / boot security levels, and any device-ID tags the leaf carries. A field present in either
+/// authorization list is replaced in place; a missing root-of-trust or level is inserted, in ascending
+/// tag order, into the tee-enforced list. Every other field is copied verbatim.
+fn patch_key_description(key_desc: &[u8], ov: &PatchOverrides) -> Result<Vec<u8>, OpError> {
     let top = read_elem(key_desc)?;
     if top.tag != [0x30] {
         return Err(err("key description is not a SEQUENCE"));
@@ -175,37 +236,201 @@ fn splice_root_of_trust(key_desc: &[u8], rot_seq: &[u8]) -> Result<Vec<u8>, OpEr
     if fields.len() != 8 {
         return Err(err(&format!("key description has {} fields, expected 8", fields.len())));
     }
-    // Field 7 (0-based) is the hardware-enforced AuthorizationList.
-    let hw = read_elem(fields[7])?;
-    if hw.tag != [0x30] {
-        return Err(err("hardware-enforced list is not a SEQUENCE"));
+
+    // (tag number, replacement element) for every field we own. The root of trust is a bare SEQUENCE
+    // wrapped in its `[704] EXPLICIT` tag; the levels are integers KeyMint stores as `[tag] EXPLICIT
+    // INTEGER`; the IDs are byte strings stored as `[tag] EXPLICIT OCTET STRING`.
+    let mut overrides: Vec<(u32, Vec<u8>)> = vec![
+        (TAG_ROOT_OF_TRUST, tlv(&context_tag(TAG_ROOT_OF_TRUST), ov.root_of_trust)),
+        (TAG_OS_VERSION, explicit_integer(TAG_OS_VERSION, ov.os_version)),
+        (TAG_OS_PATCHLEVEL, explicit_integer(TAG_OS_PATCHLEVEL, ov.os_patchlevel)),
+        (TAG_VENDOR_PATCHLEVEL, explicit_integer(TAG_VENDOR_PATCHLEVEL, ov.vendor_patchlevel)),
+        (TAG_BOOT_PATCHLEVEL, explicit_integer(TAG_BOOT_PATCHLEVEL, ov.boot_patchlevel)),
+    ];
+    if let Some(ids) = ov.attestation_ids {
+        // The daemon resolved each id before we saw it: an explicit profile value, else the harvest
+        // baseline — the raw capture, or (for serial/imei/imei2/meid, which a real leaf never attests)
+        // the value read from the OS at harvest. So an empty value here means neither the profile nor
+        // the harvest supplied that id; leave whatever the real leaf holds rather than blanking a
+        // genuine value the app requested.
+        let id_tags: [(u32, &[u8]); 9] = [
+            (TAG_ATTESTATION_ID_BRAND, &ids.brand),
+            (TAG_ATTESTATION_ID_DEVICE, &ids.device),
+            (TAG_ATTESTATION_ID_PRODUCT, &ids.product),
+            (TAG_ATTESTATION_ID_SERIAL, &ids.serial),
+            (TAG_ATTESTATION_ID_IMEI, &ids.imei),
+            (TAG_ATTESTATION_ID_MEID, &ids.meid),
+            (TAG_ATTESTATION_ID_MANUFACTURER, &ids.manufacturer),
+            (TAG_ATTESTATION_ID_MODEL, &ids.model),
+            (TAG_ATTESTATION_ID_SECOND_IMEI, &ids.imei2),
+        ];
+        for (tag, value) in id_tags {
+            if !value.is_empty() {
+                overrides.push((tag, explicit_octet_string(tag, value)));
+            }
+        }
     }
-    let new_rot = tlv(ROT_TAG, rot_seq);
-    let mut new_hw_body = Vec::with_capacity(hw.value.len());
-    let mut replaced = false;
-    let mut rest = hw.value;
+
+    // Field 6 (0-based) is software-enforced, field 7 tee-enforced. Replace wherever present; a real
+    // leaf keeps the root of trust and levels tee-enforced, but a stray software-enforced value is
+    // corrected too so no genuine value survives.
+    let mut seen: Vec<u32> = Vec::new();
+    let sw = replace_in_list(read_list(fields[6])?, &overrides, &mut seen)?;
+    let mut hw = replace_in_list(read_list(fields[7])?, &overrides, &mut seen)?;
+    for num in INSERTABLE_TAGS {
+        if !seen.contains(&num) {
+            if let Some((_, elem)) = overrides.iter().find(|(t, _)| *t == num) {
+                hw = insert_in_order(hw, num, elem)?;
+            }
+        }
+    }
+
+    let mut body = Vec::with_capacity(key_desc.len() + 32);
+    for f in &fields[..6] {
+        body.extend_from_slice(f);
+    }
+    body.extend_from_slice(&tlv(&[0x30], &sw));
+    body.extend_from_slice(&tlv(&[0x30], &hw));
+    Ok(tlv(&[0x30], &body))
+}
+
+/// The element bytes (content) of an `AuthorizationList` SEQUENCE.
+fn read_list(field: &[u8]) -> Result<&[u8], OpError> {
+    let e = read_elem(field)?;
+    if e.tag != [0x30] {
+        return Err(err("authorization list is not a SEQUENCE"));
+    }
+    Ok(e.value)
+}
+
+/// Copy an authorization-list body, substituting any element whose context tag matches an override
+/// and recording which tags were substituted.
+fn replace_in_list(
+    body: &[u8],
+    overrides: &[(u32, Vec<u8>)],
+    seen: &mut Vec<u32>,
+) -> Result<Vec<u8>, OpError> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut rest = body;
     while !rest.is_empty() {
         let e = read_elem(rest)?;
-        if e.tag == ROT_TAG {
-            new_hw_body.extend_from_slice(&new_rot);
-            replaced = true;
-        } else {
-            new_hw_body.extend_from_slice(&rest[..e.total]);
+        let mut hit = None;
+        if let Some(n) = context_tag_number(e.tag) {
+            if let Some((_, repl)) = overrides.iter().find(|(t, _)| *t == n) {
+                hit = Some((n, repl));
+            }
+        }
+        match hit {
+            Some((n, repl)) => {
+                out.extend_from_slice(repl);
+                if !seen.contains(&n) {
+                    seen.push(n);
+                }
+            }
+            None => out.extend_from_slice(&rest[..e.total]),
         }
         rest = &rest[e.total..];
     }
-    // Real hardware always carries a root of trust; if some HAL omits it, append ours (the tag list
-    // is ascending and [704] is high, so an append preserves ordering for the usual tag set).
-    if !replaced {
-        new_hw_body.extend_from_slice(&new_rot);
-    }
+    Ok(out)
+}
 
-    let mut body = Vec::with_capacity(key_desc.len());
-    for f in &fields[..7] {
-        body.extend_from_slice(f);
+/// Insert `element` (context tag number `num`) into an authorization-list body, keeping the list's
+/// ascending tag order.
+fn insert_in_order(body: Vec<u8>, num: u32, element: &[u8]) -> Result<Vec<u8>, OpError> {
+    let mut out = Vec::with_capacity(body.len() + element.len());
+    let mut rest: &[u8] = &body;
+    let mut inserted = false;
+    while !rest.is_empty() {
+        let e = read_elem(rest)?;
+        if !inserted {
+            if let Some(n) = context_tag_number(e.tag) {
+                if n > num {
+                    out.extend_from_slice(element);
+                    inserted = true;
+                }
+            }
+        }
+        out.extend_from_slice(&rest[..e.total]);
+        rest = &rest[e.total..];
     }
-    body.extend_from_slice(&tlv(&[0x30], &new_hw_body));
-    Ok(tlv(&[0x30], &body))
+    if !inserted {
+        out.extend_from_slice(element);
+    }
+    Ok(out)
+}
+
+/// Build an `[tag_num] EXPLICIT INTEGER` element holding the non-negative `value`.
+fn explicit_integer(tag_num: u32, value: u32) -> Vec<u8> {
+    tlv(&context_tag(tag_num), &tlv(&[0x02], &der_uint(value)))
+}
+
+/// Build an `[tag_num] EXPLICIT OCTET STRING` element holding `value` — the encoding KeyMint uses for
+/// attestation-ID tags.
+fn explicit_octet_string(tag_num: u32, value: &[u8]) -> Vec<u8> {
+    tlv(&context_tag(tag_num), &tlv(&[0x04], value))
+}
+
+/// DER identifier octets for a context-class, constructed tag (an `[n] EXPLICIT` tag).
+// The low-tag path masks `n` to 5 bits before the cast and the base-128 path masks each digit to 7,
+// so every `as u8` is exact.
+#[allow(clippy::cast_possible_truncation)]
+fn context_tag(n: u32) -> Vec<u8> {
+    // Low tag numbers (0..=30) fit the identifier octet directly: context (0x80) | constructed (0x20).
+    if n < 0x1f {
+        return vec![0xA0 | (n & 0x1f) as u8];
+    }
+    let mut digits = Vec::new();
+    let mut v = n;
+    while v > 0 {
+        digits.push((v & 0x7f) as u8);
+        v >>= 7;
+    }
+    digits.reverse();
+    let mut out = Vec::with_capacity(1 + digits.len());
+    out.push(0xBF); // context (0x80) | constructed (0x20) | high-tag-number marker (0x1f)
+    let last = digits.len() - 1;
+    for (i, d) in digits.iter().enumerate() {
+        // Every base-128 digit but the last carries the continuation bit.
+        out.push(if i == last { *d } else { d | 0x80 });
+    }
+    out
+}
+
+/// The tag number of a context-class identifier, or `None` for any other class. Handles both the
+/// low-tag form (`0xA0 | n`) and the high-tag-number form (`0xBF` then base-128 digits).
+fn context_tag_number(tag: &[u8]) -> Option<u32> {
+    let first = *tag.first()?;
+    if first & 0xC0 != 0x80 {
+        return None; // not context class
+    }
+    if first & 0x1f != 0x1f {
+        return Some(u32::from(first & 0x1f));
+    }
+    let mut n: u32 = 0;
+    for &b in &tag[1..] {
+        n = n.checked_mul(128)?.checked_add(u32::from(b & 0x7f))?;
+    }
+    Some(n)
+}
+
+/// DER content octets for a non-negative INTEGER: minimal big-endian, with a leading `0x00` when the
+/// top bit would otherwise make the value read as negative.
+// Each `as u8` writes a byte already masked to 0..=255, so the truncation lint does not apply.
+#[allow(clippy::cast_possible_truncation)]
+fn der_uint(mut value: u32) -> Vec<u8> {
+    if value == 0 {
+        return vec![0x00];
+    }
+    let mut be = Vec::new();
+    while value > 0 {
+        be.push((value & 0xff) as u8);
+        value >>= 8;
+    }
+    be.reverse();
+    if be[0] & 0x80 != 0 {
+        be.insert(0, 0x00);
+    }
+    be
 }
 
 /// One parsed TLV: its tag bytes, its value bytes, and the total encoded length (tag+len+value).

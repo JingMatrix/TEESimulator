@@ -100,8 +100,11 @@ export function create(mount) {
     return m;
   }
 
-  // Best-effort: what `harvested` (and, roughly, `system_property`) resolves to, so the
-  // editor can show the effective value or that a tag will be omitted.
+  // Best-effort: what an empty (harvested) field resolves to, so the editor can show the
+  // effective value or that the tag will be omitted. "Harvested" is two layers, mirroring
+  // Harvester.Record.effective(): the raw values captured from the attested leaf, plus
+  // harvest.overrides — the values the daemon actually presents, including the serial/imei/meid
+  // ids a device-properties leaf never carries (source "supplement"). Both count as harvested.
   async function loadHarvest() {
     try {
       const st = await getStatus();
@@ -113,10 +116,23 @@ export function create(mount) {
 
   function resolvedLevels() {
     const h = harvest || {};
+    const ov = (h.overrides && typeof h.overrides === "object" && !Array.isArray(h.overrides)) ? h.overrides : {};
+    // serial/imei/imei2/meid are the only ids the daemon resolves through Record.effective():
+    // device-properties attestation omits them, so supplementDeviceIds reads them from the OS and
+    // records them in harvest.overrides (source "supplement"), leaving the raw capture blank. Mirror
+    // effective() here — the override value wins, else the raw capture — so an empty profile field
+    // shows the fabricated value that WILL be attested (Resolver.putId) rather than "will be omitted".
+    const eff = (key) => {
+      const o = ov[key];
+      return (o && o.value != null && o.value !== "") ? o.value : h[key];
+    };
     return {
+      // The patch/OS levels and brand/device/product/manufacturer/model are genuine captures with no
+      // override layer; Resolver.kt reads them raw too (a fabricated-fallback level is written to the
+      // raw record as well), so the raw value already equals the effective one.
       patchSystem: h.osPatchLevel, patchVendor: h.vendorPatchLevel, patchBoot: h.bootPatchLevel, osVersion: h.osVersion,
       brand: h.brand, device: h.device, product: h.product, manufacturer: h.manufacturer, model: h.model,
-      serial: h.serial, imei: h.imei, meid: h.meid, imei2: h.imei2,
+      serial: eff("serial"), imei: eff("imei"), meid: eff("meid"), imei2: eff("imei2"),
     };
   }
 
