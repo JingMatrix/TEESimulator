@@ -100,6 +100,10 @@ object App {
             // Key-management endpoint for the WebUI.
             KeyAdmin.start(harvest)
 
+            // Pull Google's attestation revocation list in the background so the keybox inspector's
+            // revoked/Google-signed verdicts are ready before the first inspect.
+            RevocationList.warm()
+
             // Inject the interceptor and keep it injected across keystore restarts.
             Injector(resolveModuleDir(args)).start()
 

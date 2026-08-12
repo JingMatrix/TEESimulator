@@ -45,11 +45,18 @@
 //   keyAdmin("logsWrite", { dir, name, text }) -> { ok, path } | { ok:false, error }
 //       the daemon (root) writes `text` to <dir>/<safe(name)>, creating dir; it names and
 //       places the file since the WebView ignores download filenames and Content-Disposition.
-//   keyAdmin("keyboxInspect", { name }) -> { ok, name, deviceId,
-//                                          keys:[{ algorithm, privateKeyPresent, chainLength,
-//                                                  linkage, certs:[{ index, subject, issuer,
-//                                                  serial, notBefore, notAfter, expired,
-//                                                  keyAlgorithm, keySize, isCa, ... }] }] }
+//   keyAdmin("keyboxInspect", { name }) -> { ok, name, deviceId, revocationListAvailable,
+//                                          keys:[{ algorithm, privateKeyPresent, chainLength, linkage,
+//                                                  rootAuthority, googleSigned, chainVerified, revoked,
+//                                                  revocationChecked,
+//                                                  certs:[{ index, subject, issuer, serial, notBefore,
+//                                                  notAfter, expired, sigAlg, keyAlgorithm, keySize, isCa,
+//                                                  selfSigned, signatureValid, revoked, revocationChecked,
+//                                                  revocationStatus, revocationReason, rootAuthority }] }] }
+//       rootAuthority: which trust anchor the chain roots in — "google" (genuine hardware keybox),
+//       "aosp" (software root), "knox", "unknown", or "none". googleSigned/chainVerified/revoked are the
+//       chain-level verdicts the inspector's status banner is built from; revocationChecked is false when
+//       Google's revocation list could not be fetched (so revoked is not authoritative).
 //   keyAdmin("canary")               -> { ok, currentCode, latest:{ code, tag, name,
 //                                          notes, htmlUrl, assets:[{ name, size }] }|null,
 //                                          updateAvailable }

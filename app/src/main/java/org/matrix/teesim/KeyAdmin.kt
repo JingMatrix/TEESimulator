@@ -50,7 +50,11 @@ import org.json.JSONObject
  * marker- and target-verified) GET /keys/inspect?alias=A -> { ok, alias, attestation{...} | null }
  * POST /keys/delete?alias=A -> { ok, deleted } GET /logs?after=N&max=M
  * -> { ok, lines:[{seq,level,tag,text}], nextAfter } GET /keybox/inspect?name=F -> { ok, name,
- * deviceId, keys:[{algorithm, privateKeyPresent, chainLength, linkage, certs:[{...}]}] } GET /canary ->
+ * deviceId, revocationListAvailable, keys:[{algorithm, privateKeyPresent, chainLength, linkage,
+ * rootAuthority(google|aosp|knox|unknown|none), googleSigned, chainVerified, revoked, revocationChecked,
+ * certs:[{index, subject, issuer, serial, notBefore, notAfter, expired, sigAlg, keyAlgorithm, keySize,
+ * isCa, selfSigned, signatureValid?, revocationChecked?, revoked?, revocationStatus?, revocationReason?,
+ * rootAuthority?}]}] } GET /canary ->
  * { ok, currentCode, latest{...}|null, updateAvailable } POST /canary/install?tag=&variant= -> { ok,
  * message }
  */
