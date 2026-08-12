@@ -949,7 +949,7 @@ object Harvester {
     // --- fallback (no working TEE) ---------------------------------------------
 
     private fun fallback(): Record {
-        SystemLogger.warning("Harvest failed; using fixed non-zero boot key + Build.VERSION props")
+        SystemLogger.warning("Harvest failed; using vbmeta props (or stable fallback) + Build.VERSION props")
         val osVersion = DeviceProps.deviceOsVersion()
         val osPatchLevel = DeviceProps.toYyyymm(DeviceProps.systemSecurityPatch())
         val vendorPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
@@ -957,7 +957,15 @@ object Harvester {
         // Harvest failed: nothing was captured, so every field is raw-empty (all-zero boot bytes, null
         // moduleHash) and every attestation-critical value we present lives in `overrides`. The WebUI
         // hides the Captured group entirely when harvestFailed, so only these synthesized values show.
+        //
+        // Boot key/hash must still match the live ro.boot.vbmeta.* props when those hold a real
+        // digest — Duck (and similar) compare attested verifiedBootHash to ro.boot.vbmeta.digest as
+        // hard evidence. Prefer the props the same way a successful harvest's defaultBootOverride
+        // does; only then fall back to the stable synthetic digests.
         val zero = ByteArray(32)
+        val bootKeyHex =
+            defaultBootOverride("ro.boot.vbmeta.public_key_digest", ::fallbackBootKey, zero)!!
+        val bootHashHex = defaultBootOverride("ro.boot.vbmeta.digest", ::fallbackBootHash, zero)!!
         return Record(
             harvestFailed = true,
             verifiedBootKey = zero,
@@ -984,14 +992,13 @@ object Harvester {
             imei = "",
             meid = "",
             imei2 = "",
-            // No working TEE: every attestation-critical value is synthesized (machine form values).
             overrides =
                 typedOverrides(
                     mapOf(
                         "deviceLocked" to "true",
                         "verifiedBootState" to "0",
-                        "verifiedBootKey" to fallbackBootKey().toHex(),
-                        "verifiedBootHash" to fallbackBootHash().toHex(),
+                        "verifiedBootKey" to bootKeyHex,
+                        "verifiedBootHash" to bootHashHex,
                         "osVersion" to osVersion.toString(),
                         "osPatchLevel" to osPatchLevel.toString(),
                         "vendorPatchLevel" to vendorPatchLevel.toString(),
