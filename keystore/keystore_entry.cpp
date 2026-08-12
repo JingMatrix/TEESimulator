@@ -24,7 +24,9 @@ bool teesim_install_binder_hook();
 extern "C" bool teesim_ks_handle(uint32_t code, const Parcel& data, Parcel* reply, status_t& result);
 
 extern "C" [[gnu::visibility("default")]] bool entry(void* /*handle*/) {
-  LOGI("keystore interceptor loading");
+  int api = teesim_android_api();
+  LOGI("keystore interceptor loading (api=%d, %s transaction codes)", api,
+       api >= 30 ? "Android 11" : "Android 10");
   teesim_control_start();
 
   if (!teesim_install_binder_hook()) {

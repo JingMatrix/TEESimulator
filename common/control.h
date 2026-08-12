@@ -89,6 +89,11 @@ const char *teesim_hook_name(void);
 // The daemon polls it via the control channel's getUsage request.
 char *teesim_usage_json_alloc(void);
 
+// The device Android API level (ro.build.version.sdk), or 0 if unknown. Shared so
+// hooks can select release-specific wire formats — the legacy keystore1 interface
+// shifted its transaction ordinals and grew finish()'s signature between 10 and 11.
+int teesim_android_api(void);
+
 // --- control server, implemented in common/control.cpp -----------------------
 
 // Bind the abstract socket @teesim, listen, and serve config pushes on a
