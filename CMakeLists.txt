@@ -128,6 +128,7 @@ endif()
 # --- The injected interceptor library ---------------------------------------
 add_library(teesim_keymint SHARED
     keymint/keymint_router.cpp keymint/keymint_hook.cpp keymint/keymint_entry.cpp
+    keymint/crypto_compat.c
     common/control.cpp common/json.cpp)
 add_dependencies(teesim_keymint rust_ta)
 target_include_directories(teesim_keymint PRIVATE
