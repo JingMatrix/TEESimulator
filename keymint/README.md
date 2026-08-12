@@ -28,9 +28,21 @@ the [AIDL method ordinals](https://cs.android.com/android/platform/superproject/
 matching the method declaration order in `IKeyMintDevice.aidl`; the AIDL compiler numbers methods from `1` after the
 reserved metadata slots.) `IsKeyMintProxy(binder)` confirms the target is actually
 the KeyMint proxy and not some other service sharing the `AIBinder_transact` call
-site: it checks `AIBinder_isRemote` and compares the binder's class descriptor
-against `IKeyMintDevice::descriptor`. The descriptor is the interface's fully-qualified
-name string, stamped on every binder of that type, so it's a reliable identity check.
+site: it compares the binder's class descriptor against `IKeyMintDevice::descriptor`
+(it does **not** require `AIBinder_isRemote`). The descriptor is the interface's
+fully-qualified name string, stamped on every binder of that type, so it's a reliable
+identity check.
+
+We match a *local* `IKeyMintDevice` too, which is why the check does not require
+`AIBinder_isRemote`. On a legacy Keymaster (`keymaster@4.x`) backend `keystore2` has no
+native KeyMint, so per security level it holds an in-process `km_compat` `IKeyMintDevice`
+— stored directly (keymaster 4.0/4.1) or behind a native `BacklevelKeyMintWrapper`
+(downlevel) — and the binder that reaches `AIBinder_transact` is that **local** compat
+proxy (`isRemote == false`). The **SOFTWARE** level is a `km_compat` device on *every*
+device (native included) and is deliberately **not** wrapped: `teesim_router_new_device`
+returns `nullptr` for it, so `keystore2`'s software-key path runs untouched. The
+descriptor also matches our own local `TeesimKeyMintDevice`, so `IsKeyMintProxy` excludes
+it (`IsOurDevice`).
 
 ## Re-dispatching the transaction
 
@@ -186,6 +198,13 @@ it (via `teesim_hook_set_forwarding`) around every call into the real HAL, and
 `HookedTransact` bails to `real_transact` immediately when it's set. Thread-local, not
 global, because unrelated KeyMint traffic on other threads must still be intercepted
 while one thread is mid-forward.
+
+Because `IsKeyMintProxy` matches by descriptor alone, `tls_forwarding` is the **only**
+thing keeping a forward from recursing: on a legacy backend the real HAL is a *local*
+`IKeyMintDevice`, so an unguarded `real_->` call would re-match the descriptor and
+re-enter the hook. Every `real_->` call in `keymint_router.cpp` must therefore stay
+`ForwardGuard`-wrapped. `IsOurDevice` is a separate safeguard for our *own* local device,
+not the forwarding guard.
 
 ## Files
 

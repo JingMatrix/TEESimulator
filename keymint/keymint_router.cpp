@@ -1000,13 +1000,35 @@ extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* 
     KeyMintHardwareInfo hw;
     if (real->getHardwareInfo(&hw).isOk()) {
       security_level = static_cast<int32_t>(hw.securityLevel);
+    } else {
+      // The level probe failed, so we keep the passed fallback (TEE). This is the one path that could
+      // mis-level a SOFTWARE km_compat leg as TEE and wrap it — the SOFTWARE exclusion below keys off
+      // this value. getHardwareInfo is an in-process call returning static info, so a failure is not
+      // expected; log it so a mis-levelled leg is visible rather than silently assumed TEE.
+      LOGW("teesim_router_new_device: getHardwareInfo failed; keeping fallback security_level=%d "
+           "(real=%p, remote=%d)", security_level, real_binder,
+           real_binder ? AIBinder_isRemote(real_binder) : -1);
     }
   }
-  // Confirms which KeyMint HALs we intercept: keystore2 resolves a distinct IKeyMintDevice for
-  // TrustedEnvironment (level 1) and, when present, StrongBox (level 2) — both are hooked, each
-  // wrapped by its own local device at its real level.
-  LOGI("teesim_router_new_device: local KeyMint device at security_level=%d (real=%p)",
-       security_level, real_binder);
+  // Never wrap a SOFTWARE-level KeyMint. keystore2 serves SecurityLevel::SOFTWARE from an in-process
+  // km_compat device on every device — native TEE devices included (only TrustedEnvironment and
+  // StrongBox resolve to a native HAL; SOFTWARE always takes the compat fallback). We only simulate the
+  // hardware levels; wrapping the software leg would route a target uid's ordinary software keys (via
+  // ProfileForRequest's uid fallback) into the TA, so we bail here: LocalFor caches this nullptr and
+  // HookedTransact falls through to real_transact, leaving the software path untouched. The early
+  // return is ref-balanced — `real` releases its fromBinder reference as it goes out of scope,
+  // restoring real_binder to exactly the count keystore2 holds; adding a decStrong here would
+  // under-reference it.
+  if (static_cast<SecurityLevel>(security_level) == SecurityLevel::SOFTWARE) {
+    LOGI("teesim_router_new_device: SOFTWARE-level KeyMint (real=%p, remote=%d); NOT wrapping",
+         real_binder, real_binder ? AIBinder_isRemote(real_binder) : -1);
+    return nullptr;
+  }
+  // keystore2 resolves a distinct IKeyMintDevice for TrustedEnvironment (level 1) and, when present,
+  // StrongBox (level 2); each is wrapped by its own local device at its real level. remote=0 marks a
+  // legacy km_compat leg, remote=1 a native HAL.
+  LOGI("teesim_router_new_device: local KeyMint device at security_level=%d (real=%p, remote=%d)",
+       security_level, real_binder, real_binder ? AIBinder_isRemote(real_binder) : -1);
   auto dev = ndk::SharedRefBase::make<TeesimKeyMintDevice>(
       static_cast<SecurityLevel>(security_level), std::move(real));
   ndk::SpAIBinder b = dev->asBinder();

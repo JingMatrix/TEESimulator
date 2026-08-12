@@ -6,14 +6,14 @@
 # FFI from them) — no libcrypto.so of any ABI. Configure via environment:
 #   NDK_HOME   Android NDK (default: newest under $ANDROID_HOME/ndk)
 #   ABI        Android ABI (default: arm64-v8a)
-#   API        platform level (default: 34)
+#   API        platform level (default: 29)
 #   BORINGSSL  BoringSSL source dir with include/ (cloned if unset/missing)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 ABI="${ABI:-arm64-v8a}"
-API="${API:-34}"
+API="${API:-29}"
 
 case "$ABI" in
   arm64-v8a)   TRIPLE=aarch64-linux-android ;;
