@@ -16,6 +16,7 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -119,19 +120,50 @@ bool IsRkpProvisioning(AIBinder* binder) {
   return desc && std::strcmp(desc, "android.security.rkp.IRemoteProvisioning") == 0;
 }
 
-// Whether TEE is RKP-only. We must NEVER write this property (a global change is an obvious detection
-// point) — we only read it, once, to gate the denial: on an rkp-only device, denying RKP would fail
-// key generation outright, so there we let it through. Default (unset) is hybrid == safe to deny.
-bool RkpOnlyTee() {
-  static const bool value = [] {
-    char buf[PROP_VALUE_MAX] = {0};
-    int n = __system_property_get("remote_provisioning.tee.rkp_only", buf);
-    bool only = n > 0 && (std::strcmp(buf, "true") == 0 || std::strcmp(buf, "1") == 0);
-    LOGI("RKP: remote_provisioning.tee.rkp_only=%s; target-app RKP denial %s", n > 0 ? buf : "<unset>",
-         only ? "DISABLED (rkp-only device; would break generation)" : "enabled");
-    return only;
-  }();
-  return value;
+// Whether a security level's rkp_only property is set. On such a level keystore2 has no batch key to
+// fall back to, so denying its RKP lookup makes generateKey fail outright (get_attest_key_info returns
+// Err instead of Ok(None)); there we must let the lookup through. We only ever READ the property — a
+// global write would be an obvious detection point.
+bool PropIsRkpOnly(const char* name) {
+  char buf[PROP_VALUE_MAX] = {0};
+  int n = __system_property_get(name, buf);
+  return n > 0 && (std::strcmp(buf, "true") == 0 || std::strcmp(buf, "1") == 0);
+}
+
+// Allocator for AParcel_readString: `length` includes the null terminator, or is -1 for a null string.
+bool RkpStringAllocator(void* string_data, int32_t length, char** buffer) {
+  char** out = static_cast<char**>(string_data);
+  if (length < 0) {
+    *out = nullptr;
+    *buffer = nullptr;
+    return true;
+  }
+  *out = static_cast<char*>(malloc(length));
+  if (*out == nullptr) return false;
+  *buffer = *out;
+  return true;
+}
+
+// Which security level a getRegistration transact targets, read from its first argument — the
+// IRemotelyProvisionedComponent name ("strongbox" for StrongBox, "default" for TE). The interface
+// header size is measured from a throwaway prepared transaction on the same binder, so no wire format
+// is hardcoded; the input parcel's read position is saved and restored. Defaults to TE if unreadable.
+bool GetRegIsStrongBox(AIBinder* binder, AParcel* in) {
+  AParcel* probe = nullptr;
+  if (AIBinder_prepareTransaction(binder, &probe) != STATUS_OK) return false;
+  int32_t header = AParcel_getDataSize(probe);  // args begin past the interface header (cf. Redirect)
+  AParcel_delete(probe);
+
+  int32_t saved = AParcel_getDataPosition(in);
+  if (AParcel_setDataPosition(in, header) != STATUS_OK) return false;
+  char* name = nullptr;
+  bool strongbox = false;
+  if (AParcel_readString(in, &name, RkpStringAllocator) == STATUS_OK && name != nullptr) {
+    strongbox = std::strcmp(name, "strongbox") == 0;
+  }
+  free(name);
+  AParcel_setDataPosition(in, saved);
+  return strongbox;
 }
 
 // Return (creating if needed) the local device that wraps `proxy`.
@@ -176,17 +208,29 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
                                AParcel** out, binder_flags_t flags) {
   if (!tls_forwarding && in && *in) {
     // Deny a target app's remote-provisioning lookup so keystore2 attaches no real attest key. The
-    // RKP resolution runs on this same binder thread (a current-thread tokio runtime block_on),
-    // while keystore2 is still serving the app's generateKey, so getCallingUid is the app's uid.
-    if (IsRkpProvisioning(binder) && !RkpOnlyTee()) {
+    // RKP resolution runs on this same binder thread (a current-thread tokio runtime block_on), while
+    // keystore2 is still serving the app's generateKey, so getCallingUid is the app's uid. The gate is
+    // per security level: keystore2 reads .tee.rkp_only for a TE request and .strongbox.rkp_only for a
+    // StrongBox one, and denying an rkp-only level fails the key instead of falling back — so pick the
+    // property matching this getRegistration's target (its irpcName) rather than the TEE one alone.
+    if (IsRkpProvisioning(binder)) {
       int32_t uid = static_cast<int32_t>(AIBinder_getCallingUid());
       if (teesim_is_target_uid(uid)) {
-        LOGI("RKP: denying IRemoteProvisioning transact code=%u for target uid=%d "
-             "(keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
-             code, uid);
-        AParcel_delete(*in);  // honour AIBinder_transact's ownership of the input parcel
-        *in = nullptr;
-        return STATUS_FAILED_TRANSACTION;  // -> Rust `?` -> get_attest_key_info Ok(None) on hybrid
+        bool strongbox = GetRegIsStrongBox(binder, *in);
+        const char* prop = strongbox ? "remote_provisioning.strongbox.rkp_only"
+                                      : "remote_provisioning.tee.rkp_only";
+        if (PropIsRkpOnly(prop)) {
+          LOGI("RKP: NOT denying %s getRegistration for target uid=%d (%s set; denial would fail key "
+               "generation on an rkp-only level)",
+               strongbox ? "strongbox" : "TE", uid, prop);
+        } else {
+          LOGI("RKP: denying %s IRemoteProvisioning transact code=%u for target uid=%d "
+               "(keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
+               strongbox ? "strongbox" : "TE", code, uid);
+          AParcel_delete(*in);  // honour AIBinder_transact's ownership of the input parcel
+          *in = nullptr;
+          return STATUS_FAILED_TRANSACTION;  // -> Rust `?` -> get_attest_key_info Ok(None) on hybrid
+        }
       }
     }
     if (IsHandled(code) && IsKeyMintProxy(binder)) {

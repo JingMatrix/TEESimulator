@@ -18,6 +18,7 @@ import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE } from "../domain/schema.
 import { setPath, getPath } from "../domain/path.js";
 import { renderProfileList, renderProfileEditor } from "../ui/config-view.js";
 import { renderScope } from "../ui/scope-view.js";
+import { attachPullToRefresh } from "../ui/pull-refresh.js";
 import { el, clear, toast, confirmDialog, promptDialog, openOverlay, openSheet } from "../ui/dom.js";
 
 // How often the open Scope page re-fetches the device app list so fresh usage/recency data
@@ -65,6 +66,12 @@ export function create(mount) {
   let scopeRefreshTimer = null; // periodic /packages re-fetch while the page is open
   let packagesCache = null;  // the keyAdmin("packages") result, or null before first fetch
   let scopeFetchGen = 0;     // monotonic id of the newest /packages fetch, so stale replies are dropped
+  // The daemon's RESOLVED scope: which uids each profile ACTUALLY targets, including auto-included
+  // ones config.json never names. Null until /scope answers (and on an older daemon that 404s it, in
+  // which case the UI simply shows no auto state). Auto membership cannot change without a re-resolve,
+  // so this is fetched only when one may have happened — never on the Scope page's 9s poll.
+  let resolvedCache = null;
+  let resolvedFetchGen = 0;  // same stale-reply guard as scopeFetchGen, on its own channel
   let iconToken = null;      // the admin token, prefetched so /icon URLs build synchronously
   let scopePullBound = false; // pull-to-refresh listeners attached to scopeHost yet?
 
@@ -86,6 +93,61 @@ export function create(mount) {
       }
     }
     return { labelMap, installedSet };
+  }
+
+  // Fetch the daemon's resolved scope. Failure is not an error worth showing: an older daemon 404s
+  // this route, and the whole feature degrades to "no auto badges" rather than breaking the page.
+  function fetchResolved() {
+    const gen = ++resolvedFetchGen;
+    return keyAdmin("scope")
+      .then((res) => {
+        if (gen !== resolvedFetchGen) return; // a newer fetch already superseded this one
+        resolvedCache = (res && Array.isArray(res.profiles)) ? res : null;
+        const auto = resolvedCache
+          ? resolvedCache.profiles.reduce((n, p) => n + ((p.autoUids || []).length), 0) : 0;
+        console.log("[config] /scope: epoch=%s, %d profile(s), %d auto uid(s)",
+          resolvedCache ? resolvedCache.epoch : "-", resolvedCache ? resolvedCache.profiles.length : 0, auto);
+      })
+      .catch((e) => {
+        if (gen !== resolvedFetchGen) return;
+        resolvedCache = null;
+        console.warn("[config] /scope unavailable:", (e && e.message) || String(e));
+      });
+  }
+
+  // uid -> the profile that auto-includes it. At most one profile may auto-include, so this is
+  // unambiguous. Profiles the snapshot names but the in-memory config no longer has (renamed or
+  // deleted since the last push) are dropped, so a row can never say "auto in <gone profile>".
+  //
+  // This is NEVER merged into scopeDraft or claimedByOther: auto membership is a uid fact the daemon
+  // owns, draft selection is an entry-string fact the user owns, and mixing them would write auto
+  // uids into config.json.
+  function autoOwnerMap() {
+    const m = new Map();
+    if (!resolvedCache || !config) return m;
+    for (const p of resolvedCache.profiles) {
+      if (!config.profiles[p.id]) continue;
+      for (const uid of (p.autoUids || [])) m.set(uid, p.id);
+    }
+    return m;
+  }
+
+  function autoCountFor(name) {
+    if (!resolvedCache) return 0;
+    const p = resolvedCache.profiles.find((x) => x.id === name);
+    return p ? (p.autoUids || []).length : 0;
+  }
+
+  // name -> auto count, for the profile list's chips.
+  function autoCounts() {
+    const m = new Map();
+    if (!resolvedCache || !config) return m;
+    for (const p of resolvedCache.profiles) {
+      if (!config.profiles[p.id]) continue;
+      const n = (p.autoUids || []).length;
+      if (n) m.set(p.id, n);
+    }
+    return m;
   }
 
   // uid/package entries claimed by profiles OTHER than `name`, as entry -> owning profile.
@@ -138,7 +200,7 @@ export function create(mount) {
   }
 
   function renderList() {
-    renderProfileList(mount, { config, errors, dirty }, listActions);
+    renderProfileList(mount, { config, errors, dirty, autoCounts: autoCounts() }, listActions);
   }
 
   // Which OTHER profile (if any) already owns auto-include, relative to `name`. Only one profile
@@ -156,7 +218,7 @@ export function create(mount) {
     renderProfileEditor(
       editorHost,
       { config, name: editing, errors, keyboxFiles, openGroups, resolved: resolvedLevels(),
-        scopeMeta: scopeMeta(), autoTakenBy: autoTakenBy(editing) },
+        scopeMeta: scopeMeta(), autoTakenBy: autoTakenBy(editing), autoCount: autoCountFor(editing) },
       editorActions);
   }
 
@@ -205,6 +267,7 @@ export function create(mount) {
     const p = config.profiles[scoping];
     if (!p) { closeScope(); return; }
     const scrollTop = captureScopeScroll();
+    const cur = (config.profiles[scoping] || {}).apps;
     renderScope(scopeHost, {
       profileName: scoping,
       apps: scopeDraft,
@@ -213,6 +276,15 @@ export function create(mount) {
       firstAppUid: (packagesCache && packagesCache.firstAppUid) || 10000,
       search: scopeSearch, filter: scopeFilter, sort: scopeSort,
       loading: scopeLoading, error: scopeError, iconUrl,
+      // The daemon's auto-include truth, and whether the draft has diverged from what it resolved.
+      // The view states "auto-include updates when you save" off pendingSave rather than predicting
+      // the rule client-side — the rule lives in Scope.kt and must live there only.
+      autoOwner: autoOwnerMap(),
+      autoInfo: resolvedCache
+        ? { baselineReady: resolvedCache.baselineReady !== false, epoch: resolvedCache.epoch }
+        : null,
+      autoCount: autoCountFor(scoping),
+      pendingSave: !sameEntries(scopeDraft, Array.isArray(cur) ? cur : []),
     }, scopeActions);
     restoreScopeScroll(scrollTop);
   }
@@ -259,6 +331,21 @@ export function create(mount) {
       });
   }
 
+  // Opening the Scope page rescans before it fetches. The daemon is where the auto-include rule is
+  // applied, against the installed-app set it re-reads during a resolve, so asking it to re-resolve
+  // first means the picker opens on an already-current view rather than painting a stale one and
+  // correcting itself a moment later. A failed rescan is not fatal — log it and fetch anyway, so a
+  // daemon that is down still leaves the picker usable for editing.
+  function rescanThenFetch() {
+    return keyAdmin("rescan")
+      .catch((e) => { console.warn("[config] scope: /rescan failed:", (e && e.message) || String(e)); })
+      // /scope only after the rescan resolves — the daemon publishes its snapshot synchronously
+      // inside the rescan handler, so this ordering is what guarantees the auto set we paint is the
+      // one the rescan just produced.
+      .then(() => Promise.all([fetchPackages(true), fetchResolved()]))
+      .then(() => { if (scoping) renderScopeView(); });
+  }
+
   function openScope(name) {
     if (!config.profiles[name]) return;
     scoping = name;
@@ -278,8 +365,10 @@ export function create(mount) {
     // Prefetch the admin token so /icon URLs build synchronously as rows render.
     adminToken().then((t) => { iconToken = t || null; if (scoping === name) renderScopeView(); }).catch(() => {});
 
-    // Fetch the live app list; if a cache already exists, still refresh it in the background.
-    fetchPackages(!packagesCache);
+    // Rescan, then fetch the live app list. Always the spinner path, cache or not: the point is that
+    // what the user first sees is post-rescan.
+    scopeLoading = true;
+    rescanThenFetch();
     renderScopeView();
     bindScopePull();
 
@@ -431,6 +520,17 @@ export function create(mount) {
             `Target privileged uid ${uid}?\n\nThis is a system/shell uid (e.g. shell, system_server), not a normal app. Only do this if you know exactly why.`,
             { confirmLabel: "Target it", danger: true });
           if (!ok) return;
+        }
+        // Pinning an app that ANOTHER profile currently auto-includes is legal — Scope.resolve
+        // excludes explicitly-claimed uids from auto-include, so an explicit pick always wins — but
+        // it silently moves the app between profiles, so make the consequence visible first.
+        const autoBy = autoOwnerMap().get(uid);
+        if (autoBy && autoBy !== scoping) {
+          const ok = await confirmDialog(
+            `This app is auto-included by profile “${autoBy}”.\n\nPinning it here takes it out of that profile's automatic scope from the next rescan.`,
+            { confirmLabel: "Pin it here" });
+          if (!ok) return;
+          console.log("[config] scope: pinning %s away from auto profile %s", entry, autoBy);
         }
         scopeDraft = scopeDraft.concat([entry]);
         console.log("[config] scope: added %s to draft", entry);
@@ -667,6 +767,55 @@ export function create(mount) {
     mount.appendChild(card);
   }
 
+  // Pull the Profiles list down to re-discover apps. The daemon runs no package observer — a
+  // receiver registered from its bare app_process is rejected by AMS — so a newly installed app is
+  // noticed only when something goes and looks. This is that ask: /rescan re-resolves the config
+  // against the live device and re-pushes it, which is when a profile that auto-includes new apps
+  // folds in anything installed since. The daemon also does this on its own at start and whenever
+  // config.json changes; those three moments are the whole of discovery.
+  //
+  // Unsaved edits are never clobbered: config.json is re-read only when nothing is pending, the same
+  // rule load() follows. The cached device app list is always dropped, since that is precisely what
+  // the pull is meant to refresh.
+  async function rescan() {
+    let msg;
+    try {
+      const r = await keyAdmin("rescan");
+      msg = (r && r.ok)
+        ? "Rescanned — " + r.uids + (r.uids === 1 ? " app" : " apps") + " targeted"
+        : "Rescan failed: " + ((r && r.error) || "unknown error");
+    } catch (e) {
+      msg = "Rescan failed: " + (e && e.message ? e.message : String(e));
+    }
+
+    packagesCache = null; // force the Scope page and the editor's chips to re-fetch
+    resolvedCache = null; // a rescan is exactly when the auto set changes
+    await fetchResolved();
+    if (!dirty) {
+      const res = await ioLoad();
+      if (res.ok) {
+        config = res.config;
+        loaded = true;
+        revalidate();
+      } else if (!config) {
+        // Nothing on screen but the load-error card, and the re-read failed again: repaint that
+        // rather than falling through to renderList(), which would throw on a null config.
+        renderLoadError(res);
+        toast(msg);
+        return;
+      }
+    }
+    keyboxFiles = await listKeyboxes();
+    await loadHarvest();
+    if (config) {
+      renderList();
+      if (editing) renderEditor();
+    }
+    toast(msg);
+  }
+
+  attachPullToRefresh(mount, rescan);
+
   return {
     async load() {
       // Re-activating the tab must not discard unsaved edits, but should pick up any
@@ -684,6 +833,10 @@ export function create(mount) {
       config = res.config;
       keyboxFiles = await listKeyboxes();
       await loadHarvest();
+      // The auto counts on the list rows come from the daemon's last resolve. Fetched once here
+      // rather than on every tab activation: it can only change on a re-resolve, and pull-to-refresh
+      // (which triggers one) refetches it anyway.
+      await fetchResolved();
       dirty = false;
       loaded = true;
       revalidate();

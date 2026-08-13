@@ -42,6 +42,10 @@ object Scope {
     /** The fully resolved scope of one profile against the live device. */
     data class ProfileScope(
         val profileId: String,
+        // Whether the profile ASKED to auto-include, independent of whether anything qualified. The
+        // WebUI needs the two apart: "auto-include on, nothing new yet" reads very differently from
+        // "auto-include off", and an empty autoUids alone cannot tell them apart.
+        val autoInclude: Boolean,
         val explicit: List<Explicit>, // one per apps[] entry, in order
         val autoUids: Set<Int>, // extra uids contributed by autoIncludeNewApps
         val packageNames: List<String>, // wire packages[]: every package-shaped entry, verbatim
@@ -163,12 +167,74 @@ object Scope {
 
         return ProfileScope(
             profileId = id,
+            autoInclude = profile.autoIncludeNewApps,
             explicit = explicit,
             autoUids = autoUids,
             packageNames = packageNames,
             uids = uids,
             lowUids = lowUids,
         )
+    }
+
+    /**
+     * The resolved truth of the last config push — what the native lib was actually handed. Published
+     * once per push by [Resolver] and read by everything else, so a profile is resolved in exactly one
+     * place. That matters for cost as much as for coherence: resolving a profile that auto-includes
+     * enumerates every installed app through PackageManager, and the read-only aggregators below used
+     * to pay that on every call, on whatever thread called them.
+     */
+    data class Resolved(
+        val epoch: Long, // the wire epoch of the push this truth belongs to
+        val atMs: Long, // wall clock of the resolve
+        val baselineReady: Boolean, // known_packages.json is seeded, so auto-include is armed
+        val scopes: List<ProfileScope>,
+    )
+
+    @Volatile private var resolved: Resolved? = null
+
+    /** The last published snapshot, or null before the first push has resolved anything. */
+    fun lastResolved(): Resolved? = resolved
+
+    /**
+     * Publish [scopes] as the resolved truth of the push carrying [epoch]. One immutable object built
+     * and stored with a single volatile write, never mutated in place, so a reader on a KeyAdmin
+     * connection thread sees either the whole old snapshot or the whole new one and never a torn mix.
+     */
+    fun publishResolved(epoch: Long, scopes: List<ProfileScope>) {
+        val ready = baselineSeeded()
+        resolved = Resolved(epoch = epoch, atMs = System.currentTimeMillis(), baselineReady = ready, scopes = scopes)
+        val autoTotal = scopes.sumOf { it.autoUids.size }
+        SystemLogger.info(
+            "Scope: published resolved snapshot epoch=$epoch, ${scopes.size} profile(s), " +
+                "$autoTotal auto uid(s) total, baselineReady=$ready"
+        )
+        for (s in scopes)
+            SystemLogger.info(
+                "Scope: snapshot[${s.profileId}] ${s.packageNames.size} package(s), ${s.uids.size} uid(s), " +
+                    "${s.autoUids.size} auto, autoInclude=${s.autoInclude}"
+            )
+    }
+
+    /**
+     * Is the baseline seeded? Deliberately NON-seeding: it reads the cache only and must never fall
+     * through to [baselineKnownPackages]. That function seeds and freezes the baseline on first call,
+     * and freezing it from a request thread would fix "which apps count as new" at an arbitrary
+     * moment — an HTTP GET would silently decide what auto-include means for the rest of the install.
+     */
+    private fun baselineSeeded(): Boolean = baselineCache?.isNotEmpty() == true
+
+    /**
+     * The scopes to answer read-only questions from. Normally the last published snapshot; a [force]
+     * caller (a user-driven refresh) pays for a fresh live resolve instead, and so does anyone asking
+     * before the first push has happened — KeyAdmin starts serving before the daemon's first resolve.
+     */
+    private fun scopesFor(config: ConfigStore.Config, force: Boolean): List<ProfileScope> {
+        if (!force) lastResolved()?.let { return it.scopes }
+        SystemLogger.info(
+            "Scope: ${if (force) "forced" else "no published snapshot yet;"} live resolve of " +
+                "${config.profiles.size} profile(s)"
+        )
+        return config.profiles.map { p -> resolve(p, config.profiles.filter { it.id != p.id }, quiet = true) }
     }
 
     // The baseline set, cached after the first read/seed. The file is written exactly once (when absent)
@@ -251,10 +317,9 @@ object Scope {
     }
 
     /** Every effective target uid across the whole config (union of each profile's wire uids[]). */
-    fun allTargetUids(config: ConfigStore.Config): Set<Int> {
+    fun allTargetUids(config: ConfigStore.Config, force: Boolean = false): Set<Int> {
         val all = LinkedHashSet<Int>()
-        for (p in config.profiles)
-            all.addAll(resolve(p, config.profiles.filter { it.id != p.id }, quiet = true).uids)
+        for (s in scopesFor(config, force)) all.addAll(s.uids)
         return all
     }
 
@@ -263,10 +328,9 @@ object Scope {
      * collisions a validation error, so last-writer-wins here is only ever exercised by auto-include
      * overlap, which validation already forbids (at most one auto profile).
      */
-    fun uidToProfile(config: ConfigStore.Config): Map<Int, String> {
+    fun uidToProfile(config: ConfigStore.Config, force: Boolean = false): Map<Int, String> {
         val map = HashMap<Int, String>()
-        for (p in config.profiles)
-            for (u in resolve(p, config.profiles.filter { it.id != p.id }, quiet = true).uids) map[u] = p.id
+        for (s in scopesFor(config, force)) for (u in s.uids) map[u] = s.profileId
         return map
     }
 
@@ -275,10 +339,9 @@ object Scope {
      * maps to its name; a raw or auto-included uid has no package, so it maps to its `uid:N` token so
      * the UI still shows something recognisable. Package names win over tokens on the same uid.
      */
-    fun uidToPackage(config: ConfigStore.Config): Map<Int, String> {
+    fun uidToPackage(config: ConfigStore.Config, force: Boolean = false): Map<Int, String> {
         val map = HashMap<Int, String>()
-        for (p in config.profiles) {
-            val scope = resolve(p, config.profiles.filter { it.id != p.id }, quiet = true)
+        for (scope in scopesFor(config, force)) {
             for (x in scope.explicit) if (x.kind == Kind.PACKAGE && x.pkg != null) map[x.uid] = x.pkg
             for (u in scope.uids) if (u !in map) map[u] = "uid:$u"
         }

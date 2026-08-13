@@ -73,7 +73,9 @@ function resolveHint(d, value, resolved) {
 // ---- the resting list ---------------------------------------------------
 export function renderProfileList(mount, state, actions) {
   clear(mount);
-  const { config, errors = [], dirty = false } = state;
+  // autoCounts: Map(profile name -> how many apps the daemon auto-includes for it), from its
+  // resolved snapshot. Empty when /scope is unavailable, in which case the rows read as before.
+  const { config, errors = [], dirty = false, autoCounts = new Map() } = state;
   const names = Object.keys(config.profiles);
 
   const global = errors.filter((e) => e.profile == null).map((e) => e.msg);
@@ -103,9 +105,13 @@ export function renderProfileList(mount, state, actions) {
     const profile = config.profiles[name];
     const apps = getPath(profile, ["apps"]);
     const appCount = Array.isArray(apps) ? apps.length : 0;
+    // The "N apps" chip counts apps[] only, which under-reports an auto-including profile; the
+    // auto chip is the rest of the truth, and this is the resting screen where that lie was loudest.
+    const autoN = autoCounts.get(name) || 0;
     const chips = el("span", { class: "chips" }, [
       el("span", { class: "chip", text: getPath(profile, ["keybox"]) || t("cfg_no_keybox") }),
-      el("span", { class: "chip", text: appCount + t(appCount === 1 ? "cfg_app" : "cfg_apps") }),
+      el("span", { class: "chip", text: appCount + " " + (appCount === 1 ? t("cfg_app") : t("cfg_apps")) }),
+      autoN ? el("span", { class: "chip", text: autoN + " " + t("cfg_auto") }) : null,
       errorCount.get(name) ? el("span", { class: "chip warn", text: errorCount.get(name) + " " + t("cfg_to_fix") }) : null,
     ]);
     list.appendChild(el("button", { class: "list-row", type: "button", onclick: () => actions.onOpen(name) }, [
@@ -136,7 +142,7 @@ export function renderProfileEditor(host, state, actions) {
   const scrollTop = captureScroll(host);
   clear(host);
 
-  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, autoTakenBy = null } = state;
+  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, autoTakenBy = null, autoCount = 0 } = state;
   const profile = config.profiles[name];
   if (!profile) { actions.onClose(); return; }
 
@@ -206,6 +212,9 @@ export function renderProfileEditor(host, state, actions) {
       // The auto-include toggle disables itself (with a note) when ANOTHER profile already owns
       // auto-include — only one profile may, so the conflict shows before Save rejects it.
       autoTakenBy,
+      // How many apps the daemon currently auto-includes for this profile, from its resolved
+      // snapshot — the count config.json cannot supply.
+      autoCount,
     };
     const onChange = (path, v) => actions.onFieldChange(name, path, v);
     const fieldEl = renderField(d, value, onChange, ctx);

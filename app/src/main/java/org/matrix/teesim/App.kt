@@ -10,6 +10,7 @@ import android.os.SystemClock
 import java.io.File
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.json.JSONObject
 
 /**
  * Privileged control daemon, launched via app_process. Bootstraps just enough of the Android
@@ -30,8 +31,6 @@ object App {
     // every resolveAndPush, so an edit to overrides.json (which trips the DATA_DIR watcher) takes effect.
     @Volatile private lateinit var harvest: Harvester.Record
     @Volatile private var lastGoodConfig: ConfigStore.Config? = null
-    // The ro.boot.vbmeta.* values we last pushed to resetprop, so we only re-set them when they change.
-    @Volatile private var lastBootProps: Map<String, String> = emptyMap()
     // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
     private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -125,7 +124,13 @@ object App {
             Scope.baselineKnownPackages()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }
-            PackageWatch.start(appContext) { resolveAndPush() }
+            // The third and last re-resolve trigger: the WebUI's pull-to-refresh on the Profiles
+            // screen. Discovery of newly installed apps is LAZY by design — there is no package
+            // observer, because a broadcast receiver registered from this process is silently
+            // dropped by AMS (no ProcessRecord for a bare app_process; it throws on API 32/33 and
+            // no-ops from 34 on). So the set of installed apps is only ever re-read here, on a
+            // config change, and at daemon start.
+            KeyAdmin.onRescan = { resolveAndPush() }
             startUsagePoll()
 
             SystemLogger.info("Daemon initialised; entering main loop")
@@ -257,7 +262,7 @@ object App {
      * On config validation failure the last-good config is kept.
      */
     @Synchronized
-    private fun resolveAndPush() {
+    private fun resolveAndPush(): Int {
         // Re-layer the user's overrides.json over the frozen capture — an override edit trips the same
         // DATA_DIR watcher that calls us, so this is where a changed override becomes live. Refresh the
         // record the WebUI reads, and reflect any boot key/hash override into ro.boot.vbmeta.*.
@@ -275,14 +280,33 @@ object App {
             lastGoodConfig
                 ?: run {
                     SystemLogger.warning("No valid config yet; nothing to push")
-                    return
+                    return -1
                 }
-        try {
+        return try {
             val msg = Resolver.resolve(cfg, harvest)
             Control.push(msg.toString())
+            countTargetUids(msg)
         } catch (e: Exception) {
             SystemLogger.error("Failed to resolve/push config", e)
+            -1
         }
+    }
+
+    /**
+     * How many distinct caller uids the freshly pushed config targets, read back off the wire message
+     * rather than re-resolving — [Scope.resolve] enumerates every installed app when a profile
+     * auto-includes, and doing that twice per rescan just to count would double the cost of the
+     * WebUI's pull-to-refresh. Deduplicated across profiles, since the same uid never legally appears
+     * in two of them but a count that silently double-reported would be a confusing thing to show.
+     */
+    private fun countTargetUids(msg: JSONObject): Int {
+        val profiles = msg.optJSONArray("profiles") ?: return 0
+        val all = HashSet<Int>()
+        for (i in 0 until profiles.length()) {
+            val uids = profiles.optJSONObject(i)?.optJSONArray("uids") ?: continue
+            for (j in 0 until uids.length()) all.add(uids.getInt(j))
+        }
+        return all.size
     }
 
     /**
@@ -348,21 +372,21 @@ object App {
     }
 
     /**
-     * When a verifiedBootKey/Hash override is active (only possible when the device reported an all-zero,
-     * unlocked boot value), reflect the spoofed value into the matching ro.boot.vbmeta.* property so that
-     * anything reading those props directly sees what attestation presents. Only re-sets a property when
-     * its value changed, so the package/config watchers don't resetprop on every unrelated event.
+     * Force the matching ro.boot.vbmeta.* property to the boot key/hash we actually PRESENT (the override
+     * when one is active, else the real captured value), so anything reading those props directly sees
+     * exactly what attestation reports. We compare against the LIVE property and overwrite it on any
+     * mismatch — the value we attest wins unconditionally, whether the property was empty (some bootloaders
+     * never populate ro.boot.vbmeta.digest — unlocked / verification-disabled / OEM AVB, #228), stale, or
+     * changed by another module. A match is left untouched, so a steady state does no work.
      */
     private fun applyBootProps(h: Harvester.Record) {
-        val want =
-            Harvester.BOOT_PROP.mapNotNull { (field, prop) ->
-                h.overrides[field]?.value?.takeIf { it.isNotEmpty() }?.let { prop to it }
-            }.toMap()
-        if (want == lastBootProps) return
-        for ((prop, value) in want) {
-            if (lastBootProps[prop] != value) SysProp.set(prop, value)
+        for ((prop, value) in Harvester.bootPropValues(h)) {
+            val live = DeviceProps.prop(prop, "")
+            if (live != value) {
+                SysProp.set(prop, value)
+                SystemLogger.info("boot prop: forced $prop to the attested value (was '${live.ifEmpty { "unset" }}')")
+            }
         }
-        lastBootProps = want
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */
