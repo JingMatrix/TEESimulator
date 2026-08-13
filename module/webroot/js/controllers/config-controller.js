@@ -17,6 +17,7 @@ import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE } from "../domain/schema.
 import { setPath, getPath } from "../domain/path.js";
 import { renderProfileList, renderProfileEditor } from "../ui/config-view.js";
 import { renderScope } from "../ui/scope-view.js";
+import { attachPullToRefresh } from "../ui/pull-refresh.js";
 import { el, clear, toast, confirmDialog, promptDialog, openOverlay, openSheet } from "../ui/dom.js";
 
 // How often the open Scope page re-fetches the device app list so fresh usage/recency data
@@ -258,6 +259,17 @@ export function create(mount) {
       });
   }
 
+  // Opening the Scope page rescans before it fetches. The daemon is where the auto-include rule is
+  // applied, against the installed-app set it re-reads during a resolve, so asking it to re-resolve
+  // first means the picker opens on an already-current view rather than painting a stale one and
+  // correcting itself a moment later. A failed rescan is not fatal — log it and fetch anyway, so a
+  // daemon that is down still leaves the picker usable for editing.
+  function rescanThenFetch() {
+    return keyAdmin("rescan")
+      .catch((e) => { console.warn("[config] scope: /rescan failed:", (e && e.message) || String(e)); })
+      .then(() => fetchPackages(true));
+  }
+
   function openScope(name) {
     if (!config.profiles[name]) return;
     scoping = name;
@@ -277,8 +289,10 @@ export function create(mount) {
     // Prefetch the admin token so /icon URLs build synchronously as rows render.
     adminToken().then((t) => { iconToken = t || null; if (scoping === name) renderScopeView(); }).catch(() => {});
 
-    // Fetch the live app list; if a cache already exists, still refresh it in the background.
-    fetchPackages(!packagesCache);
+    // Rescan, then fetch the live app list. Always the spinner path, cache or not: the point is that
+    // what the user first sees is post-rescan.
+    scopeLoading = true;
+    rescanThenFetch();
     renderScopeView();
     bindScopePull();
 
@@ -665,6 +679,53 @@ export function create(mount) {
     }
     mount.appendChild(card);
   }
+
+  // Pull the Profiles list down to re-discover apps. The daemon runs no package observer — a
+  // receiver registered from its bare app_process is rejected by AMS — so a newly installed app is
+  // noticed only when something goes and looks. This is that ask: /rescan re-resolves the config
+  // against the live device and re-pushes it, which is when a profile that auto-includes new apps
+  // folds in anything installed since. The daemon also does this on its own at start and whenever
+  // config.json changes; those three moments are the whole of discovery.
+  //
+  // Unsaved edits are never clobbered: config.json is re-read only when nothing is pending, the same
+  // rule load() follows. The cached device app list is always dropped, since that is precisely what
+  // the pull is meant to refresh.
+  async function rescan() {
+    let msg;
+    try {
+      const r = await keyAdmin("rescan");
+      msg = (r && r.ok)
+        ? "Rescanned — " + r.uids + (r.uids === 1 ? " app" : " apps") + " targeted"
+        : "Rescan failed: " + ((r && r.error) || "unknown error");
+    } catch (e) {
+      msg = "Rescan failed: " + (e && e.message ? e.message : String(e));
+    }
+
+    packagesCache = null; // force the Scope page and the editor's chips to re-fetch
+    if (!dirty) {
+      const res = await ioLoad();
+      if (res.ok) {
+        config = res.config;
+        loaded = true;
+        revalidate();
+      } else if (!config) {
+        // Nothing on screen but the load-error card, and the re-read failed again: repaint that
+        // rather than falling through to renderList(), which would throw on a null config.
+        renderLoadError(res);
+        toast(msg);
+        return;
+      }
+    }
+    keyboxFiles = await listKeyboxes();
+    await loadHarvest();
+    if (config) {
+      renderList();
+      if (editing) renderEditor();
+    }
+    toast(msg);
+  }
+
+  attachPullToRefresh(mount, rescan);
 
   return {
     async load() {

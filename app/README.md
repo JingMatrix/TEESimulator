@@ -53,7 +53,16 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
    turns a validated config plus the frozen harvest, system properties, and the clock into the
    full-replace `config` message the native lib applies — resolving the profile's targets via
    **`Scope`**, the patch mini-language, and the harvested device ids and security level.
-   **`PackageWatch`** re-resolves and re-pushes on `PACKAGE_ADDED/REMOVED/REPLACED`.
+
+   A re-resolve happens at daemon start, on a `config.json` change, and on `POST /rescan` — which
+   the WebUI calls when the Profiles list is pulled to refresh and when the Scope picker opens, so
+   the picker paints an already-current view rather than correcting itself a moment later. App
+   discovery is therefore **lazy, not observed** — there is deliberately no package watcher. A
+   `BroadcastReceiver`
+   registered from this process is rejected by `ActivityManagerService`, which has no `ProcessRecord`
+   for a bare `app_process`: it threw `SecurityException` on API 32/33 and, from API 34, silently
+   returns without registering, so such a watcher looks healthy while never firing once. Re-reading
+   the installed-app set on demand is the only thing that actually works, on every release.
 
    **`Scope`** is the one place a profile's `apps[]` becomes the two wire arrays the native router
    matches on — `packages[]` (attestation package-name match, kept verbatim so a not-yet-installed
@@ -109,7 +118,9 @@ has a real `Context` and root that the webview alone does not:
   a since-boot "recent" flag), **`GET /icon`** (a rendered app icon PNG, token-in-query so an `<img>`
   can load it, cached in memory), and **`POST /usage/clear`** (wipe the frequency memory). So a
   profile's targets are chosen from the live device — searchable, sortable by real usage, with icons —
-  rather than typed as raw package names.
+  rather than typed as raw package names. **`POST /rescan`** re-resolves and re-pushes the config
+  against the live device, returning the resulting target-uid count; the Profiles screen's
+  pull-to-refresh calls it, and it is what makes lazy app discovery work without a package watcher.
 - **`UsageStore`** — the per-package frequency/recency memory behind the picker's "Recent" group and
   its frequency/recently-used sorts. The injected interceptor tallies each `generateKey` caller uid in
   memory (a short locked bump, never any I/O on the crypto path); the daemon polls that snapshot over

@@ -72,6 +72,15 @@ object KeyAdmin {
     @Volatile private var token: String = ""
     @Volatile private var harvest: Harvester.Record? = null
 
+    /**
+     * Set by [App] to its resolve-and-push, and invoked by `POST /rescan` — the WebUI's pull-to-refresh
+     * on the Profiles screen. This is what makes app discovery work without a package observer: the
+     * re-resolve re-reads the live installed-app set, so a profile that auto-includes new apps picks up
+     * anything installed since the last one. Returns the number of caller uids the new push targets, or
+     * -1 if there was no valid config to push.
+     */
+    @Volatile var onRescan: (() -> Int)? = null
+
     fun start(record: Harvester.Record) {
         harvest = record
         token = newToken()
@@ -235,6 +244,7 @@ object KeyAdmin {
                         method == "GET" && path == "/keys" -> listKeys()
                         method == "GET" && path == "/keys/db" -> keysDb()
                         method == "GET" && path == "/packages" -> packages()
+                        method == "POST" && path == "/rescan" -> rescan()
                         method == "POST" && path == "/usage/clear" -> usageClear()
                         method == "POST" && path == "/keys/db/delete" -> deleteDbKeys(query)
                         method == "GET" && path == "/keys/inspect" ->
@@ -406,6 +416,23 @@ object KeyAdmin {
     private fun usageClear(): JSONObject {
         val cleared = UsageStore.clear()
         return JSONObject().put("ok", true).put("cleared", cleared)
+    }
+
+    /**
+     * Re-resolve the config against the live device and push it — the lazy half of app discovery, run
+     * when the user pulls the Profiles screen down. Everything expensive already happens inside
+     * [App.resolveAndPush] (config re-read, package enumeration, push, re-attest on the ack), so this
+     * only reports the resulting target count for the WebUI's toast.
+     */
+    private fun rescan(): JSONObject {
+        val hook =
+            onRescan
+                ?: return JSONObject().put("ok", false).put("error", "daemon not ready")
+        val uids = hook()
+        if (uids < 0)
+            return JSONObject().put("ok", false).put("error", "no valid config to push")
+        SystemLogger.info("KeyAdmin: rescan pushed a config targeting $uids caller uid(s)")
+        return JSONObject().put("ok", true).put("uids", uids)
     }
 
     /**

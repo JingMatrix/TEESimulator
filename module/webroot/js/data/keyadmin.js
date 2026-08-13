@@ -183,6 +183,11 @@ export async function keyAdmin(action, args = {}) {
       return request("GET", "/packages");
     case "usageClear":
       return request("POST", "/usage/clear");
+    case "rescan":
+      // Re-resolve and re-push the config against the live device. This is how a newly installed
+      // app is discovered — there is no package observer in the daemon, so the Profiles screen's
+      // pull-to-refresh is what goes and looks. Resolves to { ok, uids }.
+      return request("POST", "/rescan");
     case "keysDbDelete":
       return request("POST", "/keys/db/delete" + idsQuery(args));
     case "inspect":

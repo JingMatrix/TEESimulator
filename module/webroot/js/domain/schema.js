@@ -107,7 +107,8 @@ export const FIELDS = [
   {
     key: "autoIncludeNewApps", path: ["autoIncludeNewApps"], label: "Auto-include new apps",
     group: "apps", type: "toggle", required: false, default: false,
-    help: "Target apps installed after now; existing apps stay untouched.",
+    help: "Targets apps installed after now; existing apps stay untouched. New apps are discovered " +
+      "on a rescan, not watched for live.",
   },
 ];
 
