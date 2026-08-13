@@ -80,3 +80,29 @@ export async function deleteFile(path) {
   const r = await run(["rm", "-f", path]);
   return r.errno === 0 ? { ok: true } : { ok: false, error: r.stderr || "delete failed" };
 }
+
+// Read a system property's current value. An absent/unset property yields an empty string (getprop
+// prints nothing). The name is a quoted argv element, never interpolated, and getprop is read-only.
+export async function getProp(name) {
+  return (await run(["getprop", name])).stdout.trim();
+}
+
+// Set a system property. We go through resetprop (KernelSU/APatch/Magisk all ship it) so a
+// system-owned or persist.* property can be written where a plain setprop would be rejected by
+// SELinux; we do NOT pass -n, so property_service re-triggers and live readers (keystore2, rkpd)
+// observe the change. Falls back to `magisk resetprop` then `setprop`. Each token is a quoted argv
+// element — a name or value can never become a flag or a second command. Returns { ok } / { ok:false, error }.
+export async function setProp(name, value) {
+  const attempts = [
+    ["resetprop", name, value],
+    ["magisk", "resetprop", name, value],
+    ["setprop", name, value],
+  ];
+  let last = "";
+  for (const argv of attempts) {
+    const r = await run(argv);
+    if (r.errno === 0) return { ok: true };
+    last = r.stderr || ("exit " + r.errno);
+  }
+  return { ok: false, error: last || "no working resetprop/setprop" };
+}

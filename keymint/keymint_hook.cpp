@@ -120,14 +120,34 @@ bool IsRkpProvisioning(AIBinder* binder) {
   return desc && std::strcmp(desc, "android.security.rkp.IRemoteProvisioning") == 0;
 }
 
-// Whether a security level's rkp_only property is set. On such a level keystore2 has no batch key to
-// fall back to, so denying its RKP lookup makes generateKey fail outright (get_attest_key_info returns
-// Err instead of Ok(None)); there we must let the lookup through. We only ever READ the property — a
-// global write would be an obvious detection point.
-bool PropIsRkpOnly(const char* name) {
-  char buf[PROP_VALUE_MAX] = {0};
-  int n = __system_property_get(name, buf);
-  return n > 0 && (std::strcmp(buf, "true") == 0 || std::strcmp(buf, "1") == 0);
+// Read a security level's rkp_only property. Fills `raw` with the property's current value (empty
+// string if unset) so our RKP-policy logging can report exactly what keystore2 and this guard see at
+// decision time, and returns whether it is set to a truthy value ("true"/"1"). On such a level
+// keystore2 has no batch key to fall back to, so denying its RKP lookup makes generateKey fail
+// outright (get_attest_key_info returns Err instead of Ok(None)); there we must let the lookup
+// through. We only ever READ the property — a global write would be an obvious detection point.
+bool ReadRkpOnly(const char* name, char raw[PROP_VALUE_MAX]) {
+  raw[0] = '\0';
+  int n = __system_property_get(name, raw);
+  return n > 0 && (std::strcmp(raw, "true") == 0 || std::strcmp(raw, "1") == 0);
+}
+
+// Log the device's remote-key-provisioning policy once, at install. These are the properties that
+// decide whether our per-target RKP denial is safe: the two per-level rkp_only knobs keystore2 reads
+// to pick its attestation-key source, plus enable_rkpd (whether the rkpd provisioner runs at all).
+// Dumping the ground truth once makes every deny/NOT-denying decision below self-explanatory in a
+// bug report — a reader can see what the guard is reacting to without guessing at the device state.
+void LogRkpPolicySnapshot() {
+  static const char* const kProps[] = {
+      "remote_provisioning.tee.rkp_only",
+      "remote_provisioning.strongbox.rkp_only",
+      "persist.device_config.remote_key_provisioning_native.enable_rkpd",
+  };
+  for (const char* name : kProps) {
+    char buf[PROP_VALUE_MAX] = {0};
+    int n = __system_property_get(name, buf);
+    LOGI("RKP policy: %s=%s", name, n > 0 ? buf : "<unset>");
+  }
 }
 
 // Allocator for AParcel_readString: `length` includes the null terminator, or is -1 for a null string.
@@ -219,14 +239,18 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
         bool strongbox = GetRegIsStrongBox(binder, *in);
         const char* prop = strongbox ? "remote_provisioning.strongbox.rkp_only"
                                       : "remote_provisioning.tee.rkp_only";
-        if (PropIsRkpOnly(prop)) {
-          LOGI("RKP: NOT denying %s getRegistration for target uid=%d (%s set; denial would fail key "
+        const char* level = strongbox ? "strongbox" : "TE";
+        char raw[PROP_VALUE_MAX] = {0};
+        bool rkp_only = ReadRkpOnly(prop, raw);
+        const char* val = raw[0] ? raw : "<unset>";
+        if (rkp_only) {
+          LOGI("RKP: NOT denying %s getRegistration for target uid=%d (%s=%s; denial would fail key "
                "generation on an rkp-only level)",
-               strongbox ? "strongbox" : "TE", uid, prop);
+               level, uid, prop, val);
         } else {
-          LOGI("RKP: denying %s IRemoteProvisioning transact code=%u for target uid=%d "
-               "(keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
-               strongbox ? "strongbox" : "TE", code, uid);
+          LOGI("RKP: denying %s IRemoteProvisioning transact code=%u for target uid=%d (%s=%s; "
+               "keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
+               level, code, uid, prop, val);
           AParcel_delete(*in);  // honour AIBinder_transact's ownership of the input parcel
           *in = nullptr;
           return STATUS_FAILED_TRANSACTION;  // -> Rust `?` -> get_attest_key_info Ok(None) on hybrid
@@ -256,6 +280,7 @@ bool IsHookableElf(const std::string& path, const std::string& exe) {
 }
 
 extern "C" bool teesim_hook_install() {
+  LogRkpPolicySnapshot();  // one-shot ground truth for the RKP-denial decisions HookedTransact makes
   char exe_buf[512] = {0};
   ssize_t n = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
   std::string exe = n > 0 ? std::string(exe_buf, n) : std::string();
