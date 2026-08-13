@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   emptyProfile, emptyConfig,
-  PKG_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE,
+  PKG_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, UID_RE, APP_ENTRY_RE,
 } from "../js/domain/schema.js";
 import { validateConfig, validateProfile } from "../js/domain/validate.js";
 
@@ -124,9 +124,57 @@ test("a package listed twice in ONE profile is not a cross-profile duplicate", (
   assert.equal(r.ok, true, JSON.stringify(r.errors));
 });
 
+// --- scope: raw-uid tokens & auto-include --------------------------------
+test("a uid: token is accepted as an app entry", () => {
+  const r = validateConfig(configWith({ p: validProfile(["com.ok", "uid:10123"]) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test("a malformed uid token is rejected", () => {
+  for (const bad of ["uid:", "uid:x", "uid: 10", "uid:-1", "uid:10.0"]) {
+    const r = validateConfig(configWith({ p: validProfile(["com.ok", bad]) }));
+    assert.equal(r.ok, false, `expected ${bad} to be rejected`);
+    assert.ok(r.errors.some((e) => e.field === "apps"), `expected an apps error for ${bad}`);
+  }
+});
+
+test("autoIncludeNewApps=true makes an empty apps list valid", () => {
+  const p = validProfile([]);
+  p.autoIncludeNewApps = true;
+  const r = validateConfig(configWith({ p }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test("autoIncludeNewApps=false with an empty apps list is still invalid", () => {
+  const p = validProfile([]);
+  p.autoIncludeNewApps = false;
+  const r = validateConfig(configWith({ p }));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.profile === "p" && e.field === "apps"));
+});
+
+test("two profiles both auto-including new apps is an error on BOTH", () => {
+  const a = validProfile(["com.a"]); a.autoIncludeNewApps = true;
+  const b = validProfile(["com.b"]); b.autoIncludeNewApps = true;
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, false);
+  const autoErrs = r.errors.filter((e) => e.field === "autoIncludeNewApps");
+  assert.ok(autoErrs.some((e) => e.profile === "a"));
+  assert.ok(autoErrs.some((e) => e.profile === "b"));
+});
+
+test("exactly one profile auto-including new apps is fine", () => {
+  const a = validProfile(["com.a"]); a.autoIncludeNewApps = true;
+  const b = validProfile(["com.b"]);
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
 // --- regex whitelists ----------------------------------------------------
 const cases = [
   [PKG_RE, ["com.foo", "com.foo.bar", "a_b.c", "A9._"], ["", "com foo", "com;rm -rf", "com/foo", "com-foo"]],
+  [UID_RE, ["uid:0", "uid:10123", "uid:2000"], ["", "uid:", "uid:x", "uid: 10", "uid:-1", "uid:10.0", "10123", "com.foo"]],
+  [APP_ENTRY_RE, ["com.foo", "com.foo.bar", "uid:0", "uid:10123"], ["", "uid:", "uid:x", "com foo", "com/foo", "uid:1.0"]],
   [PROFILE_RE, ["pixel", "a-b_c", "x".repeat(32)], ["", "x".repeat(33), "has space", "bad!", "dot.name"]],
   [KEYBOX_RE, ["keybox.xml", "a-b_c.1.xml"], ["keybox", "keybox.XML", "../x.xml", "a b.xml", "keybox.xml.bak"]],
   [PATCH_RE, ["today", "no", "harvested", "system_property", "2024-01", "2024-12", "2024-01-15", "2024-12-31", "YYYY-MM", "YYYY-MM-05", "YYYY-MM-DD"], ["2024", "2024-1", "2024-1-1", "yesterday", "", "2024-00", "2024-13", "2024-01-00", "2024-01-32", "2024-13-01", "MM-05", "YYYY-13-01"]],

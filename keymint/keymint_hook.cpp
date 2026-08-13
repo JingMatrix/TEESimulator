@@ -42,8 +42,31 @@ binder_status_t (*real_transact)(AIBinder*, transaction_code_t, AParcel**, AParc
 thread_local bool tls_forwarding = false;
 
 std::mutex g_mu;
-// Real KeyMint proxy -> our local device wrapping it.
+// Real KeyMint proxy -> our local device wrapping it. A nullptr value is a NEGATIVE cache ("do not
+// wrap this proxy", i.e. a SOFTWARE-level km_compat device) so we neither re-probe its
+// getHardwareInfo nor rebuild a device on every transact. Keyed on the raw proxy pointer, which is
+// safe because keystore2 caches its per-level KeyMint devices for the process lifetime, so the
+// pointer is stable and never reallocated (the negative cache relies on this too).
 std::map<AIBinder*, AIBinder*> g_local_for_proxy;
+
+// Our own local devices (the non-null values of g_local_for_proxy). IsKeyMintProxy matches any local
+// IKeyMintDevice by descriptor, and our own TeesimKeyMintDevice is one, so IsKeyMintProxy excludes
+// anything in this set. (Redirect dispatches our device through real_transact — the unhooked LSPlt
+// backup — so it never re-enters the hook; forwarding recursion is prevented by tls_forwarding, not
+// this set. This is a guard against any other caller transacting our device through the hooked symbol.)
+//
+// Guarded by a SEPARATE mutex, not g_mu: LocalFor holds g_mu across teesim_router_new_device, which
+// makes a blocking getHardwareInfo IPC into the real HAL, while IsOurDevice runs on the transact hot
+// path — one shared lock would stall every handled transact behind device construction. Lock order is
+// always g_mu -> g_our_mu (IsOurDevice takes g_our_mu alone; LocalFor takes g_mu, then g_our_mu).
+std::mutex g_our_mu;
+std::set<AIBinder*> g_our_devices;
+
+// True if `binder` is a TeesimKeyMintDevice we created.
+bool IsOurDevice(AIBinder* binder) {
+  std::lock_guard<std::mutex> lk(g_our_mu);
+  return g_our_devices.count(binder) != 0;
+}
 
 bool IsHandled(transaction_code_t code) {
   switch (code) {
@@ -61,12 +84,27 @@ bool IsHandled(transaction_code_t code) {
   }
 }
 
+// Identity check for the KeyMint binder keystore2 transacts. We match on the class descriptor alone
+// and do not require AIBinder_isRemote, so we catch KeyMint whether it is remote or in-process:
+//
+//   - Native KeyMint HAL: keystore2's TrustedEnvironment/StrongBox proxy is a remote binder.
+//   - Legacy Keymaster (keymaster@4.x) backend: keystore2 has no native KeyMint, so per security level
+//     it holds an in-process km_compat IKeyMintDevice (getKeyMintDevice) — stored directly (keymaster
+//     4.0/4.1) or behind a BacklevelKeyMintWrapper (downlevel). Either way the binder that reaches
+//     AIBinder_transact is a local proxy (isRemote==false).
+//
+// The SOFTWARE level is excluded by level, not here: keystore2 serves SecurityLevel::SOFTWARE from an
+// in-process km_compat device on every device, and teesim_router_new_device returns nullptr for it
+// (LocalFor caches that), so the software leg is never wrapped. See that function.
+//
+// The descriptor also matches our own local TeesimKeyMintDevice, so we exclude it (IsOurDevice). The
+// descriptor is compared first, so the g_our_mu lookup runs only for actual IKeyMintDevice binders.
 bool IsKeyMintProxy(AIBinder* binder) {
-  if (!AIBinder_isRemote(binder)) return false;
   const AIBinder_Class* clazz = AIBinder_getClass(binder);
   if (!clazz) return false;
   const char* desc = AIBinder_Class_getDescriptor(clazz);
-  return desc && std::strcmp(desc, IKeyMintDevice::descriptor) == 0;
+  if (!desc || std::strcmp(desc, IKeyMintDevice::descriptor) != 0) return false;
+  return !IsOurDevice(binder);
 }
 
 // The framework RKP front-end keystore2 asks for a remote-provisioned attestation key. keystore2
@@ -105,7 +143,14 @@ AIBinder* LocalFor(AIBinder* proxy) {
   // wrapped HAL's getHardwareInfo(); the value passed here is only the fallback
   // used if that query fails.
   AIBinder* local = teesim_router_new_device(1 /* fallback: TRUSTED_ENVIRONMENT */, proxy);
-  g_local_for_proxy[proxy] = local;
+  g_local_for_proxy[proxy] = local;  // may be nullptr (SOFTWARE): negative cache, do not re-probe
+  if (local) {
+    // Record our device so the relaxed IsKeyMintProxy never re-wraps it. We already hold g_mu; lock
+    // order is g_mu -> g_our_mu. Never insert nullptr (a SOFTWARE proxy yields local==nullptr): the
+    // "g_our_devices == our real devices" invariant must hold.
+    std::lock_guard<std::mutex> lk(g_our_mu);
+    g_our_devices.insert(local);
+  }
   return local;
 }
 
@@ -147,6 +192,8 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
     if (IsHandled(code) && IsKeyMintProxy(binder)) {
       AIBinder* local = LocalFor(binder);
       if (local) return Redirect(local, code, in, out, flags, binder);
+      // local == nullptr: a SOFTWARE-level proxy we deliberately do not wrap; fall through to
+      // real_transact so keystore2's own software-key path runs untouched.
     }
   }
   return real_transact(binder, code, in, out, flags);
@@ -195,8 +242,13 @@ extern "C" bool teesim_hook_install() {
   // on some build do we widen to a full ELF scan, so coverage is never lost.
   if (!exe.empty()) {
     register_and_commit(/*exe_only=*/true);
-    if (real_transact != nullptr) return true;
+    if (real_transact != nullptr) {
+      LOGI("hook: AIBinder_transact patched in the main executable (%s)", exe.c_str());
+      return true;
+    }
   }
   register_and_commit(/*exe_only=*/false);
+  LOGI("hook: AIBinder_transact %s after full ELF scan",
+       real_transact != nullptr ? "patched" : "not found (no importer)");
   return real_transact != nullptr;
 }

@@ -6,14 +6,14 @@
 # FFI from them) — no libcrypto.so of any ABI. Configure via environment:
 #   NDK_HOME   Android NDK (default: newest under $ANDROID_HOME/ndk)
 #   ABI        Android ABI (default: arm64-v8a)
-#   API        platform level (default: 34)
+#   API        platform level (default: 29)
 #   BORINGSSL  BoringSSL source dir with include/ (cloned if unset/missing)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 ABI="${ABI:-arm64-v8a}"
-API="${API:-34}"
+API="${API:-29}"
 
 case "$ABI" in
   arm64-v8a)   TRIPLE=aarch64-linux-android ;;
@@ -71,6 +71,14 @@ cd "$HERE"
 # see those args either way — detect which cargo-ndk is installed and pass the flag only when it exists.
 BINDGEN=()
 if cargo ndk --help 2>/dev/null | grep -q -- '--bindgen'; then BINDGEN=(--bindgen); fi
-cargo ndk -t "$ABI" --platform "$API" "${BINDGEN[@]}" build --release -p teesim-km
 
-echo "Output: $HERE/target/$TRIPLE/release/libteesim_km.a"
+# `build.sh clippy` type-checks the crate with clippy instead of building the .a,
+# enforcing its cast lints (capi's conversion functions deny them). It runs under
+# the same NDK/BoringSSL env as a build, so it checks the exact target the
+# interceptor ships for. Any other/absent argument builds the static library.
+CARGO_CMD="${1:-build}"
+cargo ndk -t "$ABI" --platform "$API" "${BINDGEN[@]}" "$CARGO_CMD" --release -p teesim-km
+
+if [ "$CARGO_CMD" = build ]; then
+  echo "Output: $HERE/target/$TRIPLE/release/libteesim_km.a"
+fi

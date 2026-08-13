@@ -1,8 +1,8 @@
 diff --git a/ta/src/cert.rs b/ta/src/cert.rs
-index 97b15b3..20d332d 100644
+index ce07450..9d90f4b 100644
 --- a/ta/src/cert.rs
 +++ b/ta/src/cert.rs
-@@ -296,9 +296,21 @@ enum SecurityLevel {
+@@ -300,9 +300,21 @@ enum SecurityLevel {
  }
  
  /// Build an ASN.1 DER-encoded attestation extension.
@@ -25,9 +25,9 @@ index 97b15b3..20d332d 100644
      challenge: &'a [u8],
      app_id: &'a [u8],
      security_level: keymint::SecurityLevel,
-@@ -349,9 +361,9 @@ pub(crate) fn attestation_extension<'a>(
+@@ -352,9 +364,9 @@ pub(crate) fn attestation_extension<'a>(
      let sec_level = SecurityLevel::try_from(security_level as u32)
-         .map_err(|_| km_err!(InvalidArgument, "invalid security level {:?}", security_level))?;
+         .map_err(|_| km_err!(InvalidArgument, "invalid security level {security_level:?}"))?;
      let ext = AttestationExtension {
 -        attestation_version: keymint_version,
 +        attestation_version,
@@ -38,10 +38,10 @@ index 97b15b3..20d332d 100644
          attestation_challenge: challenge,
          unique_id,
 diff --git a/ta/src/keys.rs b/ta/src/keys.rs
-index 7323b01..85707d2 100644
+index 60f9895..f4d3310 100644
 --- a/ta/src/keys.rs
 +++ b/ta/src/keys.rs
-@@ -173,7 +173,7 @@ impl crate::KeyMintTa {
+@@ -174,7 +174,7 @@ impl crate::KeyMintTa {
                  let unique_id = self.calculate_unique_id(app_id, params)?;
                  let boot_info = self.boot_info_hashed_key()?;
                  let attest_ext = cert::attestation_extension(
@@ -51,10 +51,10 @@ index 7323b01..85707d2 100644
                      app_id,
                      self.hw_info.security_level,
 diff --git a/ta/src/lib.rs b/ta/src/lib.rs
-index a0efe49..ccbd543 100644
+index f281543..5f17d72 100644
 --- a/ta/src/lib.rs
 +++ b/ta/src/lib.rs
-@@ -125,6 +125,12 @@ pub struct KeyMintTa {
+@@ -128,6 +128,12 @@ pub struct KeyMintTa {
      /// The version of the HAL AIDL interface specification that this TA acts as.
      aidl_version: KeyMintHalVersion,
  
@@ -64,18 +64,18 @@ index a0efe49..ccbd543 100644
 +    /// matching `keyMintVersion` differs from it (e.g. Keymaster 4.0 is attestation 3, keymaster 4).
 +    attestation_version: i32,
 +
-     /**
-      * State that is set after the TA starts, but latched thereafter.
-      */
-@@ -330,6 +336,7 @@ impl KeyMintTa {
+     /// Versions of the HAL that this TA can be requested to act as.
+     allowed_aidl_versions: Box<[KeyMintHalVersion]>,
+ 
+@@ -353,6 +359,7 @@ impl KeyMintTa {
              hw_info,
              rpc_info,
              aidl_version: KEYMINT_CURRENT_VERSION,
 +            attestation_version: KEYMINT_CURRENT_VERSION as i32,
+             allowed_aidl_versions: allowed_aidl_versions.into(),
              boot_info: None,
              rot_data: None,
-             hal_info: None,
-@@ -353,6 +360,31 @@ impl KeyMintTa {
+@@ -384,6 +391,31 @@ impl KeyMintTa {
          self.hw_info.security_level == SecurityLevel::Strongbox
      }
  

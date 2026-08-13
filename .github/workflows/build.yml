@@ -31,7 +31,7 @@ jobs:
       - name: Set up the Android SDK and NDK
         uses: android-actions/setup-android@v3
       - name: Install NDK, CMake and build-tools
-        run: sdkmanager --install "ndk;${NDK_VERSION}" "cmake;3.22.1" "build-tools;34.0.0" "build-tools;36.0.0" "platforms;android-34" "platforms;android-36"
+        run: sdkmanager --install "ndk;${NDK_VERSION}" "cmake;3.22.1" "build-tools;36.0.0" "platforms;android-36"
 
       # The whole build is driven by Gradle via the committed wrapper: AGP produces the control
       # daemon's dex and builds the native interceptors through externalNativeBuild (CMake), whose
@@ -56,6 +56,16 @@ jobs:
             ~/.cargo/registry
             rust/target
           key: cargo-${{ hashFiles('rust/**/Cargo.toml') }}
+
+      # Enforce the TA's cast lints on the shipped target before building: capi's
+      # KeyParameter conversion denies lossy integer casts (see #205), so a new
+      # unguarded cast fails here rather than silently mis-encoding a tag.
+      - name: Lint the KeyMint TA (clippy)
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          rustup component add clippy
+          ./rust/build.sh clippy
 
       - name: Build the module
         env:

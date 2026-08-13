@@ -337,6 +337,15 @@ void HandleConnection(int fd) {
       resp += sc.certs;
       resp += "]}";
       WriteFrame(fd, resp);
+    } else if (t == "getUsage") {
+      // Poll the router's per-caller key-usage snapshot (see control.h). The router owns the JSON
+      // array; we wrap it in the reply envelope and free it.
+      char* j = teesim_usage_json_alloc();
+      std::string resp = "{\"type\":\"usage\",\"apps\":";
+      resp += (j ? j : "[]");
+      resp += "}";
+      free(j);
+      WriteFrame(fd, resp);
     } else if (t == "ping") {
       const tjson::Value *e = msg.get("epoch");
       std::string pong = "{\"type\":\"pong\",\"epoch\":";
@@ -392,6 +401,8 @@ void *ServerThread(void *) {
 }
 
 }  // namespace
+
+extern "C" int teesim_android_api(void) { return AndroidApi(); }
 
 extern "C" void teesim_control_start(void) {
   static bool started = false;

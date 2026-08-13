@@ -36,6 +36,37 @@ export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+// An inline SVG icon built the same crisp, theme-adaptive way as the bottom-nav icons: a 24x24
+// stroke icon that inherits `currentColor`, so it tints with the surrounding text in either theme.
+// `paths` is an array of <path>/<circle>/<line> descriptors { d } or { cx, cy, r } etc.; SVG needs
+// the SVG namespace, which document.createElement (used by el()) does not set — hence createElementNS.
+const SVG_NS = "http://www.w3.org/2000/svg";
+export function svgIcon(shapes, { size = 20, cls = "" } = {}) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  if (cls) svg.setAttribute("class", cls);
+  for (const s of shapes) {
+    const tag = s.d ? "path" : s.tag || "path";
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(s)) if (k !== "tag") n.setAttribute(k, v);
+    svg.appendChild(n);
+  }
+  return svg;
+}
+
+// The two glyphs the Scope search bar needs, as reusable shape sets: a magnifying glass and a
+// descending-bars "sort" mark. Kept here next to svgIcon so any view can reuse them.
+export const ICON_SEARCH = [{ tag: "circle", cx: 11, cy: 11, r: 7 }, { d: "M20 20l-3.6-3.6" }];
+export const ICON_SORT = [{ d: "M4 6h16" }, { d: "M6 12h12" }, { d: "M9 18h6" }];
+
 // Transient toast. Owns the #toast host declared in index.html.
 export function toast(msg) {
   const t = document.getElementById("toast");

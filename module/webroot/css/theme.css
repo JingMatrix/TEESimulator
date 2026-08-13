@@ -19,6 +19,7 @@
   --danger-fg: #fff;
   --warn: #c9821a;
   --chip: #eef1f5;
+  --accent-weak: #e7effb;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -36,6 +37,7 @@
     --danger-fg: #fff;
     --warn: #e6a94d;
     --chip: #262b33;
+    --accent-weak: #223046;
   }
 }
 
@@ -53,6 +55,7 @@
   --danger-fg: #fff;
   --warn: #e6a94d;
   --chip: #262b33;
+  --accent-weak: #223046;
 }
 
 * { box-sizing: border-box; }

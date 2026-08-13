@@ -25,6 +25,7 @@
 #include <openssl/x509.h>
 
 #include <ctime>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -38,17 +39,29 @@
 
 using namespace android;
 
-// IKeystoreService transaction codes (Android 10/11).
-enum {
-  TX_generateKey = 18,
-  TX_getKeyCharacteristics = 19,
-  TX_begin = 22,
-  TX_update = 23,
-  TX_finish = 24,
-  TX_abort = 25,
-  TX_exportKey = 21,
-  TX_attestKey = 29,
+// IKeystoreService transaction codes. The interface is otherwise identical across
+// Android 10 and 11, but R dropped reset() (ordinal 7 on Q) from the AIDL, so every
+// later method — all the ones we intercept — shifts down by one. Picking the wrong
+// table silently hijacks the neighbouring method: on an R device the Q codes make us
+// answer getKeyCharacteristics as if it were generateKey while the real generateKey
+// (one ordinal lower) runs untouched in keystore. Selected from the API level below.
+struct TxCodes {
+  uint32_t generateKey, getKeyCharacteristics, exportKey, attestKey, begin, update, finish, abort;
 };
+constexpr TxCodes kTxQ = {18, 19, 21, 29, 22, 23, 24, 25};  // Android 10 (API 29)
+constexpr TxCodes kTxR = {17, 18, 20, 28, 21, 22, 23, 24};  // Android 11 (API 30)
+
+// True on Android 11+. Besides the ordinal shift, R inserted a `byte[] input` before
+// `signature` in finish(), so the two releases also parse that request differently.
+bool IsAndroidR() {
+  static const bool is_r = teesim_android_api() >= 30;
+  return is_r;
+}
+
+const TxCodes& Codes() {
+  static const TxCodes& codes = IsAndroidR() ? kTxR : kTxQ;
+  return codes;
+}
 
 // KeyMint/Keymaster tag values (shared) and enum constants we need.
 enum {
@@ -90,8 +103,7 @@ struct PendingKey {
   void RebindParamBlobs() {
     size_t k = 0;
     for (auto& kp : params) {
-      const uint32_t type = kp.tag & 0xf0000000u;
-      if (type != 0x80000000u && type != 0x90000000u) continue;  // not a BIGNUM/BYTES param
+      if (teesim_km_tag_value_kind(kp.tag) != KM_VALUE_BYTES) continue;  // not a BIGNUM/BYTES param
       if (k >= param_blobs.size()) {
         kp.blob = nullptr;
         kp.blob_len = 0;
@@ -250,23 +262,19 @@ std::vector<KmParam> ReadKeymasterArguments(Parcel& p,
     if (p.readInt32() == 0) continue;  // typed-list element presence marker
     KmParam kp{};
     kp.tag = static_cast<uint32_t>(p.readInt32());
-    switch (kp.tag & 0xf0000000u) {
-      case 0x10000000:  // ENUM
-      case 0x20000000:  // ENUM_REP
-      case 0x30000000:  // UINT
-      case 0x40000000:  // UINT_REP
+    switch (teesim_km_tag_value_kind(kp.tag)) {
+      case KM_VALUE_INT32:   // ENUM/ENUM_REP
+      case KM_VALUE_UINT32:  // UINT/UINT_REP, USER_AUTH_TYPE
         kp.int_value = p.readInt32();
         break;
-      case 0x50000000:  // ULONG
-      case 0x60000000:  // DATE
-      case 0xa0000000:  // ULONG_REP
+      case KM_VALUE_INT64:   // DATE
+      case KM_VALUE_UINT64:  // ULONG/ULONG_REP
         kp.int_value = p.readInt64();
         break;
-      case 0x70000000:  // BOOL
+      case KM_VALUE_BOOL:
         kp.int_value = 1;
         break;
-      case 0x80000000:  // BIGNUM
-      case 0x90000000:  // BYTES
+      case KM_VALUE_BYTES:  // BIGNUM/BYTES
         blob_store.push_back(ReadByteArray(p));
         kp.blob = blob_store.back().data();
         kp.blob_len = blob_store.back().size();
@@ -304,23 +312,21 @@ void WriteKeymasterArguments(Parcel& p, const std::vector<KmParam>& params) {
   for (const auto& kp : params) {
     p.writeInt32(1);  // typed-list element presence marker
     p.writeInt32(static_cast<int32_t>(kp.tag));
-    switch (kp.tag & 0xf0000000u) {
-      case 0x10000000:
-      case 0x20000000:
-      case 0x30000000:
-      case 0x40000000:
+    switch (teesim_km_tag_value_kind(kp.tag)) {
+      case KM_VALUE_INT32:
+      case KM_VALUE_UINT32:
         p.writeInt32(static_cast<int32_t>(kp.int_value));
         break;
-      case 0x50000000:
-      case 0x60000000:
-      case 0xa0000000:
+      case KM_VALUE_INT64:
+      case KM_VALUE_UINT64:
         p.writeInt64(kp.int_value);
         break;
-      case 0x70000000:
+      case KM_VALUE_BOOL:
         break;  // bool: presence only
-      case 0x80000000:
-      case 0x90000000:
+      case KM_VALUE_BYTES:
         p.writeByteArray(kp.blob_len, kp.blob);
+        break;
+      default:
         break;
     }
   }
@@ -662,8 +668,11 @@ bool HandleBegin(int uid, Parcel& in, Parcel* reply) {
   if (!ta) ta = DefaultTa();
   if (!ta) return false;
   TsBeginResult* res = nullptr;
+  // The legacy keystore1 HAL carries auth tokens through its own mechanism, not the flat token structs
+  // the keystore2 path uses, so no auth token is forwarded here yet (unchanged behavior). Auth-bound
+  // keys on Android 10/11 are a separate follow-up; pass nullptr to mean "no token".
   int32_t rc = teesim_km_begin(ta.get(), purpose, blob.data(), blob.size(), op_params.data(),
-                               op_params.size(), &res);
+                               op_params.size(), /*auth_token=*/nullptr, &res);
   if (rc != 0 || !res) {
     LOGE("keystore: TA begin failed rc=%d", rc);
     return false;
@@ -718,7 +727,8 @@ bool HandleUpdate(int /*uid*/, Parcel& in, Parcel* reply) {
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_update(ta.get(), op_handle, input.data(), input.size(), &out, &out_len);
+  int32_t rc = teesim_km_update(ta.get(), op_handle, input.data(), input.size(),
+                                /*auth_token=*/nullptr, /*timestamp_token=*/nullptr, &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
     output.assign(out, out + out_len);
@@ -737,7 +747,11 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   sp<IBinder> token = in.readStrongBinder();
   std::vector<std::vector<uint8_t>> blobs;
   if (in.readInt32() == 1) ReadKeymasterArguments(in, blobs);  // op params (unused)
-  std::vector<uint8_t> signature = ReadByteArray(in);          // supplied for verify
+  // R added a leading `byte[] input` (single-shot finish) ahead of the signature; Q
+  // has only the signature. Read input first on R so `signature` lands on the right field.
+  std::vector<uint8_t> input;
+  if (IsAndroidR()) input = ReadByteArray(in);
+  std::vector<uint8_t> signature = ReadByteArray(in);  // supplied for verify
 
   int64_t op_handle = 0;
   TaPtr ta;
@@ -745,8 +759,10 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
 
   uint8_t* out = nullptr;
   size_t out_len = 0;
-  int32_t rc = teesim_km_finish(ta.get(), op_handle, nullptr, 0, signature.data(), signature.size(),
-                                &out, &out_len);
+  int32_t rc = teesim_km_finish(ta.get(), op_handle, input.data(), input.size(), signature.data(),
+                                signature.size(),
+                                /*auth_token=*/nullptr, /*timestamp_token=*/nullptr,
+                                /*confirmation_token=*/nullptr, 0, &out, &out_len);
   std::vector<uint8_t> output;
   if (rc == 0 && out) {
     output.assign(out, out + out_len);
@@ -756,7 +772,7 @@ bool HandleFinish(int /*uid*/, Parcel& in, Parcel* reply) {
   }
   LOGI("keystore: finish output=%zu", output.size());
 
-  DeliverOperationResult(cb, rc, token, 0, output);
+  DeliverOperationResult(cb, rc, token, static_cast<int32_t>(input.size()), output);
   ReplyStatus(reply, KS_NO_ERROR);
   return true;
 }
@@ -778,6 +794,10 @@ bool HandleAbort(int /*uid*/, Parcel& in, Parcel* reply) {
 }  // namespace
 
 extern "C" const char* teesim_hook_name(void) { return "keystore1"; }
+
+// Usage stats are a keystore2/KeyMint-only feature; Android 10/11 is out of scope
+// for the scope picker, so this router reports an empty array (see control.h).
+extern "C" char* teesim_usage_json_alloc(void) { return strdup("[]"); }
 
 // Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
 // the control thread; only teesim_cfg_commit touches the live routing tables.
@@ -834,35 +854,27 @@ extern "C" bool teesim_cfg_resign(const char* /*profile_id*/, const uint8_t* /*l
 // The interception handler installed for the keystore service binder.
 extern "C" bool teesim_ks_handle(uint32_t code, const Parcel& data, Parcel* reply,
                                   status_t& result) {
-  switch (code) {
-    case TX_generateKey:
-    case TX_getKeyCharacteristics:
-    case TX_exportKey:
-    case TX_attestKey:
-    case TX_begin:
-    case TX_update:
-    case TX_finish:
-    case TX_abort:
-      break;
-    default:
-      return false;
-  }
+  // The ordinals are release-specific, so this dispatch runs against the resolved table
+  // rather than a compile-time switch (see TxCodes).
+  const TxCodes& tx = Codes();
+  if (code != tx.generateKey && code != tx.getKeyCharacteristics && code != tx.exportKey &&
+      code != tx.attestKey && code != tx.begin && code != tx.update && code != tx.finish &&
+      code != tx.abort)
+    return false;
   int uid = IPCThreadState::self()->getCallingUid();
   if (!IsTarget(uid)) return false;
   Reader r(data);
   if (!r.p.enforceInterface(kServiceDescriptor)) return false;
 
   bool done = false;
-  switch (code) {
-    case TX_generateKey:           done = HandleGenerateKey(uid, r.p, reply); break;
-    case TX_getKeyCharacteristics: done = HandleGetKeyCharacteristics(uid, r.p, reply); break;
-    case TX_exportKey:             done = HandleExportKey(uid, r.p, reply); break;
-    case TX_attestKey:             done = HandleAttestKey(uid, r.p, reply); break;
-    case TX_begin:                 done = HandleBegin(uid, r.p, reply); break;
-    case TX_update:                done = HandleUpdate(uid, r.p, reply); break;
-    case TX_finish:                done = HandleFinish(uid, r.p, reply); break;
-    case TX_abort:                 done = HandleAbort(uid, r.p, reply); break;
-  }
+  if (code == tx.generateKey)                done = HandleGenerateKey(uid, r.p, reply);
+  else if (code == tx.getKeyCharacteristics) done = HandleGetKeyCharacteristics(uid, r.p, reply);
+  else if (code == tx.exportKey)             done = HandleExportKey(uid, r.p, reply);
+  else if (code == tx.attestKey)             done = HandleAttestKey(uid, r.p, reply);
+  else if (code == tx.begin)                 done = HandleBegin(uid, r.p, reply);
+  else if (code == tx.update)                done = HandleUpdate(uid, r.p, reply);
+  else if (code == tx.finish)                done = HandleFinish(uid, r.p, reply);
+  else if (code == tx.abort)                 done = HandleAbort(uid, r.p, reply);
   if (done) result = OK;
   return done;
 }

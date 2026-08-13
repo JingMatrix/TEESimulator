@@ -13,8 +13,10 @@
 use crate::{Ta, OpError};
 use kmr_wire::cbor::value::{Integer, Value};
 use kmr_wire::keymint::{
-    AttestationKey, KeyCharacteristics, KeyCreationResult, KeyFormat, KeyParam, KeyPurpose,
+    AttestationKey, HardwareAuthToken, HardwareAuthenticatorType, KeyCharacteristics,
+    KeyCreationResult, KeyFormat, KeyParam, KeyPurpose,
 };
+use kmr_wire::secureclock::{TimeStampToken, Timestamp};
 use kmr_wire::AsCborValue;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
@@ -32,11 +34,158 @@ pub struct KmParam {
     pub blob_len: usize,
 }
 
+/// A flattened KeyMint `HardwareAuthToken` (see teesim_km.h). Layout mirrors the C struct.
+#[repr(C)]
+pub struct TsAuthToken {
+    pub challenge: i64,
+    pub user_id: i64,
+    pub authenticator_id: i64,
+    pub authenticator_type: i32,
+    pub timestamp_ms: i64,
+    pub mac: *const u8,
+    pub mac_len: usize,
+}
+
+/// A flattened secureclock `TimeStampToken` (see teesim_km.h). Layout mirrors the C struct.
+#[repr(C)]
+pub struct TsTimestampToken {
+    pub challenge: i64,
+    pub timestamp_ms: i64,
+    pub mac: *const u8,
+    pub mac_len: usize,
+}
+
+/// Rebuild a kmr_wire `HardwareAuthToken` from the flat struct, or `None` when the pointer is null
+/// (keystore2 omits the token for keys that need no user authentication).
+///
+/// # Safety
+/// `tok` is null or points to a valid `TsAuthToken` whose `mac`/`mac_len` describe a readable span.
+unsafe fn auth_token(tok: *const TsAuthToken) -> Option<HardwareAuthToken> {
+    let t = tok.as_ref()?;
+    Some(HardwareAuthToken {
+        challenge: t.challenge,
+        user_id: t.user_id,
+        authenticator_id: t.authenticator_id,
+        // Any unexpected value maps to `Any` rather than failing the whole operation.
+        authenticator_type: HardwareAuthenticatorType::try_from(t.authenticator_type)
+            .unwrap_or(HardwareAuthenticatorType::Any),
+        timestamp: Timestamp { milliseconds: t.timestamp_ms },
+        mac: opt_bytes(t.mac, t.mac_len).unwrap_or_default(),
+    })
+}
+
+/// Rebuild a kmr_wire `TimeStampToken` from the flat struct, or `None` when the pointer is null.
+///
+/// # Safety
+/// `tok` is null or points to a valid `TsTimestampToken` whose `mac`/`mac_len` describe a readable span.
+unsafe fn timestamp_token(tok: *const TsTimestampToken) -> Option<TimeStampToken> {
+    let t = tok.as_ref()?;
+    Some(TimeStampToken {
+        challenge: t.challenge,
+        timestamp: Timestamp { milliseconds: t.timestamp_ms },
+        mac: opt_bytes(t.mac, t.mac_len).unwrap_or_default(),
+    })
+}
+
 // KeyMint TagType bits (top nibble of a tag).
 const TAG_TYPE_MASK: u32 = 0xF000_0000;
+const TAG_ENUM: u32 = 0x1000_0000;
+const TAG_ENUM_REP: u32 = 0x2000_0000;
+const TAG_UINT: u32 = 0x3000_0000;
+const TAG_UINT_REP: u32 = 0x4000_0000;
+const TAG_ULONG: u32 = 0x5000_0000;
+const TAG_DATE: u32 = 0x6000_0000;
 const TAG_BOOL: u32 = 0x7000_0000;
 const TAG_BIGNUM: u32 = 0x8000_0000;
 const TAG_BYTES: u32 = 0x9000_0000;
+const TAG_ULONG_REP: u32 = 0xA000_0000;
+
+// USER_AUTH_TYPE is ENUM-typed (top nibble 0x1) yet kmr_wire decodes it as a u32,
+// and its ANY value is 0xFFFFFFFF, so it is classified as unsigned 32-bit rather
+// than a signed enum. It is the one tag whose representation does not follow from
+// its type nibble, so `tag_value_kind` handles it explicitly.
+const TAG_USER_AUTH_TYPE: u32 = TAG_ENUM | 504;
+
+/// How a KeyMint tag's scalar value is represented once flattened into the signed
+/// `KmParam::int_value` carrier. This is the single source of truth for the
+/// signed/unsigned/width decision every marshaller needs: the width and signedness
+/// match kmr_wire's own decoder for each tag (a u32/u64 decoder rejects a negative
+/// CBOR integer with OutOfRangeIntegerValue). The C++ routers read it through
+/// `teesim_km_tag_value_kind`, so their parcel/AIDL widths cannot drift from here.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KmValueKind {
+    /// No scalar value / unknown tag.
+    Invalid = 0,
+    /// BOOL: presence means true.
+    Bool = 1,
+    /// BYTES/BIGNUM: a byte array.
+    Bytes = 2,
+    /// Signed 32-bit: the ENUM/ENUM_REP tags (a defined enumerant).
+    Int32 = 3,
+    /// Unsigned 32-bit: the UINT/UINT_REP tags and USER_AUTH_TYPE.
+    Uint32 = 4,
+    /// Signed 64-bit: the DATE tags (milliseconds since epoch).
+    Int64 = 5,
+    /// Unsigned 64-bit: the ULONG/ULONG_REP tags.
+    Uint64 = 6,
+}
+
+/// Classify a tag's flat value representation. The only tag whose kind does not
+/// follow from its type nibble is USER_AUTH_TYPE (see the constant above).
+fn tag_value_kind(tag: u32) -> KmValueKind {
+    if tag == TAG_USER_AUTH_TYPE {
+        return KmValueKind::Uint32;
+    }
+    match tag & TAG_TYPE_MASK {
+        TAG_BOOL => KmValueKind::Bool,
+        TAG_BYTES | TAG_BIGNUM => KmValueKind::Bytes,
+        TAG_ENUM | TAG_ENUM_REP => KmValueKind::Int32,
+        TAG_UINT | TAG_UINT_REP => KmValueKind::Uint32,
+        TAG_ULONG | TAG_ULONG_REP => KmValueKind::Uint64,
+        TAG_DATE => KmValueKind::Int64,
+        _ => KmValueKind::Invalid,
+    }
+}
+
+/// Classify a KeyMint tag for the native marshallers (the keymint/keystore
+/// routers), so the signed/unsigned/width choice lives only in `tag_value_kind`.
+/// Returns a `KmValueKind` discriminant. Pure function of `tag`; safe for any input.
+#[no_mangle]
+pub extern "C" fn teesim_km_tag_value_kind(tag: u32) -> i32 {
+    tag_value_kind(tag) as i32
+}
+
+// The C ABI packs every scalar KeyParameter value into one signed i64 carrier
+// (`KmParam::int_value`), so moving a value across it is a deliberate,
+// bit-preserving reinterpretation. These helpers are the *only* place the cast
+// lints are relaxed; `to_keyparam` and `owned_param` route every conversion
+// through them and are themselves `deny`-ed, so a new raw `as` at the boundary
+// fails clippy instead of silently repeating the USER_SECURE_ID sign bug.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn carrier_low_u32(v: i64) -> u32 {
+    v as u32
+}
+#[allow(clippy::cast_sign_loss)]
+fn carrier_u64(v: i64) -> u64 {
+    v as u64
+}
+#[allow(clippy::cast_possible_truncation)]
+fn carrier_i32(v: i64) -> i32 {
+    v as i32
+}
+#[allow(clippy::cast_possible_wrap)]
+fn tag_bits_i32(tag: u32) -> i32 {
+    tag as i32
+}
+#[allow(clippy::cast_possible_truncation)]
+fn cbor_int_to_carrier(v: i128) -> i64 {
+    v as i64
+}
+#[allow(clippy::cast_sign_loss)]
+fn tag_enum_bits(tag: kmr_wire::keymint::Tag) -> u32 {
+    tag as u32
+}
 
 fn call<T>(f: impl FnOnce() -> Result<T, OpError>) -> Result<T, i32> {
     match catch_unwind(AssertUnwindSafe(f)) {
@@ -50,11 +199,15 @@ fn call<T>(f: impl FnOnce() -> Result<T, OpError>) -> Result<T, i32> {
 }
 
 /// Convert a flat `KmParam` into a kmr_wire `KeyParam`, reusing kmr_wire's own
-/// tag-keyed decoding.
+/// tag-keyed decoding. The value is encoded at the width and signedness kmr_wire's
+/// decoder expects (via `tag_value_kind`); a mismatch would make kmr_wire reject
+/// the parameter with OutOfRangeIntegerValue. Denies raw casts so every carrier
+/// reinterpretation stays in the audited helpers above.
+#[deny(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 fn to_keyparam(p: &KmParam) -> Result<KeyParam, OpError> {
-    let value = match p.tag & TAG_TYPE_MASK {
-        TAG_BOOL => Value::Bool(true),
-        TAG_BYTES | TAG_BIGNUM => {
+    let value = match tag_value_kind(p.tag) {
+        KmValueKind::Bool => Value::Bool(true),
+        KmValueKind::Bytes => {
             let bytes = if p.blob.is_null() || p.blob_len == 0 {
                 Vec::new()
             } else {
@@ -63,9 +216,17 @@ fn to_keyparam(p: &KmParam) -> Result<KeyParam, OpError> {
             };
             Value::Bytes(bytes)
         }
-        _ => Value::Integer(Integer::from(p.int_value)),
+        // Unsigned tags: reinterpret the carrier's bits at the decoder's width so a
+        // top-bit-set value stays a non-negative CBOR integer (USER_SECURE_ID,
+        // RSA_PUBLIC_EXPONENT, USER_AUTH_TYPE=ANY, ...).
+        KmValueKind::Uint32 => Value::Integer(Integer::from(carrier_low_u32(p.int_value))),
+        KmValueKind::Uint64 => Value::Integer(Integer::from(carrier_u64(p.int_value))),
+        // Signed tags: an enumerant (Int32) or an epoch time (Int64); an unknown
+        // tag falls through as the raw carrier so kmr_wire can report it.
+        KmValueKind::Int32 => Value::Integer(Integer::from(carrier_i32(p.int_value))),
+        KmValueKind::Int64 | KmValueKind::Invalid => Value::Integer(Integer::from(p.int_value)),
     };
-    let tag = Value::Integer(Integer::from((p.tag as i32) as i64));
+    let tag = Value::Integer(Integer::from(tag_bits_i32(p.tag)));
     KeyParam::from_cbor_value(Value::Array(vec![tag, value])).map_err(|e| OpError {
         code: ERR_UNKNOWN,
         msg: format!("bad key param tag {:#x}: {e:?}", p.tag),
@@ -88,14 +249,17 @@ struct OwnedParam {
     blob: Vec<u8>,
 }
 
+#[deny(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 fn owned_param(kp: &KeyParam) -> OwnedParam {
-    let mut o = OwnedParam { tag: kp.tag() as u32, int_value: 0, blob: Vec::new() };
+    let mut o = OwnedParam { tag: tag_enum_bits(kp.tag()), int_value: 0, blob: Vec::new() };
     if let Ok(Value::Array(mut a)) = kp.clone().to_cbor_value() {
         if a.len() == 2 {
             match a.remove(1) {
-                Value::Integer(i) => o.int_value = i128::from(i) as i64,
+                // Store the value's bits back in the signed carrier; the C++ side
+                // reinterprets them by tag kind, the mirror of `to_keyparam`.
+                Value::Integer(i) => o.int_value = cbor_int_to_carrier(i128::from(i)),
                 Value::Bytes(b) => o.blob = b,
-                Value::Bool(b) => o.int_value = b as i64,
+                Value::Bool(b) => o.int_value = i64::from(b),
                 _ => {}
             }
         }
@@ -349,6 +513,7 @@ pub unsafe extern "C" fn teesim_km_begin(
     key_blob_len: usize,
     params: *const KmParam,
     n_params: usize,
+    auth_token_ptr: *const TsAuthToken,
     out: *mut *mut TsBeginResult,
 ) -> i32 {
     match call(|| {
@@ -357,8 +522,9 @@ pub unsafe extern "C" fn teesim_km_begin(
             .ok_or(OpError { code: ERR_UNKNOWN, msg: format!("bad purpose {purpose}") })?;
         let blob = if key_blob.is_null() { &[][..] } else { slice::from_raw_parts(key_blob, key_blob_len) };
         let key_params = to_keyparams(params, n_params)?;
-        // Auth-bound keys are not supported until ISharedSecret is handled.
-        let r = ta.begin(purpose, blob, key_params, None)?;
+        // Forward the auth token keystore2 attached; the TA checks it here for AUTH_TIMEOUT keys and
+        // defers to update/finish for auth-per-operation keys.
+        let r = ta.begin(purpose, blob, key_params, auth_token(auth_token_ptr))?;
         Ok(TsBeginResult {
             challenge: r.challenge,
             op_handle: r.op_handle,
@@ -438,13 +604,15 @@ pub unsafe extern "C" fn teesim_km_update(
     op_handle: i64,
     input: *const u8,
     input_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
-        ta.update(op_handle, data, None, None)
+        ta.update(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
     }) {
         Ok(bytes) => {
             emit(bytes, out, out_len);
@@ -462,11 +630,13 @@ pub unsafe extern "C" fn teesim_km_update_aad(
     op_handle: i64,
     input: *const u8,
     input_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
-        ta.update_aad(op_handle, data, None, None)
+        ta.update_aad(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
     }) {
         Ok(()) => 0,
         Err(code) => code,
@@ -483,12 +653,23 @@ pub unsafe extern "C" fn teesim_km_finish(
     input_len: usize,
     signature: *const u8,
     signature_len: usize,
+    auth_token_ptr: *const TsAuthToken,
+    timestamp_token_ptr: *const TsTimestampToken,
+    confirmation_token: *const u8,
+    confirmation_token_len: usize,
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
         let ta = &mut *ta;
-        ta.finish(op_handle, opt_bytes(input, input_len), opt_bytes(signature, signature_len), None, None, None)
+        ta.finish(
+            op_handle,
+            opt_bytes(input, input_len),
+            opt_bytes(signature, signature_len),
+            auth_token(auth_token_ptr),
+            timestamp_token(timestamp_token_ptr),
+            opt_bytes(confirmation_token, confirmation_token_len),
+        )
     }) {
         Ok(bytes) => {
             emit(bytes, out, out_len);
@@ -503,6 +684,36 @@ pub unsafe extern "C" fn teesim_km_finish(
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_abort(ta: *mut Ta, op_handle: i64) -> i32 {
     match call(|| (&mut *ta).abort(op_handle)) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+// --- device state ------------------------------------------------------------
+
+/// # Safety
+/// `ta` is a valid TA handle.
+#[no_mangle]
+pub unsafe extern "C" fn teesim_km_early_boot_ended(ta: *mut Ta) -> i32 {
+    match call(|| (&mut *ta).early_boot_ended()) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+/// # Safety
+/// `info`/`n_info` describe a readable `KmParam` array (or null/0 for none).
+#[no_mangle]
+pub unsafe extern "C" fn teesim_km_set_additional_attestation_info(
+    ta: *mut Ta,
+    info: *const KmParam,
+    n_info: usize,
+) -> i32 {
+    match call(|| {
+        let ta = &mut *ta;
+        let params = to_keyparams(info, n_info)?;
+        ta.set_additional_attestation_info(params)
+    }) {
         Ok(()) => 0,
         Err(code) => code,
     }

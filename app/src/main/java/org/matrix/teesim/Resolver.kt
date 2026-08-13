@@ -15,8 +15,11 @@ import org.json.JSONObject
  * verifiedBootKey(b64), verifiedBootHash(b64), deviceLocked, verifiedBootState, strongBoxAvailable,
  * attestVersionTee, attestVersionStrongBox profile: id, keyboxB64, mode, securityLevel(int),
  * osVersion, osPatchLevel, vendorPatchLevel,
- * bootPatchLevel, deviceIds{...}, packages[], uids[] uids[] is parallel to packages[] (same length,
- * -1 where not installed).
+ * bootPatchLevel, deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name
+ * entry verbatim (kept even when not installed, since a name-match still fires on a later install);
+ * uids[] is the independent effective caller-uid set (resolved packages + raw uid:N tokens +
+ * autoIncludeNewApps expansion, never -1). The router matches package name first, uid second, so the
+ * two arrays need not be the same length. See [Scope].
  */
 object Resolver {
 
@@ -32,23 +35,25 @@ object Resolver {
         msg.put(
             "bootInfo",
             JSONObject().apply {
-                put("verifiedBootKey", b64.encodeToString(harvest.verifiedBootKey))
-                put("verifiedBootHash", b64.encodeToString(harvest.verifiedBootHash))
-                // Always present a locked, Verified boot state. Module users run
-                // unlocked bootloaders, and reporting the device's real state
-                // (unlocked / Unverified) fails attestation by construction. Only
-                // the boot key/hash come from the device (the Harvester guarantees
-                // they are non-zero — a real vbmeta digest or a stable fallback).
+                // Effective boot key/hash: the override when active (an unlocked device's all-zero capture
+                // replaced by ro.boot.vbmeta.*, a stable fallback, or the user's edit), else the real
+                // capture. Never all-zero, so the attested key still verifies.
+                put("verifiedBootKey", b64.encodeToString(harvest.effectiveBootKey()))
+                put("verifiedBootHash", b64.encodeToString(harvest.effectiveBootHash()))
+                // Always present a locked, Verified boot state. Module users run unlocked bootloaders, and
+                // reporting the device's real state (unlocked / Unverified) fails attestation by
+                // construction. These are the "required" overrides the WebUI shows read-only.
                 put("deviceLocked", true)
                 put("verifiedBootState", 0)
                 // Whether the device's StrongBox can really produce a hardware-backed attested key
                 // (probed at harvest). It gates patch mode at the StrongBox level: when false, keys
                 // requested at StrongBox fall back to generation even in a patch profile.
                 put("strongBoxAvailable", harvest.strongBoxAvailable)
-                // The attestationVersion each level reports: the real harvested value on a device that
-                // attested in hardware, or a fabricated OS-appropriate one when there is no working
-                // hardware (software-only / TEE-broken). StrongBox reuses it when it has no hardware.
-                val effVersion = Harvester.effectiveAttestation(harvest).second
+                // The attestationVersion each level reports: the harvested value on a device that attested
+                // in hardware, a synthesized OS-appropriate one with no working hardware, or the user's
+                // override — all captured by effectiveInt over the synthesized default. StrongBox reuses
+                // the TEE value when it has no hardware.
+                val effVersion = harvest.effectiveInt("attestationVersion", Harvester.effectiveAttestation(harvest).second)
                 put("attestVersionTee", effVersion)
                 put(
                     "attestVersionStrongBox",
@@ -60,7 +65,7 @@ object Resolver {
 
         val profiles = JSONArray()
         for (p in config.profiles) {
-            profiles.put(resolveProfile(p, harvest))
+            profiles.put(resolveProfile(p, config.profiles.filter { it.id != p.id }, harvest))
         }
         msg.put("profiles", profiles)
         return msg
@@ -68,6 +73,7 @@ object Resolver {
 
     private fun resolveProfile(
         p: ConfigStore.ProfileConfig,
+        others: List<ConfigStore.ProfileConfig>,
         harvest: Harvester.Record,
     ): JSONObject {
         val o = JSONObject()
@@ -83,7 +89,10 @@ object Resolver {
         // Security level is not a profile choice: it is the device's real harvested level, except that
         // a device with no working hardware attestation (software-only / TEE-broken) presents a
         // fabricated TrustedEnvironment so a spoofed key still claims hardware (see effectiveAttestation).
-        o.put("securityLevel", Harvester.effectiveAttestation(harvest).first)
+        o.put(
+            "securityLevel",
+            harvest.effectiveInt("attestationSecurityLevel", Harvester.effectiveAttestation(harvest).first),
+        )
 
         // osVersion: system_property -> the harvested device value, omitted when absent;
         // else the parsed literal, omitted when it can't be parsed. A missing osVersion is
@@ -107,29 +116,29 @@ object Resolver {
             o.put("bootPatchLevel", it)
         }
 
-        // Device IDs: an explicit profile value overrides; otherwise fall back to the real
-        // value captured at harvest, so an app's device-ID attestation request can be
-        // satisfied against the real ids. Omitted when neither is set (declines that id).
+        // Device IDs: an explicit profile value overrides; otherwise fall back to the harvest baseline —
+        // the real captured id, or (for serial/imei/meid, which the leaf never attests) the value read
+        // from the OS at harvest, exposed via effective(). Omitted when neither is set (declines that id).
         val ids = JSONObject()
         putId(ids, "brand", p.brand, harvest.brand)
         putId(ids, "device", p.device, harvest.device)
         putId(ids, "product", p.product, harvest.product)
-        putId(ids, "serial", p.serial, harvest.serial)
-        putId(ids, "imei", p.imei, harvest.imei)
-        putId(ids, "imei2", p.imei2, harvest.imei2)
-        putId(ids, "meid", p.meid, harvest.meid)
+        putId(ids, "serial", p.serial, harvest.effective("serial"))
+        putId(ids, "imei", p.imei, harvest.effective("imei"))
+        putId(ids, "imei2", p.imei2, harvest.effective("imei2"))
+        putId(ids, "meid", p.meid, harvest.effective("meid"))
         putId(ids, "manufacturer", p.manufacturer, harvest.manufacturer)
         putId(ids, "model", p.model, harvest.model)
         if (ids.length() > 0) o.put("deviceIds", ids)
 
-        // packages[] with a parallel uids[] (-1 where not installed).
-        val packages = JSONArray()
+        // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[] (caller-uid
+        // fallback, effective set with no -1) resolved centrally by Scope, which also folds in raw
+        // uid:N tokens and the autoIncludeNewApps expansion and logs the per-entry detail. The two
+        // arrays are independent here (uids[] may be longer or shorter than packages[]).
+        val scope = Scope.resolve(p, others)
+        o.put("packages", JSONArray(scope.packageNames))
         val uids = JSONArray()
-        for (pkg in p.apps) {
-            packages.put(pkg)
-            uids.put(Packages.uidForPackage(pkg))
-        }
-        o.put("packages", packages)
+        for (u in scope.uids) uids.put(u)
         o.put("uids", uids)
         return o
     }

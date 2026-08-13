@@ -12,6 +12,8 @@
 #include <aidl/android/hardware/security/keymint/BnKeyMintOperation.h>
 #include <android/binder_ibinder.h>  // AIBinder_getCallingUid
 
+#include <ctime>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -31,14 +33,6 @@ namespace secureclock = aidl::android::hardware::security::secureclock;
 extern "C" void teesim_hook_set_forwarding(bool forwarding);
 
 namespace {
-
-constexpr uint32_t kTagTypeMask = 0xF0000000u;
-constexpr uint32_t kTagUlong = 0x50000000u;
-constexpr uint32_t kTagDate = 0x60000000u;
-constexpr uint32_t kTagBool = 0x70000000u;
-constexpr uint32_t kTagBignum = 0x80000000u;
-constexpr uint32_t kTagBytes = 0x90000000u;
-constexpr uint32_t kTagUlongRep = 0xA0000000u;
 
 // A TA is reference-counted so an in-flight operation keeps its profile's TA
 // alive even if a config reload swaps or drops that profile underneath it.
@@ -74,6 +68,41 @@ int32_t g_stage_vb_state = 0;
 bool g_stage_strongbox_ok = false;
 int32_t g_stage_attest_version_tee = 400;
 int32_t g_stage_attest_version_strongbox = 400;
+
+// --- Per-caller usage stats --------------------------------------------------
+// Every app that asks us for a key this boot is recorded here from generateKey,
+// so the daemon can surface a "Recent" group and a frequency ordering in the
+// scope picker. Keyed by caller uid because a uid outlives a single request; the
+// daemon maps uid->package (uids get reassigned across installs, packages are
+// stable). This is a hot path, so the record is a short locked map update with
+// no I/O — never touch the crypto path's latency.
+struct UsageEntry {
+  uint64_t count = 0;         // cumulative generateKey requests from this uid since load
+  uint64_t last_boot_ms = 0;  // CLOCK_BOOTTIME (ms) of the most recent request
+  std::string pkg;            // best-effort package hint, usually empty (daemon resolves uid->pkg)
+};
+std::mutex g_usage_mu;
+std::map<int32_t, UsageEntry> g_usage;
+
+// Milliseconds on CLOCK_BOOTTIME: a monotonic clock that keeps counting across
+// suspend, matching the daemon's SystemClock.elapsedRealtime so it can convert
+// our lastBootMs back to a wall-clock instant.
+uint64_t NowBootMs() {
+  struct timespec ts{};
+  clock_gettime(CLOCK_BOOTTIME, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000u + static_cast<uint64_t>(ts.tv_nsec) / 1000000u;
+}
+
+// Record one key request from `caller_uid` (target or not). Cheap by design: the
+// daemon does the uid->package resolution, so we only bump the count and stamp
+// the time. A caller with no valid uid (-1) is skipped.
+void RecordUsage(int32_t caller_uid) {
+  if (caller_uid < 0) return;
+  std::lock_guard<std::mutex> lk(g_usage_mu);
+  UsageEntry& e = g_usage[caller_uid];
+  ++e.count;
+  e.last_boot_ms = NowBootMs();
+}
 
 // RAII guard: mark the current thread as forwarding to the real HAL.
 struct ForwardGuard {
@@ -120,6 +149,17 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
 TaPtr DefaultTa() {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   return g_default_ta;
+}
+
+// A snapshot of every configured profile's TA, for device-state transitions (earlyBootEnded /
+// setAdditionalAttestationInfo) that must reach all our keys, not just the default profile. The list
+// is copied under the config lock so the calls themselves run unlocked.
+std::vector<TaPtr> AllProfileTas() {
+  std::lock_guard<std::mutex> lk(g_cfg_mu);
+  std::vector<TaPtr> tas;
+  tas.reserve(g_profiles.size());
+  for (const auto& p : g_profiles) tas.push_back(p.ta);
+  return tas;
 }
 
 // --- AIDL KeyParameter <-> flat KmParam --------------------------------------
@@ -219,22 +259,24 @@ KeyParameter FromKm(const KmParam& k) {
     default:
       break;
   }
-  switch (k.tag & kTagTypeMask) {
-    case kTagBool:
+  // The remaining tags map by their flat value kind (the classifier the Rust TA
+  // owns), so the width/signedness table lives in one place. The specific ENUM
+  // tags handled above keep their dedicated union fields; everything else is a
+  // bool, a byte array, a date, a long, or a plain 32-bit integer.
+  switch (teesim_km_tag_value_kind(k.tag)) {
+    case KM_VALUE_BOOL:
       kp.value.set<KeyParameterValue::boolValue>(true);
       break;
-    case kTagBytes:
-    case kTagBignum:
+    case KM_VALUE_BYTES:
       kp.value.set<KeyParameterValue::blob>(std::vector<uint8_t>(k.blob, k.blob + k.blob_len));
       break;
-    case kTagDate:
+    case KM_VALUE_INT64:  // DATE
       kp.value.set<KeyParameterValue::dateTime>(k.int_value);
       break;
-    case kTagUlong:
-    case kTagUlongRep:
+    case KM_VALUE_UINT64:  // ULONG/ULONG_REP
       kp.value.set<KeyParameterValue::longInteger>(k.int_value);
       break;
-    default:
+    default:  // INT32/UINT32 enums and integers
       kp.value.set<KeyParameterValue::integer>(static_cast<int32_t>(k.int_value));
       break;
   }
@@ -295,6 +337,34 @@ bool IsAttestKeyRequest(const std::vector<KeyParameter>& params) {
   return false;
 }
 
+// --- auth / timestamp token marshalling --------------------------------------
+
+// Flatten an optional AIDL HardwareAuthToken into the flat C ABI struct. Returns a pointer to
+// `storage` (filled in) when the token is present, or nullptr when absent — exactly the nullability
+// the TA expects. The mac pointer borrows the token's vector, which outlives the FFI call.
+const TsAuthToken* FlattenAuth(const std::optional<HardwareAuthToken>& tok, TsAuthToken* storage) {
+  if (!tok) return nullptr;
+  storage->challenge = tok->challenge;
+  storage->user_id = tok->userId;
+  storage->authenticator_id = tok->authenticatorId;
+  storage->authenticator_type = static_cast<int32_t>(tok->authenticatorType);
+  storage->timestamp_ms = tok->timestamp.milliSeconds;
+  storage->mac = tok->mac.empty() ? nullptr : tok->mac.data();
+  storage->mac_len = tok->mac.size();
+  return storage;
+}
+
+// Flatten an optional secureclock TimeStampToken into the flat C ABI struct (nullptr when absent).
+const TsTimestampToken* FlattenTimestamp(const std::optional<secureclock::TimeStampToken>& tok,
+                                         TsTimestampToken* storage) {
+  if (!tok) return nullptr;
+  storage->challenge = tok->challenge;
+  storage->timestamp_ms = tok->timestamp.milliSeconds;
+  storage->mac = tok->mac.empty() ? nullptr : tok->mac.data();
+  storage->mac_len = tok->mac.size();
+  return storage;
+}
+
 // --- IKeyMintOperation -------------------------------------------------------
 
 class TeesimKeyMintOperation : public BnKeyMintOperation {
@@ -306,18 +376,24 @@ class TeesimKeyMintOperation : public BnKeyMintOperation {
   }
 
   ndk::ScopedAStatus updateAad(const std::vector<uint8_t>& input,
-                               const std::optional<HardwareAuthToken>&,
-                               const std::optional<secureclock::TimeStampToken>&) override {
-    return Status(teesim_km_update_aad(ta_.get(), op_handle_, input.data(), input.size()));
+                               const std::optional<HardwareAuthToken>& authToken,
+                               const std::optional<secureclock::TimeStampToken>& tst) override {
+    TsAuthToken at;
+    TsTimestampToken tt;
+    return Status(teesim_km_update_aad(ta_.get(), op_handle_, input.data(), input.size(),
+                                       FlattenAuth(authToken, &at), FlattenTimestamp(tst, &tt)));
   }
 
   ndk::ScopedAStatus update(const std::vector<uint8_t>& input,
-                            const std::optional<HardwareAuthToken>&,
-                            const std::optional<secureclock::TimeStampToken>&,
+                            const std::optional<HardwareAuthToken>& authToken,
+                            const std::optional<secureclock::TimeStampToken>& tst,
                             std::vector<uint8_t>* out) override {
+    TsAuthToken at;
+    TsTimestampToken tt;
     uint8_t* buf = nullptr;
     size_t len = 0;
-    int32_t rc = teesim_km_update(ta_.get(), op_handle_, input.data(), input.size(), &buf, &len);
+    int32_t rc = teesim_km_update(ta_.get(), op_handle_, input.data(), input.size(),
+                                  FlattenAuth(authToken, &at), FlattenTimestamp(tst, &tt), &buf, &len);
     if (rc != 0) return Status(rc);
     out->assign(buf, buf + len);
     teesim_km_free_buf(buf, len);
@@ -326,18 +402,23 @@ class TeesimKeyMintOperation : public BnKeyMintOperation {
 
   ndk::ScopedAStatus finish(const std::optional<std::vector<uint8_t>>& input,
                             const std::optional<std::vector<uint8_t>>& signature,
-                            const std::optional<HardwareAuthToken>&,
-                            const std::optional<secureclock::TimeStampToken>&,
-                            const std::optional<std::vector<uint8_t>>&,
+                            const std::optional<HardwareAuthToken>& authToken,
+                            const std::optional<secureclock::TimeStampToken>& tst,
+                            const std::optional<std::vector<uint8_t>>& confirmationToken,
                             std::vector<uint8_t>* out) override {
     const uint8_t* in_ptr = input ? input->data() : nullptr;
     size_t in_len = input ? input->size() : 0;
     const uint8_t* sig_ptr = signature ? signature->data() : nullptr;
     size_t sig_len = signature ? signature->size() : 0;
+    const uint8_t* conf_ptr = confirmationToken ? confirmationToken->data() : nullptr;
+    size_t conf_len = confirmationToken ? confirmationToken->size() : 0;
+    TsAuthToken at;
+    TsTimestampToken tt;
     uint8_t* buf = nullptr;
     size_t len = 0;
-    int32_t rc =
-        teesim_km_finish(ta_.get(), op_handle_, in_ptr, in_len, sig_ptr, sig_len, &buf, &len);
+    int32_t rc = teesim_km_finish(ta_.get(), op_handle_, in_ptr, in_len, sig_ptr, sig_len,
+                                  FlattenAuth(authToken, &at), FlattenTimestamp(tst, &tt), conf_ptr,
+                                  conf_len, &buf, &len);
     finished_ = true;
     if (rc != 0) return Status(rc);
     out->assign(buf, buf + len);
@@ -380,6 +461,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                  const std::optional<AttestationKey>& attestationKey,
                                  KeyCreationResult* out) override {
     const uid_t caller_uid = AIBinder_getCallingUid();
+    RecordUsage(static_cast<int32_t>(caller_uid));  // every app that asks for a key, for the daemon's usage view
     RequestTarget t = ProfileForRequest(keyParams, caller_uid);
     LOGI("generateKey: level=%d, %zu param(s), caller_uid=%d, caller_attest_key=%d, target=%d, "
          "patch_mode=%d, strongbox_ok=%d",
@@ -491,9 +573,11 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     TaPtr ta = DefaultTa();
     if (!ta) return Status(-100);
     auto km = ToKmVec(params);
+    TsAuthToken at;
     TsBeginResult* res = nullptr;
     int32_t rc = teesim_km_begin(ta.get(), static_cast<int32_t>(purpose), keyBlob.data(),
-                                 keyBlob.size(), km.data(), km.size(), &res);
+                                 keyBlob.size(), km.data(), km.size(), FlattenAuth(authToken, &at),
+                                 &res);
     if (rc != 0) return Status(rc);
     out->challenge = teesim_km_begin_challenge(res);
     size_t n = teesim_km_begin_num_params(res);
@@ -594,6 +678,10 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     ForwardGuard g;
     return real_ ? real_->addRngEntropy(data) : ndk::ScopedAStatus::ok();
   }
+  // Wrapped-key import is always forwarded to the real HAL, even for a target app: the result is a
+  // real, unmarked blob whose later operations forward to real hardware, so it is never re-rooted
+  // under the keybox. Simulating it would mean unwrapping with the wrapping key inside our TA, which
+  // we only hold if that wrapping key was itself minted by us — a rare case not worth the surface.
   ndk::ScopedAStatus importWrappedKey(const std::vector<uint8_t>& wrappedKeyData,
                                       const std::vector<uint8_t>& wrappingKeyBlob,
                                       const std::vector<uint8_t>& maskingKey,
@@ -613,6 +701,11 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     ForwardGuard g;
     return real_ ? real_->destroyAttestationIds() : ndk::ScopedAStatus::ok();
   }
+  // deviceLocked notifies the HAL that the screen locked, so AUTH_TIMEOUT keys require fresh auth
+  // before the timeout would otherwise expire. Our TA (an Android-14 kmr-ta) models device lock only
+  // at boot (SetBootInfo), not at runtime, so there is nothing to route here: our auth-timeout keys
+  // instead expire on the auth token's own timestamp, checked at begin. We relay to the real HAL for
+  // its own (real hardware) keys.
   ndk::ScopedAStatus deviceLocked(bool passwordOnly,
                                   const std::optional<secureclock::TimeStampToken>& tst) override {
     ForwardGuard g;
@@ -624,6 +717,12 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
 #pragma clang diagnostic pop
   }
   ndk::ScopedAStatus earlyBootEnded() override {
+    // Latch end-of-early-boot on our keys too, so an EARLY_BOOT_ONLY key we minted stops working at
+    // the same point keystore2 signals the real HAL. Best-effort: a TA that rejects is only logged.
+    for (const auto& ta : AllProfileTas()) {
+      int32_t rc = teesim_km_early_boot_ended(ta.get());
+      if (rc != 0) LOGW("earlyBootEnded: TA rejected (%d)", rc);
+    }
     ForwardGuard g;
     return real_ ? real_->earlyBootEnded() : ndk::ScopedAStatus::ok();
   }
@@ -640,7 +739,15 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     ForwardGuard g;
     return real_ ? real_->sendRootOfTrust(rootOfTrust) : ndk::ScopedAStatus::ok();
   }
+  // Record the additional attestation info (e.g. MODULE_HASH on Android 16) on our TAs as well, so a
+  // key we attest carries the same value keystore2 pushes to the real HAL and a verifier that checks
+  // it still validates. Applied to every profile since the info is device-wide; best-effort per TA.
   ndk::ScopedAStatus setAdditionalAttestationInfo(const std::vector<KeyParameter>& info) override {
+    auto km = ToKmVec(info);
+    for (const auto& ta : AllProfileTas()) {
+      int32_t rc = teesim_km_set_additional_attestation_info(ta.get(), km.data(), km.size());
+      if (rc != 0) LOGW("setAdditionalAttestationInfo: TA rejected (%d)", rc);
+    }
     ForwardGuard g;
     return real_ ? real_->setAdditionalAttestationInfo(info) : ndk::ScopedAStatus::ok();
   }
@@ -741,6 +848,37 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
 // --- C entry points ----------------------------------------------------------
 
 extern "C" const char* teesim_hook_name(void) { return "keymint"; }
+
+// Snapshot the usage map as a JSON array (see control.h). Built under the usage
+// lock only; no crypto state is touched, so the daemon can poll this freely.
+extern "C" char* teesim_usage_json_alloc(void) {
+  std::string out = "[";
+  {
+    std::lock_guard<std::mutex> lk(g_usage_mu);
+    bool first = true;
+    for (const auto& kv : g_usage) {
+      if (!first) out += ",";
+      first = false;
+      out += "{\"uid\":";
+      out += std::to_string(kv.first);
+      out += ",\"count\":";
+      out += std::to_string(kv.second.count);
+      out += ",\"lastBootMs\":";
+      out += std::to_string(kv.second.last_boot_ms);
+      out += ",\"pkg\":\"";
+      // pkg is a plain package name or empty, but escape the JSON-significant bytes defensively.
+      for (char c : kv.second.pkg) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+      }
+      out += "\"}";
+    }
+  }
+  out += "]";
+  char* buf = static_cast<char*>(malloc(out.size() + 1));
+  if (buf) memcpy(buf, out.c_str(), out.size() + 1);
+  return buf;
+}
 
 // Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
 // the control thread before the swap; only teesim_cfg_commit touches live tables.
@@ -862,13 +1000,35 @@ extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* 
     KeyMintHardwareInfo hw;
     if (real->getHardwareInfo(&hw).isOk()) {
       security_level = static_cast<int32_t>(hw.securityLevel);
+    } else {
+      // The level probe failed, so we keep the passed fallback (TEE). This is the one path that could
+      // mis-level a SOFTWARE km_compat leg as TEE and wrap it — the SOFTWARE exclusion below keys off
+      // this value. getHardwareInfo is an in-process call returning static info, so a failure is not
+      // expected; log it so a mis-levelled leg is visible rather than silently assumed TEE.
+      LOGW("teesim_router_new_device: getHardwareInfo failed; keeping fallback security_level=%d "
+           "(real=%p, remote=%d)", security_level, real_binder,
+           real_binder ? AIBinder_isRemote(real_binder) : -1);
     }
   }
-  // Confirms which KeyMint HALs we intercept: keystore2 resolves a distinct IKeyMintDevice for
-  // TrustedEnvironment (level 1) and, when present, StrongBox (level 2) — both are hooked, each
-  // wrapped by its own local device at its real level.
-  LOGI("teesim_router_new_device: local KeyMint device at security_level=%d (real=%p)",
-       security_level, real_binder);
+  // Never wrap a SOFTWARE-level KeyMint. keystore2 serves SecurityLevel::SOFTWARE from an in-process
+  // km_compat device on every device — native TEE devices included (only TrustedEnvironment and
+  // StrongBox resolve to a native HAL; SOFTWARE always takes the compat fallback). We only simulate the
+  // hardware levels; wrapping the software leg would route a target uid's ordinary software keys (via
+  // ProfileForRequest's uid fallback) into the TA, so we bail here: LocalFor caches this nullptr and
+  // HookedTransact falls through to real_transact, leaving the software path untouched. The early
+  // return is ref-balanced — `real` releases its fromBinder reference as it goes out of scope,
+  // restoring real_binder to exactly the count keystore2 holds; adding a decStrong here would
+  // under-reference it.
+  if (static_cast<SecurityLevel>(security_level) == SecurityLevel::SOFTWARE) {
+    LOGI("teesim_router_new_device: SOFTWARE-level KeyMint (real=%p, remote=%d); NOT wrapping",
+         real_binder, real_binder ? AIBinder_isRemote(real_binder) : -1);
+    return nullptr;
+  }
+  // keystore2 resolves a distinct IKeyMintDevice for TrustedEnvironment (level 1) and, when present,
+  // StrongBox (level 2); each is wrapped by its own local device at its real level. remote=0 marks a
+  // legacy km_compat leg, remote=1 a native HAL.
+  LOGI("teesim_router_new_device: local KeyMint device at security_level=%d (real=%p, remote=%d)",
+       security_level, real_binder, real_binder ? AIBinder_isRemote(real_binder) : -1);
   auto dev = ndk::SharedRefBase::make<TeesimKeyMintDevice>(
       static_cast<SecurityLevel>(security_level), std::move(real));
   ndk::SpAIBinder b = dev->asBinder();

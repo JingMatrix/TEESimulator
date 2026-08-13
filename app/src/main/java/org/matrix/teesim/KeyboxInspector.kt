@@ -17,6 +17,12 @@ import org.w3c.dom.Element
  * the certificate chain and reports the fields that let a user spot a bad keybox — subject/issuer,
  * validity (with expiry), key type and size, and whether the chain links up — plus whether a private
  * key is present. Read-only: the private key material is never returned, only that it exists.
+ *
+ * It also runs the checks that decide whether a keybox would pass Play Integrity / hardware attestation:
+ * each cert's signature is verified against its parent, [RootPublicKey] classifies the root the chain
+ * terminates in (Google, AOSP software, Knox, or unknown), and every serial is looked up in Google's
+ * revocation list ([RevocationList]). A Google-rooted, cryptographically linked, unrevoked chain is a
+ * genuine live keybox; a revoked or software-rooted one is not.
  */
 object KeyboxInspector {
 
@@ -29,10 +35,12 @@ object KeyboxInspector {
         return name
     }
 
-    fun inspect(rawName: String): JSONObject {
+    fun inspect(rawName: String, forceRefresh: Boolean = false): JSONObject {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)
         if (!file.isFile) return fail("no such keybox: $name")
+        // Pull-to-refresh on the detail page re-fetches Google's revocation list before re-checking.
+        if (forceRefresh) RevocationList.forceRefresh()
         return try {
             val doc = newSafeBuilder().parse(file)
             val root = doc.documentElement
@@ -47,6 +55,7 @@ object KeyboxInspector {
                 .put("ok", true)
                 .put("name", name)
                 .put("deviceId", kb?.getAttribute("DeviceID") ?: "")
+                .put("revocationListAvailable", RevocationList.available())
                 .put("keys", keys)
         } catch (e: Exception) {
             SystemLogger.warning("KeyboxInspector: failed to parse $name", e)
@@ -90,20 +99,76 @@ object KeyboxInspector {
 
         val certParent = firstChild(ke, "CertificateChain") ?: ke
         val certNodes = certParent.getElementsByTagName("Certificate")
+
+        // Parse every slot; a null keeps its position so the signature pairing (cert[i] signed by
+        // cert[i+1], the top cert self-signed) stays aligned even when one cert fails to decode.
+        val parsed = ArrayList<X509Certificate?>()
+        for (i in 0 until certNodes.length) parsed.add(parsePem(certNodes.item(i).textContent))
+        val valid = parsed.filterNotNull()
+
+        val revChecked = RevocationList.available()
         val certs = JSONArray()
-        val parsed = ArrayList<X509Certificate>()
-        for (i in 0 until certNodes.length) {
-            val cert = parsePem(certNodes.item(i).textContent)
+        var anyRevoked = false
+        var chainVerified = valid.isNotEmpty() && valid.size == parsed.size
+        for (i in parsed.indices) {
+            val cert = parsed[i]
             if (cert == null) {
                 certs.put(JSONObject().put("index", i).put("error", "could not parse certificate"))
-            } else {
-                parsed.add(cert)
-                certs.put(certJson(i, cert))
+                chainVerified = false
+                continue
             }
+            val j = certJson(i, cert)
+
+            // Cryptographic linkage: every cert is signed by the next one up; a self-signed root signs
+            // itself. When the top cert is not self-signed the real root is not embedded (the chain ends
+            // at an intermediate) — there is nothing in-chain to check it against, so leave it and let
+            // RootPublicKey.authorityOf decide its trust.
+            val isTop = i == parsed.size - 1
+            val selfSigned = cert.subjectX500Principal == cert.issuerX500Principal
+            val parentKey = when {
+                isTop && !selfSigned -> null
+                isTop -> cert.publicKey
+                else -> parsed[i + 1]?.publicKey
+            }
+            val sigValid = parentKey?.let {
+                try {
+                    cert.verify(it)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (sigValid != null) j.put("signatureValid", sigValid)
+            if (sigValid == false) chainVerified = false
+
+            j.put("revocationChecked", revChecked)
+            if (revChecked) {
+                val rev = RevocationList.status(cert.serialNumber)
+                if (rev != null) {
+                    anyRevoked = true
+                    j.put("revoked", true)
+                        .put("revocationStatus", rev.optString("status", "REVOKED"))
+                        .put("revocationReason", rev.optString("reason", ""))
+                } else {
+                    j.put("revoked", false)
+                }
+            }
+            certs.put(j)
         }
+
+        val authority = RootPublicKey.authorityOf(valid)
+        // Tag the top-most parsed cert with the verdict, so the root row can show it.
+        val topIndex = parsed.indexOfLast { it != null }
+        if (topIndex >= 0) certs.optJSONObject(topIndex)?.put("rootAuthority", authority)
+
         out.put("chainLength", certNodes.length)
         out.put("certs", certs)
-        out.put("linkage", linkage(parsed))
+        out.put("linkage", linkage(valid))
+        out.put("rootAuthority", authority)
+        out.put("googleSigned", authority == RootPublicKey.GOOGLE)
+        out.put("chainVerified", chainVerified)
+        out.put("revoked", anyRevoked)
+        out.put("revocationChecked", revChecked)
         return out
     }
 

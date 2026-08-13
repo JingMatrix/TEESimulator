@@ -4,7 +4,7 @@
 // keys reproducible across restarts. Remote key provisioning is not intercepted,
 // so its artifacts only need to exist.
 
-use kmr_common::crypto::{self, Hkdf};
+use kmr_common::crypto::{self, mldsa, AccumulatingOperation, Hkdf, MlDsa, OpaqueOr};
 use kmr_common::{km_err, Error};
 use kmr_ta::device::{
     DiceInfo, RetrieveAttestationIds, RetrieveKeyMaterial, RetrieveRpcArtifacts, RpcV2Req,
@@ -82,5 +82,23 @@ impl RetrieveAttestationIds for AttestIds {
 
     fn destroy_all(&mut self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+/// Stub ML-DSA backend. The BoringSSL ML-DSA implementation is Soong-only (it uses bssl-sys, absent
+/// under Cargo), and TEESimulator never mints post-quantum keys, so this rejects any use cleanly.
+/// generate_key/import default to the software seed path in the trait but reach these on first use.
+pub struct NoMlDsa;
+
+impl MlDsa for NoMlDsa {
+    fn subject_public_key(&self, _key: &OpaqueOr<mldsa::Key>) -> Result<Vec<u8>, Error> {
+        Err(km_err!(Unimplemented, "ML-DSA is not supported"))
+    }
+
+    fn begin_sign(
+        &self,
+        _key: OpaqueOr<mldsa::Key>,
+    ) -> Result<Box<dyn AccumulatingOperation>, Error> {
+        Err(km_err!(Unimplemented, "ML-DSA is not supported"))
     }
 }

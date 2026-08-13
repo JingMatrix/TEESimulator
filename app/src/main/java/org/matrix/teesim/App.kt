@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.Build
 import android.os.Looper
+import android.os.SystemClock
 import java.io.File
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
@@ -23,10 +24,26 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 object App {
 
     @Volatile private lateinit var appContext: Context
+    // The frozen captured harvest (raw device state + computed default overrides). Never re-merged.
+    @Volatile private lateinit var capturedBase: Harvester.Record
+    // capturedBase with the user's overrides.json layered on — what we present and push. Recomputed on
+    // every resolveAndPush, so an edit to overrides.json (which trips the DATA_DIR watcher) takes effect.
     @Volatile private lateinit var harvest: Harvester.Record
     @Volatile private var lastGoodConfig: ConfigStore.Config? = null
+    // The ro.boot.vbmeta.* values we last pushed to resetprop, so we only re-set them when they change.
+    @Volatile private var lastBootProps: Map<String, String> = emptyMap()
     // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
     private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
+
+    // How often the usage poll asks the lib for its per-uid key-request tallies.
+    private const val USAGE_POLL_MS = 15_000L
+    // Serializes the WHOLE fetch→delta→apply cycle of [pollUsageOnce]. Two callers race — the 15s poll
+    // thread and KeyAdmin's /packages handler (its own thread) — and although Control.fetchUsage is
+    // itself serialized, applying two snapshots out of order would drive a stale (smaller) count into
+    // UsageStore's "count shrank ⇒ lib restarted" branch and fold a whole cumulative as a phantom delta.
+    // A DEDICATED lock (never the App monitor, which resolveAndPush holds) keeps polls single-file
+    // without blocking the config path across the multi-second fetch.
+    private val usagePollLock = Any()
 
     // The delete-helper child body (see main): keystore2 only lets a key's OWNER delete it, and only the
     // owner's delete evicts keystore2's in-memory cache (a direct database delete does not). binder tells
@@ -75,11 +92,17 @@ object App {
 
             Packages.init(appContext)
 
-            // Real-key harvest (frozen verifiedBoot*), persisted to harvested.json.
-            harvest = Harvester.run(appContext)
+            // Real-key harvest (frozen verifiedBoot*), persisted to harvested.json. Then layer the user's
+            // overrides.json over it for the record we actually present.
+            capturedBase = Harvester.run(appContext)
+            harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
 
             // Key-management endpoint for the WebUI.
             KeyAdmin.start(harvest)
+
+            // Pull Google's attestation revocation list in the background so the keybox inspector's
+            // revoked/Google-signed verdicts are ready before the first inspect.
+            RevocationList.warm()
 
             // Inject the interceptor and keep it injected across keystore restarts.
             Injector(resolveModuleDir(args)).start()
@@ -97,9 +120,13 @@ object App {
             }
         }
             Control.start()
+            // Freeze the auto-include baseline (known_packages.json) at a known moment, before the first
+            // resolve reads it — so "future installs only" is measured from daemon-start, not lazily.
+            Scope.baselineKnownPackages()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }
             PackageWatch.start(appContext) { resolveAndPush() }
+            startUsagePoll()
 
             SystemLogger.info("Daemon initialised; entering main loop")
             Looper.loop()
@@ -168,7 +195,61 @@ object App {
         val field = ActivityThread::class.java.getDeclaredField("mInitialApplication")
         field.isAccessible = true
         field.set(activityThread, app)
+
+        neutralizeSqliteSettingsReads()
         return app
+    }
+
+    /**
+     * Stop SQLiteDatabase from reading device settings on its first open in this process. Planting
+     * mInitialApplication above (so KeyStore/PackageManager see a context) makes
+     * ActivityThread.currentApplication() non-null, and SQLiteDatabase's constructor then reaches into
+     * settings the way a normal app would. Our process is not an AMS-registered app, so on some ROMs
+     * resolving a provider throws ("Unable to find app for caller"), and every openDatabase() — hence
+     * every KeystoreDb read — fails, leaving the WebUI key list empty. We pre-seed the framework's
+     * cached settings so those lookups never run. Two independent reads have to be defused:
+     *
+     * - OnePlus builds have SQLiteGlobal consult a package list (getPkgs/BenchAppList) to pick a sync
+     *   mode. Seeding sDefaultSyncMode to NORMAL short-circuits that before it touches PackageManager.
+     * - Stock SQLiteCompatibilityWalFlags.initIfNeeded() reads Settings.Global.getString() under only a
+     *   try/finally. Marking the class initialised returns early before it touches settings; its
+     *   defaults (no compat-WAL overrides) are exactly what our read-only snapshot reads want.
+     *
+     * Each step is best effort: a framework that lays the class out differently just keeps the old
+     * behaviour.
+     */
+    private fun neutralizeSqliteSettingsReads() {
+        // OnePlus compares the current package against a BenchAppList to decide the sync mode; seeding
+        // sDefaultSyncMode keeps SQLiteGlobal from calling getPkgs() through PackageManager.
+        try {
+            val syncMode =
+                Class.forName("android.database.sqlite.SQLiteGlobal")
+                    .getDeclaredField("sDefaultSyncMode")
+                    .apply { isAccessible = true }
+            if (syncMode.get(null) == null) {
+                syncMode.set(null, "NORMAL")
+                SystemLogger.info("SQLiteGlobal.sDefaultSyncMode seeded NORMAL (skip getPkgs on DB open)")
+            }
+        } catch (e: Throwable) {
+            SystemLogger.verbose("SQLiteGlobal sync-mode guard not applied: ${e.message}")
+        }
+
+        // Stock AOSP settings dependency: present since API 28, absent on some newer builds.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                val walFlags = Class.forName("android.database.sqlite.SQLiteCompatibilityWalFlags")
+                // Mark initialised so initIfNeeded() returns before reading Settings.Global.
+                walFlags.getDeclaredField("sInitialized").apply { isAccessible = true }.setBoolean(null, true)
+                // Secondary recursion guard, in case a build reorders the initIfNeeded() short-circuit.
+                walFlags
+                    .getDeclaredField("sCallingGlobalSettings")
+                    .apply { isAccessible = true }
+                    .setBoolean(null, true)
+                SystemLogger.info("SQLiteCompatibilityWalFlags neutralised (skip Settings.Global on DB open)")
+            } catch (e: Throwable) {
+                SystemLogger.warning("Could not neutralise SQLiteCompatibilityWalFlags", e)
+            }
+        }
     }
 
     /**
@@ -177,6 +258,12 @@ object App {
      */
     @Synchronized
     private fun resolveAndPush() {
+        // Re-layer the user's overrides.json over the frozen capture — an override edit trips the same
+        // DATA_DIR watcher that calls us, so this is where a changed override becomes live. Refresh the
+        // record the WebUI reads, and reflect any boot key/hash override into ro.boot.vbmeta.*.
+        harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
+        KeyAdmin.updateHarvest(harvest)
+        applyBootProps(harvest)
         try {
             lastGoodConfig = ConfigStore.load()
         } catch (e: ConfigStore.ConfigException) {
@@ -196,6 +283,86 @@ object App {
         } catch (e: Exception) {
             SystemLogger.error("Failed to resolve/push config", e)
         }
+    }
+
+    /**
+     * The background loop that keeps [UsageStore] current: every [USAGE_POLL_MS] it polls the lib for
+     * its per-uid key-request tallies and folds the deltas in ([pollUsageOnce]). Runs off the control
+     * reader thread (Control delivers the reply there), so it lives on its own daemon thread. A slow or
+     * absent lib just means an empty poll; the loop keeps going.
+     */
+    private fun startUsagePoll() {
+        Thread({ usagePollLoop() }, "teesim-usage-poll").apply {
+            isDaemon = true
+            start()
+        }
+        SystemLogger.info("Usage poll thread started (every ${USAGE_POLL_MS}ms)")
+    }
+
+    private fun usagePollLoop() {
+        while (true) {
+            try {
+                Thread.sleep(USAGE_POLL_MS)
+            } catch (_: InterruptedException) {
+                return
+            }
+            try {
+                pollUsageOnce()
+            } catch (e: Throwable) {
+                SystemLogger.warning("usage poll: iteration failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Ask the lib for its usage snapshot and fold it into [UsageStore]. For each reported uid: resolve a
+     * representative package (PackageManager reverse map, or the lib's pkg hint as a fallback), convert
+     * the CLOCK_BOOTTIME lastBootMs to a wall-clock epoch via the current boot/wall offset, and hand it
+     * to [UsageStore.applyLibSample], which owns the per-uid cursor and the delta math under its own
+     * lock. This method therefore holds NO lock — in particular it must never block the config path:
+     * [Control.fetchUsage] can wait seconds for the lib, and an earlier version @Synchronized on the App
+     * monitor (shared with [resolveAndPush]) stalled config pushes for that whole window.
+     */
+    fun pollUsageOnce() = synchronized(usagePollLock) {
+        val apps = Control.fetchUsage() ?: return@synchronized
+        val bootNowMs = SystemClock.elapsedRealtime()
+        val wallNow = System.currentTimeMillis()
+        var recorded = 0
+        for (i in 0 until apps.length()) {
+            val e = apps.optJSONObject(i) ?: continue
+            val uid = e.optInt("uid", -1)
+            if (uid < 0) continue
+            val current = e.optLong("count", 0L)
+            val lastBootMs = e.optLong("lastBootMs", 0L)
+            val hint = e.optString("pkg", "")
+
+            val pkg = Packages.packagesForUid(uid).firstOrNull()?.takeIf { it.isNotEmpty() }
+                ?: hint.takeIf { it.isNotEmpty() }
+                ?: continue // no resolvable package: leave the cursor untouched so the count isn't lost
+            // lastBootMs is on CLOCK_BOOTTIME; the same offset (wallNow - bootNowMs) maps it to wall time.
+            val lastUsedEpoch = if (lastBootMs > 0) wallNow - (bootNowMs - lastBootMs) else wallNow
+            UsageStore.applyLibSample(uid, pkg, current, lastUsedEpoch)
+            recorded++
+        }
+        SystemLogger.info("usage poll: ${apps.length()} uid(s) reported, $recorded merged")
+    }
+
+    /**
+     * When a verifiedBootKey/Hash override is active (only possible when the device reported an all-zero,
+     * unlocked boot value), reflect the spoofed value into the matching ro.boot.vbmeta.* property so that
+     * anything reading those props directly sees what attestation presents. Only re-sets a property when
+     * its value changed, so the package/config watchers don't resetprop on every unrelated event.
+     */
+    private fun applyBootProps(h: Harvester.Record) {
+        val want =
+            Harvester.BOOT_PROP.mapNotNull { (field, prop) ->
+                h.overrides[field]?.value?.takeIf { it.isNotEmpty() }?.let { prop to it }
+            }.toMap()
+        if (want == lastBootProps) return
+        for ((prop, value) in want) {
+            if (lastBootProps[prop] != value) SysProp.set(prop, value)
+        }
+        lastBootProps = want
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */

@@ -49,8 +49,10 @@ function foldSummary(group, fields, profile, hasErrors) {
   return nodes;
 }
 
-// A cue under a level / identity field: what an empty value (harvested) or a
-// `system_property` value resolves to, mirroring the keybox "(missing)" cue.
+// A cue under a level / identity field: what an empty value resolves to — the harvested value,
+// meaning the raw capture OR the value fabricated at harvest (e.g. a serial/imei/meid read from the
+// OS because the leaf never carries it) — or, when neither exists, that the tag will be omitted. A
+// `system_property` value gets its own cue. Mirrors the keybox "(missing)" cue.
 function resolveHint(d, value, resolved) {
   if (!Object.prototype.hasOwnProperty.call(resolved, d.key)) return null;
   const v = value == null ? "" : String(value).trim();
@@ -134,7 +136,7 @@ export function renderProfileEditor(host, state, actions) {
   const scrollTop = captureScroll(host);
   clear(host);
 
-  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {} } = state;
+  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, autoTakenBy = null } = state;
   const profile = config.profiles[name];
   if (!profile) { actions.onClose(); return; }
 
@@ -192,6 +194,18 @@ export function renderProfileEditor(host, state, actions) {
       id: fieldId(name, d.key), keyboxFiles,
       addApp: (pkg) => actions.onAddApp(name, pkg),
       removeApp: (pkg) => actions.onRemoveApp(name, pkg),
+      // The scope widget only shows the current picks and a button that opens the picker;
+      // labelMap/installedSet let its chips show real app names and flag uninstalled ones,
+      // and are null until the Scope page has been opened once (then the chips light up).
+      openScope: () => actions.openScope(name),
+      labelMap: scopeMeta && scopeMeta.labelMap,
+      installedSet: scopeMeta && scopeMeta.installedSet,
+      // So the scope face can say "auto-include on — new apps added automatically" instead of
+      // "no apps" when the profile relies on auto-include rather than explicit picks.
+      autoInclude: getPath(profile, ["autoIncludeNewApps"]) === true,
+      // The auto-include toggle disables itself (with a note) when ANOTHER profile already owns
+      // auto-include — only one profile may, so the conflict shows before Save rejects it.
+      autoTakenBy,
     };
     const onChange = (path, v) => actions.onFieldChange(name, path, v);
     const fieldEl = renderField(d, value, onChange, ctx);

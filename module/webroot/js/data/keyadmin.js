@@ -23,17 +23,42 @@
 //   keyAdmin("keysDbDelete", { ids }) -> { ok, deleted, requested }
 //       remove those keyentry ids from keystore2; the daemon re-verifies each is one of
 //       our marked target-app keys before deleting, so a stray id is a no-op.
+//   keyAdmin("packages")             -> { ok, firstAppUid,
+//                                          apps:[{ uid, packages:[…], label, system,
+//                                                  launchable, enabled, installTime, freq,
+//                                                  lastUsed, recent }] }
+//       the live device app list, ONE entry per uid (packages sharing a uid are collapsed;
+//       `packages` lists them all, sorted). `label` is the best human name, `system` is
+//       true for a framework/system-flagged app or any uid below firstAppUid, `launchable`
+//       whether it has a launcher activity, `enabled` the representative app's state.
+//       firstAppUid is Process.FIRST_APPLICATION_UID (10000). Feeds the Scope picker.
+//       The usage columns: `installTime` epoch ms of first install (0 unknown), `freq`
+//       the persistent count of key requests this app has made (max over its package names,
+//       0 if none), `lastUsed` epoch ms of the last request (0 if never), `recent` true when
+//       the app has asked for a key since THIS boot. These drive the Scope sort/badges.
+//   keyAdmin("usageClear")           -> { ok, cleared }
+//       wipes the daemon's persisted frequency memory (usage.json). The Scope page's "Clear
+//       usage" button calls this; `cleared` is how many package entries were dropped.
 //   keyAdmin("inspect", { alias })   -> { ok, alias, cert{…}, attestation:{…}|null }
 //   keyAdmin("delete",  { alias })   -> { ok, deleted }
 //   keyAdmin("logs", { after, max }) -> { ok, lines:[{ seq, level, tag, text }], nextAfter }
 //   keyAdmin("logsWrite", { dir, name, text }) -> { ok, path } | { ok:false, error }
 //       the daemon (root) writes `text` to <dir>/<safe(name)>, creating dir; it names and
 //       places the file since the WebView ignores download filenames and Content-Disposition.
-//   keyAdmin("keyboxInspect", { name }) -> { ok, name, deviceId,
-//                                          keys:[{ algorithm, privateKeyPresent, chainLength,
-//                                                  linkage, certs:[{ index, subject, issuer,
-//                                                  serial, notBefore, notAfter, expired,
-//                                                  keyAlgorithm, keySize, isCa, ... }] }] }
+//   keyAdmin("keyboxInspect", { name, refresh? }) -> { ok, name, deviceId, revocationListAvailable,
+//       refresh:true forces the daemon to re-fetch Google's revocation list (fresh, cache-busted)
+//       before re-checking — the inspector's pull-to-refresh sets it.
+//                                          keys:[{ algorithm, privateKeyPresent, chainLength, linkage,
+//                                                  rootAuthority, googleSigned, chainVerified, revoked,
+//                                                  revocationChecked,
+//                                                  certs:[{ index, subject, issuer, serial, notBefore,
+//                                                  notAfter, expired, sigAlg, keyAlgorithm, keySize, isCa,
+//                                                  selfSigned, signatureValid, revoked, revocationChecked,
+//                                                  revocationStatus, revocationReason, rootAuthority }] }] }
+//       rootAuthority: which trust anchor the chain roots in — "google" (genuine hardware keybox),
+//       "aosp" (software root), "knox", "unknown", or "none". googleSigned/chainVerified/revoked are the
+//       chain-level verdicts the inspector's status banner is built from; revocationChecked is false when
+//       Google's revocation list could not be fetched (so revoked is not authoritative).
 //   keyAdmin("canary")               -> { ok, currentCode, latest:{ code, tag, name,
 //                                          notes, htmlUrl, assets:[{ name, size }] }|null,
 //                                          updateAvailable }
@@ -73,6 +98,17 @@ function getToken() {
 export const API_BASE = BASE;
 export function adminToken() {
   return getToken();
+}
+
+// GET /icon?pkg=<package>&token=<token> -> raw PNG (the daemon renders the app icon and
+// caches it). A browser <img> cannot set the X-Teesim-Token header, so — exactly like the
+// log-download route — the token rides in the query string. The URL is what an <img src> or
+// CSS background points at; this seam owns the base+token so the view never names either.
+// The Scope controller prefetches adminToken() once and then builds row URLs synchronously,
+// but this async helper is here for any caller that just wants one URL without that dance.
+export async function iconUrlAsync(pkg) {
+  const t = await getToken();
+  return BASE + "/icon?pkg=" + encodeURIComponent(pkg || "") + "&token=" + encodeURIComponent(t || "");
 }
 
 // One request helper: attach the token header, parse JSON, and convert any non-200
@@ -143,6 +179,10 @@ export async function keyAdmin(action, args = {}) {
       return request("GET", "/keys");
     case "keysDb":
       return request("GET", "/keys/db");
+    case "packages":
+      return request("GET", "/packages");
+    case "usageClear":
+      return request("POST", "/usage/clear");
     case "keysDbDelete":
       return request("POST", "/keys/db/delete" + idsQuery(args));
     case "inspect":
@@ -154,7 +194,9 @@ export async function keyAdmin(action, args = {}) {
     case "logsWrite":
       return request("POST", "/logs/write" + logsWriteQuery(args), args.text);
     case "keyboxInspect":
-      return request("GET", "/keybox/inspect" + nameQuery(args));
+      // refresh:true has the daemon re-fetch Google's revocation list (fresh, cache-busted) before
+      // re-checking — the keybox inspector's pull-to-refresh sets it.
+      return request("GET", "/keybox/inspect" + nameQuery(args) + (args.refresh ? "&refresh=1" : ""));
     case "canary":
       return request("GET", "/canary");
     case "canaryInstall":
