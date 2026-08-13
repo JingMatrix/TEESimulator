@@ -107,7 +107,6 @@ export const FIELDS = [
     group: "apps", type: "toggle", required: false, default: false,
     help: t("schema_auto_include_help"),
   },
-  },
 ];
 
 // Clone a default so two profiles never share the same array/object reference.
