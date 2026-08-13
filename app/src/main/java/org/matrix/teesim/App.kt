@@ -107,7 +107,7 @@ object App {
             // Inject the interceptor and keep it injected across keystore restarts.
             Injector(resolveModuleDir(args)).start()
 
-            // Control channel + initial push, then watch config and packages. After each committed
+            // Control channel + initial push, then watch config. After each committed
             // push the lib acks; that is when pre-existing target keys are re-attested to the keybox.
             Control.onCommitted = {
             lastGoodConfig?.let { cfg ->
@@ -120,12 +120,8 @@ object App {
             }
         }
             Control.start()
-            // Freeze the auto-include baseline (known_packages.json) at a known moment, before the first
-            // resolve reads it — so "future installs only" is measured from daemon-start, not lazily.
-            Scope.baselineKnownPackages()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }
-            PackageWatch.start(appContext) { resolveAndPush() }
             startUsagePoll()
 
             SystemLogger.info("Daemon initialised; entering main loop")

@@ -36,11 +36,6 @@ object ConfigStore {
         val meid: String,
         val imei2: String,
         val apps: List<String>,
-        // When true, the profile ALSO targets every installed user app (uid >= first app uid) that no
-        // OTHER profile claims — including apps installed later, since the daemon re-resolves on each
-        // package change. At most one profile may set this (checked below); it lets the apps list be
-        // empty, the auto set covering it.
-        val autoIncludeNewApps: Boolean,
     )
 
     data class Config(val version: Int, val profiles: List<ProfileConfig>)
@@ -67,7 +62,6 @@ object ConfigStore {
 
         val seenApps = HashMap<String, String>() // apps[] entry (package or uid:N) -> owning profile id
         val seenUids = HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
-        var autoIncludeProfiles = 0 // how many profiles set autoIncludeNewApps (at most one allowed)
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -94,17 +88,17 @@ object ConfigStore {
                     (0 until arr.length()).map { arr.getString(it).trim() }
                 } ?: emptyList()
 
-            // A profile that auto-includes every user app may legitimately name no apps of its own;
-            // otherwise it must target at least one, or it routes nothing.
-            val autoIncludeNewApps = p.optBoolean("autoIncludeNewApps", false)
-            if (autoIncludeNewApps) autoIncludeProfiles++
-            if (autoIncludeProfiles > 1)
-                throw ConfigException(
-                    "profile '$id' also sets autoIncludeNewApps, but at most one profile may " +
-                        "auto-include new apps (two would both claim every unowned user app)"
+            // autoIncludeNewApps is gone. A config still carrying it would otherwise lose those apps
+            // in silence, and an auto-only profile (empty apps[], legal back then) now fails the
+            // no-apps check below with no hint as to why — so name the removed key first.
+            if (p.has("autoIncludeNewApps"))
+                SystemLogger.warning(
+                    "profile '$id' sets autoIncludeNewApps, which no longer exists — apps it used to " +
+                        "add automatically must now be listed in apps[]"
                 )
-            if (apps.isEmpty() && !autoIncludeNewApps)
-                throw ConfigException("profile '$id' has no apps (and does not auto-include new apps)")
+
+            // A profile that targets nothing routes nothing.
+            if (apps.isEmpty()) throw ConfigException("profile '$id' has no apps")
 
             // Each apps[] entry is either a package name or the advanced raw-uid token uid:N. Validate
             // the shape here so a typo can't silently slip through to routing, and keep the per-entry
@@ -173,7 +167,6 @@ object ConfigStore {
                     meid = p.optString("meid", ""),
                     imei2 = p.optString("imei2", ""),
                     apps = apps,
-                    autoIncludeNewApps = autoIncludeNewApps,
                 )
             )
         }

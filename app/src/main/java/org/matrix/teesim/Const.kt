@@ -18,10 +18,6 @@ object Const {
      *  because a uid can change across reinstalls; accumulated across boots from per-poll lib deltas. */
     val usageFile = File(DATA_DIR, "usage.json")
 
-    /** The baseline set of package names present when TEESimulator first ran on this device. Seeded once
-     *  (when absent) and never rewritten, so auto-include can add only packages installed AFTER it. */
-    val knownPackagesFile = File(DATA_DIR, "known_packages.json")
-
     /** keystore's uid; the control socket only sends the keybox once the peer is it. */
     const val AID_KEYSTORE = 1017
 

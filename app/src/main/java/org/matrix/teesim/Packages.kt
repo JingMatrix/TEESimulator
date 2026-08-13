@@ -123,17 +123,6 @@ object Packages {
         return out
     }
 
-    /** Every installed package name on the device, for the auto-include baseline seed. Empty on
-     *  failure so a broken enumeration never seeds an empty baseline that later mislabels everything new. */
-    fun allInstalledPackageNames(): Set<String> =
-        try {
-            @Suppress("DEPRECATION")
-            pm.getInstalledApplications(0).mapTo(HashSet()) { it.packageName }
-        } catch (e: Exception) {
-            SystemLogger.warning("allInstalledPackageNames: getInstalledApplications failed", e)
-            emptySet()
-        }
-
     // Rendered PNG icons keyed by package. A browser <img> re-hits /icon on every list scroll, so caching
     // the encoded bytes (small; ~a few KB each) keeps those repeats off PackageManager + the PNG encoder.
     private const val ICON_PX = 96

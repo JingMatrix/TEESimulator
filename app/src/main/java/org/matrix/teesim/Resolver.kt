@@ -17,8 +17,8 @@ import org.json.JSONObject
  * osVersion, osPatchLevel, vendorPatchLevel,
  * bootPatchLevel, deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name
  * entry verbatim (kept even when not installed, since a name-match still fires on a later install);
- * uids[] is the independent effective caller-uid set (resolved packages + raw uid:N tokens +
- * autoIncludeNewApps expansion, never -1). The router matches package name first, uid second, so the
+ * uids[] is the independent effective caller-uid set (resolved packages + raw uid:N tokens, never
+ * -1). The router matches package name first, uid second, so the
  * two arrays need not be the same length. See [Scope].
  */
 object Resolver {
@@ -65,7 +65,7 @@ object Resolver {
 
         val profiles = JSONArray()
         for (p in config.profiles) {
-            profiles.put(resolveProfile(p, config.profiles.filter { it.id != p.id }, harvest))
+            profiles.put(resolveProfile(p, harvest))
         }
         msg.put("profiles", profiles)
         return msg
@@ -73,7 +73,6 @@ object Resolver {
 
     private fun resolveProfile(
         p: ConfigStore.ProfileConfig,
-        others: List<ConfigStore.ProfileConfig>,
         harvest: Harvester.Record,
     ): JSONObject {
         val o = JSONObject()
@@ -133,9 +132,9 @@ object Resolver {
 
         // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[] (caller-uid
         // fallback, effective set with no -1) resolved centrally by Scope, which also folds in raw
-        // uid:N tokens and the autoIncludeNewApps expansion and logs the per-entry detail. The two
-        // arrays are independent here (uids[] may be longer or shorter than packages[]).
-        val scope = Scope.resolve(p, others)
+        // uid:N tokens and logs the per-entry detail. The two arrays are independent here (uids[] may
+        // be longer or shorter than packages[]).
+        val scope = Scope.resolve(p)
         o.put("packages", JSONArray(scope.packageNames))
         val uids = JSONArray()
         for (u in scope.uids) uids.put(u)

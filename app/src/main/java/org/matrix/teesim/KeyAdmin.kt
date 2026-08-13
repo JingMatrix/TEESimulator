@@ -344,8 +344,8 @@ object KeyAdmin {
 
     /**
      * uid -> a representative package name for every effective target across the live config, via
-     * [Scope.uidToPackage] (which folds in raw uid:N tokens and auto-included apps, mapping the
-     * package-less ones to their uid:token). Keeps the try/catch + empty-map fallback so a broken
+     * [Scope.uidToPackage] (which folds in raw uid:N tokens, mapping the package-less ones to their
+     * uid:token). Keeps the try/catch + empty-map fallback so a broken
      * config just yields an empty stored-keys view rather than a 500.
      */
     private fun targetUidToPackage(): Map<Int, String> =

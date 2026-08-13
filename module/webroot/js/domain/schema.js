@@ -104,11 +104,6 @@ export const FIELDS = [
     re: APP_ENTRY_RE, required: true, default: [],
     help: "The apps this profile attests for.",
   },
-  {
-    key: "autoIncludeNewApps", path: ["autoIncludeNewApps"], label: "Auto-include new apps",
-    group: "apps", type: "toggle", required: false, default: false,
-    help: "Target apps installed after now; existing apps stay untouched.",
-  },
 ];
 
 // Clone a default so two profiles never share the same array/object reference.

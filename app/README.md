@@ -53,16 +53,12 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
    turns a validated config plus the frozen harvest, system properties, and the clock into the
    full-replace `config` message the native lib applies — resolving the profile's targets via
    **`Scope`**, the patch mini-language, and the harvested device ids and security level.
-   **`PackageWatch`** re-resolves and re-pushes on `PACKAGE_ADDED/REMOVED/REPLACED`.
 
    **`Scope`** is the one place a profile's `apps[]` becomes the two wire arrays the native router
    matches on — `packages[]` (attestation package-name match, kept verbatim so a not-yet-installed
    name still matches once the app lands) and `uids[]` (caller-uid match, the effective set with no
-   `-1`). An `apps[]` entry is a package name, an advanced `uid:N` token that targets a caller uid
-   directly (for a shared-uid app or one whose package is unknown), or — per profile —
-   `autoIncludeNewApps`, which folds in only apps installed AFTER a one-time baseline snapshot
-   (`known_packages.json`, seeded from the currently-installed set the first time the daemon runs), so
-   genuinely new apps are covered without an edit while existing apps are never silently captured. Every
+   `-1`). An `apps[]` entry is a package name or an advanced `uid:N` token that targets a caller uid
+   directly (for a shared-uid app or one whose package is unknown). Every
    entry is logged as it resolves (`Scope[<id>]: 'com.foo' -> uid 10123`, `-> NOT INSTALLED (dropped)`),
    and a uid below the app range (a `shell`/`system_server`-style uid) is flagged with a warning — the
    instrumentation that makes "which app is actually intercepted" answerable from the log.

@@ -30,8 +30,8 @@ object ReAttest {
      * it reloads from the (now smaller) database; the injector re-injects on the new pid.
      */
     fun purgeTargetAttestKeys(config: ConfigStore.Config): Boolean {
-        // Every effective target uid across the config (resolved packages + raw uid:N + auto-include),
-        // computed and logged once by Scope.
+        // Every effective target uid across the config (resolved packages + raw uid:N), computed and
+        // logged once by Scope.
         val uids = Scope.allTargetUids(config)
         if (uids.isEmpty()) return false
         // deleteTargetAttestKeys removes each key as its owning app first (which evicts keystore2's cache);
@@ -61,7 +61,7 @@ object ReAttest {
     /** Re-attest every eligible pre-existing key of [config]'s target apps against the live profiles. */
     fun run(config: ConfigStore.Config) {
         // uid -> the profile whose keybox should sign that app's keys (one profile per package),
-        // resolved and logged centrally by Scope so raw uid:N tokens and auto-include are covered too.
+        // resolved and logged centrally by Scope so raw uid:N tokens are covered too.
         val uidToProfile = Scope.uidToProfile(config)
         if (uidToProfile.isEmpty()) return
 

@@ -135,7 +135,7 @@ export function renderProfileEditor(host, state, actions) {
   const scrollTop = captureScroll(host);
   clear(host);
 
-  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, autoTakenBy = null } = state;
+  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null } = state;
   const profile = config.profiles[name];
   if (!profile) { actions.onClose(); return; }
 
@@ -199,12 +199,6 @@ export function renderProfileEditor(host, state, actions) {
       openScope: () => actions.openScope(name),
       labelMap: scopeMeta && scopeMeta.labelMap,
       installedSet: scopeMeta && scopeMeta.installedSet,
-      // So the scope face can say "auto-include on — new apps added automatically" instead of
-      // "no apps" when the profile relies on auto-include rather than explicit picks.
-      autoInclude: getPath(profile, ["autoIncludeNewApps"]) === true,
-      // The auto-include toggle disables itself (with a note) when ANOTHER profile already owns
-      // auto-include — only one profile may, so the conflict shows before Save rejects it.
-      autoTakenBy,
     };
     const onChange = (path, v) => actions.onFieldChange(name, path, v);
     const fieldEl = renderField(d, value, onChange, ctx);

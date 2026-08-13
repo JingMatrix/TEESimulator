@@ -124,7 +124,7 @@ test("a package listed twice in ONE profile is not a cross-profile duplicate", (
   assert.equal(r.ok, true, JSON.stringify(r.errors));
 });
 
-// --- scope: raw-uid tokens & auto-include --------------------------------
+// --- scope: raw-uid tokens -----------------------------------------------
 test("a uid: token is accepted as an app entry", () => {
   const r = validateConfig(configWith({ p: validProfile(["com.ok", "uid:10123"]) }));
   assert.equal(r.ok, true, JSON.stringify(r.errors));
@@ -138,35 +138,18 @@ test("a malformed uid token is rejected", () => {
   }
 });
 
-test("autoIncludeNewApps=true makes an empty apps list valid", () => {
-  const p = validProfile([]);
-  p.autoIncludeNewApps = true;
-  const r = validateConfig(configWith({ p }));
-  assert.equal(r.ok, true, JSON.stringify(r.errors));
-});
-
-test("autoIncludeNewApps=false with an empty apps list is still invalid", () => {
-  const p = validProfile([]);
-  p.autoIncludeNewApps = false;
-  const r = validateConfig(configWith({ p }));
+test("an empty apps list is invalid", () => {
+  const r = validateConfig(configWith({ p: validProfile([]) }));
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => e.profile === "p" && e.field === "apps"));
 });
 
-test("two profiles both auto-including new apps is an error on BOTH", () => {
-  const a = validProfile(["com.a"]); a.autoIncludeNewApps = true;
-  const b = validProfile(["com.b"]); b.autoIncludeNewApps = true;
-  const r = validateConfig(configWith({ a, b }));
-  assert.equal(r.ok, false);
-  const autoErrs = r.errors.filter((e) => e.field === "autoIncludeNewApps");
-  assert.ok(autoErrs.some((e) => e.profile === "a"));
-  assert.ok(autoErrs.some((e) => e.profile === "b"));
-});
-
-test("exactly one profile auto-including new apps is fine", () => {
-  const a = validProfile(["com.a"]); a.autoIncludeNewApps = true;
-  const b = validProfile(["com.b"]);
-  const r = validateConfig(configWith({ a, b }));
+// autoIncludeNewApps is gone; a config still carrying it is not rejected for that alone — the
+// daemon warns and the key is ignored, so the profile stands or falls on its apps[] like any other.
+test("a leftover autoIncludeNewApps key does not affect validation", () => {
+  const p = validProfile(["com.a"]);
+  p.autoIncludeNewApps = true;
+  const r = validateConfig(configWith({ p }));
   assert.equal(r.ok, true, JSON.stringify(r.errors));
 });
 

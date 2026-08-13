@@ -26,12 +26,8 @@ export function validateProfile(name, profile) {
 
     if (f.type === "applist" || f.type === "scope") {
       const apps = Array.isArray(value) ? value : [];
-      // "At least one app" no longer holds when auto-include covers the profile: an empty
-      // apps list is fine precisely when autoIncludeNewApps is on (the daemon then targets
-      // every unclaimed user app, so there is nothing to hand-pick).
-      const autoIncludes = profile.autoIncludeNewApps === true;
-      if (f.required && apps.length < 1 && !autoIncludes) {
-        errors.push({ field: f.key, msg: "At least one app is required (or turn on Auto-include new apps)." });
+      if (f.required && apps.length < 1) {
+        errors.push({ field: f.key, msg: "At least one app is required." });
       }
       // Each entry is a package name OR a raw uid: token (APP_ENTRY_RE), not package-only.
       for (const entry of apps) {
@@ -111,20 +107,6 @@ export function validateConfig(config) {
           msg: `App entry ${pkg} is claimed by ${claimants.length} profiles; it must be unique.`,
         });
       }
-    }
-  }
-
-  // Auto-include is a whole-device catch-all ("every unclaimed user app"), so two profiles
-  // both asking for it would fight over the same apps — the daemon allows at most one. Flag
-  // every offender so the user sees exactly which profiles to reconcile.
-  const autoProfiles = Object.keys(profiles).filter(
-    (name) => profiles[name] && profiles[name].autoIncludeNewApps === true);
-  if (autoProfiles.length > 1) {
-    for (const name of autoProfiles) {
-      errors.push({
-        profile: name, field: "autoIncludeNewApps",
-        msg: `Only one profile may auto-include new apps; ${autoProfiles.length} do.`,
-      });
     }
   }
 

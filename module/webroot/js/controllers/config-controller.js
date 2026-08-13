@@ -140,22 +140,12 @@ export function create(mount) {
     renderProfileList(mount, { config, errors, dirty }, listActions);
   }
 
-  // Which OTHER profile (if any) already owns auto-include, relative to `name`. Only one profile
-  // may, so the editor greys this profile's toggle when another claims it.
-  function autoTakenBy(name) {
-    for (const other of Object.keys(config.profiles)) {
-      if (other === name) continue;
-      if (config.profiles[other] && config.profiles[other].autoIncludeNewApps === true) return other;
-    }
-    return null;
-  }
-
   function renderEditor() {
     if (!editing || !editorHost) return;
     renderProfileEditor(
       editorHost,
       { config, name: editing, errors, keyboxFiles, openGroups, resolved: resolvedLevels(),
-        scopeMeta: scopeMeta(), autoTakenBy: autoTakenBy(editing) },
+        scopeMeta: scopeMeta() },
       editorActions);
   }
 

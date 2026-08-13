@@ -468,17 +468,6 @@ html, body { overscroll-behavior-y: contain; }
 .editor-note { margin: 0; }
 .resolve-hint.missing { color: var(--warn); }
 
-/* --- toggle switch (schema 'toggle' widget + Scope auto-include) --------- */
-/* A checkbox styled as an iOS-style switch: the real <input> lies invisible over the
- * whole control so a tap anywhere flips it, and the track/thumb are driven off :checked. */
-.switch { position: relative; display: inline-flex; flex: none; width: 52px; height: 32px; align-self: flex-start; }
-.switch-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
-.switch-track { width: 100%; height: 100%; border-radius: 999px; background: var(--line); transition: background .15s; position: relative; }
-.switch-thumb { position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%; background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, .35); transition: transform .15s; }
-.switch-input:checked + .switch-track { background: var(--accent); }
-.switch-input:checked + .switch-track .switch-thumb { transform: translateX(20px); }
-.switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
-
 /* --- scope field face (compact, inside the profile editor) -------------- */
 .scope-field { display: flex; flex-direction: column; gap: 10px; }
 .scope-field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -494,15 +483,6 @@ html, body { overscroll-behavior-y: contain; }
 .scope-chip.advanced .scope-chip-dot { background: var(--accent); }
 .chip-sub { color: var(--muted); font-size: 11px; }
 .chip-avatar-uid { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent-weak); color: var(--accent); font-size: 11px; font-weight: 700; }
-/* The auto-include toggle when another profile owns it: the switch plus a short "used by" note. */
-.toggle-locked { display: inline-flex; align-items: center; gap: 10px; }
-.switch.disabled { opacity: .5; }
-
-/* Compact toggle field: one row — title + help stacked on the left, switch inline on the right. */
-.toggle-field { gap: 0; }
-.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 44px; }
-.toggle-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
-.toggle-main .field-help { margin: 0; }
 
 /* --- scope picker page (drill-in) --------------------------------------- */
 /* Search row: a rounded field with a leading search-icon button and a trailing sort-icon button,
