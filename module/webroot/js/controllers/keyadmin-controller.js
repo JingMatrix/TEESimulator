@@ -88,6 +88,19 @@ export function create(mount) {
         state.filter = arg;
         render();
         return;
+      case "toggleToken": {
+        // Tapping a badge toggles its well-defined token (class:/app:/purpose:) in the search box.
+        // Matched case-insensitively and de-duplicated by value, so tapping the same badge on another
+        // row removes the existing token rather than adding a duplicate.
+        const tokens = state.filter.trim().split(/\s+/).filter(Boolean);
+        const lc = String(arg).toLowerCase();
+        const i = tokens.findIndex((t) => t.toLowerCase() === lc);
+        if (i >= 0) tokens.splice(i, 1);
+        else tokens.push(arg);
+        state.filter = tokens.join(" ");
+        render();
+        return;
+      }
       case "toggle": {
         if (state.selected.has(arg)) state.selected.delete(arg);
         else state.selected.add(arg);

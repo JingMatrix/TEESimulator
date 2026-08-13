@@ -51,20 +51,13 @@ export function renderKeys(mount, state, handler) {
     spoofedOnly = true,
   } = state;
 
-  // Panel head: Delete-selected (only when something is checked; its label counts the selection).
-  // The scope control is appended below, once the counts it reports have been computed.
-  const actionBtns = [];
-  if (selected.size) {
-    actionBtns.push(el("button", {
-      class: "btn danger", disabled: deleting,
-      text: deleting ? t("key_deleting") : t("key_delete_selected") + " (" + selected.size + ")",
-      onclick: () => handler("deleteSelected"),
-    }));
-  }
-  const panelActions = el("div", { class: "panel-actions" }, actionBtns);
+  // Panel head: the title and, on the right, the scope control. The scope control is filled into this
+  // stable slot once the counts it reports are known (below). It lives here alone so it never moves —
+  // the Delete-selected action is a separate bar, so selecting keys can't shift the toggle.
+  const scopeSlot = el("div", { class: "panel-actions" });
   mount.appendChild(el("div", { class: "panel-head" }, [
     el("h1", { class: "panel-title", text: t("key_title") }),
-    panelActions,
+    scopeSlot,
   ]));
 
   if (loading) {
@@ -98,11 +91,36 @@ export function renderKeys(mount, state, handler) {
     return;
   }
 
-  // Matching is a case-insensitive substring over alias / app / keybox. Spoofed keys
-  // (generated / delegated / patched) sort ahead of untouched ones; the sort is stable,
-  // so within a class the daemon's namespace+alias order is preserved.
-  const q = filter.trim().toLowerCase();
-  const matchedAll = q ? keys.filter((k) => matchesFilter(k, q)) : keys;
+  // Delete-selected: a full-width button shown only when keys are checked. Kept out of the panel head
+  // (below the title, above the list) so its appearing and disappearing never moves the scope toggle.
+  // Its label counts the selection, which the controller keeps pruned to what's on screen.
+  if (selected.size) {
+    mount.appendChild(el("button", {
+      class: "btn danger block", disabled: deleting,
+      text: deleting ? t("key_deleting") : t("key_delete_selected") + " (" + selected.size + ")",
+      onclick: () => handler("deleteSelected"),
+    }));
+  }
+
+  // Play Integrity signs with the Play Store's dedicated key (com.android.vending,
+  // integrity.api.key.alias). While that key is untouched its attestation roots in the genuine TEE —
+  // outside anything this module rewrote — so the verdict is decided without the keybox. Warn over ALL
+  // keys (untouched ones are hidden by default), and point at the fix: delete it so the next
+  // attestation is forced through a key this module controls.
+  const vendingUntouched = keys.filter(isUntouchedVendingSignKey);
+  if (vendingUntouched.length) {
+    mount.appendChild(el("div", { class: "card" }, [el("div", { class: "banner warn" }, [
+      el("div", { text: t("key_vending_warning_title") }),
+      el("div", { class: "muted small", text: t("key_vending_warning_sub") }),
+    ])]));
+  }
+
+  // Matching is a structured query (free-text substring over alias/app/keybox, plus tappable
+  // class:/app:/purpose: badge tokens — see parseKeyFilter). Spoofed keys (generated / delegated /
+  // patched) sort ahead of untouched ones; the sort is stable, so within a class the daemon's
+  // namespace+alias order is preserved.
+  const query = parseKeyFilter(filter);
+  const matchedAll = query.empty ? keys : keys.filter((k) => matchesFilter(k, query));
   // The apps' own untouched (real hardware) keys are hidden by default so the list shows only what we
   // spoofed; the "All" segment reveals them for inspection or deletion. Both counts are taken over the
   // same filtered population, so the two segments describe it from opposite sides — "Spoofed" reports
@@ -112,10 +130,9 @@ export function renderKeys(mount, state, handler) {
   const matched = spoofedOnly ? matchedAll.filter(isSpoofed) : matchedAll;
   const shown = matched.slice().sort((a, b) => classRank(a) - classRank(b));
 
-  // The scope control takes the slot Refresh used to hold. Reloading is already a pull-to-refresh
-  // away (keyadmin-controller binds it to this mount), so the header is better spent on the one
-  // control that changes what the screen is showing.
-  panelActions.appendChild(scopeControl(spoofedOnly, spoofedCount, hiddenReal, handler));
+  // Fill the stable scope-control slot now the counts are known (see panel head above). Reloading is a
+  // pull-to-refresh away, so the header is spent on the one control that changes what the screen shows.
+  scopeSlot.appendChild(scopeControl(spoofedOnly, spoofedCount, hiddenReal, handler));
 
   // Search card: the filter box and the selection menu.
   mount.appendChild(searchCard(filter, shown, menuOpen, handler));
@@ -131,6 +148,11 @@ export function renderKeys(mount, state, handler) {
     restoreFocus();
     return;
   }
+  // Which filter tokens are currently active, so a tapped badge can show it is in effect. Every raw
+  // token, lowercased; the badges' tokens are lowercased too, so typed and tapped filters agree.
+  const activeTokens = new Set(filter.trim().toLowerCase().split(/\s+/).filter(Boolean));
+  const ctx = { handler, active: activeTokens };
+
   const list = el("ul", { class: "keylist" });
   for (const k of shown) {
     const checked = selected.has(k.id);
@@ -140,11 +162,11 @@ export function renderKeys(mount, state, handler) {
       el("div", { class: "keymeta" }, [
         el("div", { class: "keyalias" }, [
           el("span", { class: "mono", text: k.alias || t("key_no_alias") }),
-          classChip(k),
-          el("span", { class: "chip", text: appLabel(k) }),
+          classChip(k, ctx),
+          appChip(k, ctx),
           ...abnormalChips(k),
         ]),
-        ...purposeChips(k),
+        ...purposeChips(k, ctx),
         ...metaLines(k),
       ]),
     ]));
@@ -160,7 +182,7 @@ export function renderKeys(mount, state, handler) {
 function searchCard(filter, shown, menuOpen, handler) {
   const filterInput = el("input", {
     id: "keyfilter", class: "filter-input", type: "text", value: filter,
-    placeholder: t("key_filter_placeholder"),
+    placeholder: t("key_filter_placeholder_syntax"),
     autocapitalize: "off", autocorrect: "off", spellcheck: "false",
     oninput: (e) => handler("filter", e.target.value),
   });
@@ -217,15 +239,67 @@ function scopeControl(spoofedOnly, spoofedCount, hiddenReal, handler) {
   ]);
 }
 
+// Field aliases the filter syntax accepts, each mapped to its canonical field.
+const FILTER_FIELDS = { class: "class", status: "class", app: "app", pkg: "app", package: "app", purpose: "purpose" };
+
+// Parse the filter box into a structured query. Whitespace-separated tokens: a `field:value` token
+// (field ∈ class/status, app/pkg/package, purpose) is a typed term; anything else is free text. Typed
+// terms of the SAME field are OR'd, DIFFERENT fields are AND'd, and every free term must match — so two
+// app badges widen within apps while adding a purpose narrows across. Tapping a badge writes exactly
+// this syntax (see filterChip), which the user can equally type by hand.
+export function parseKeyFilter(text) {
+  const free = [];
+  const fields = { class: [], app: [], purpose: [] };
+  for (const tok of (text || "").trim().toLowerCase().split(/\s+/)) {
+    if (!tok) continue;
+    const i = tok.indexOf(":");
+    const field = i > 0 ? FILTER_FIELDS[tok.slice(0, i)] : null;
+    if (field) fields[field].push(tok.slice(i + 1));
+    else free.push(tok);
+  }
+  return { free, fields, empty: !free.length && !fields.class.length && !fields.app.length && !fields.purpose.length };
+}
+
+// True iff a key satisfies the parsed query (see parseKeyFilter for the AND/OR rules).
 function matchesFilter(k, q) {
-  return (k.alias || "").toLowerCase().includes(q)
-    || (k.package || "").toLowerCase().includes(q)
-    || (k.keybox || "").toLowerCase().includes(q);
+  const pkg = (k.package || "").toLowerCase();
+  const hay = (k.alias || "").toLowerCase() + "\n" + pkg + "\n" + (k.keybox || "").toLowerCase();
+  for (const t of q.free) if (!hay.includes(t)) return false;
+  if (q.fields.class.length && !q.fields.class.includes((k.class || "untouched").toLowerCase())) return false;
+  if (q.fields.app.length && !q.fields.app.some((v) => pkg.includes(v))) return false;
+  if (q.fields.purpose.length) {
+    const ps = (Array.isArray(k.purposes) ? k.purposes : []).map((p) => String(p).toLowerCase());
+    if (!q.fields.purpose.some((v) => ps.includes(v))) return false;
+  }
+  return true;
 }
 
 // The app that owns the key: its package when the daemon could resolve one, else the raw uid.
 function appLabel(k) {
   return k.package || ("uid " + (k.uid != null ? k.uid : "?"));
+}
+
+// A badge that doubles as a filter toggle. Tapping it toggles its token in the filter box — toggle by
+// VALUE, so tapping the same badge on another row never duplicates the token, it removes it. It shows
+// an active state while its token is in effect. A real <button> for keyboard/AT reach; the token is
+// canonical lowercase (the fields are closed sets / package names), so taps and typed syntax agree.
+function filterChip(token, extraCls, label, ctx) {
+  const on = ctx.active.has(token.toLowerCase());
+  return el("button", {
+    type: "button",
+    class: "chip chip-tap " + extraCls + (on ? " active" : ""),
+    "aria-pressed": on ? "true" : "false",
+    title: (on ? t("key_filter_chip_clear") : t("key_filter_chip_set")) + token,
+    text: label,
+    onclick: () => ctx.handler("toggleToken", token),
+  });
+}
+
+// The owning-app badge: a filter toggle on app:<package> when the package is known, else a plain,
+// unfilterable chip for a bare uid (nothing well-defined to group by).
+function appChip(k, ctx) {
+  if (!k.package) return el("span", { class: "chip", text: appLabel(k) });
+  return filterChip("app:" + k.package, "", appLabel(k), ctx);
 }
 
 // keystore2 KeyLifeCycle (1 Live) — the ordinary case is Live, so a chip is only shown to FLAG
@@ -257,10 +331,11 @@ function classRank(k) {
   return keyClass(k).rank;
 }
 
-// A colored badge naming how the key was spoofed (or that it is the app's own untouched key).
-function classChip(k) {
+// A colored badge naming how the key was spoofed (or that it is the app's own untouched key). Also a
+// filter toggle on class:<class>.
+function classChip(k, ctx) {
   const c = keyClass(k);
-  return el("span", { class: "chip kclass " + c.cls, text: c.label });
+  return filterChip("class:" + (k.class || "untouched"), "kclass " + c.cls, c.label, ctx);
 }
 
 // A key we spoofed (generated / delegated / patched), as opposed to the app's own untouched real key.
@@ -269,12 +344,24 @@ function isSpoofed(k) {
   return (k.class || "untouched") !== "untouched";
 }
 
+// The Play Integrity signing key we never touched: the one case that lets Play Integrity attest
+// through the real TEE. It is the Play Store's dedicated integrity key — alias integrity.api.key.alias
+// — left untouched (not spoofed). Other com.android.vending sign keys aren't the integrity signer, so
+// they don't get flagged.
+const INTEGRITY_KEY_ALIAS = "integrity.api.key.alias";
+function isUntouchedVendingSignKey(k) {
+  return !isSpoofed(k)
+    && k.package === "com.android.vending"
+    && k.alias === INTEGRITY_KEY_ALIAS;
+}
+
 // The key's KeyPurpose labels (from the daemon's Tag::PURPOSE read) as small chips, with ATTEST_KEY
-// accented since an attestation-capable app key is notable. No chips when the key reports no purposes.
-function purposeChips(k) {
+// accented since an attestation-capable app key is notable. Each is a filter toggle on purpose:<label>.
+// No chips when the key reports no purposes.
+function purposeChips(k, ctx) {
   if (!Array.isArray(k.purposes) || !k.purposes.length) return [];
   return [el("div", { class: "keypurposes" }, k.purposes.map((p) =>
-    el("span", { class: "chip small purpose" + (p === "AttestKey" ? " attest" : ""), text: p })))];
+    filterChip("purpose:" + String(p).toLowerCase(), "small purpose" + (p === "AttestKey" ? " attest" : ""), p, ctx)))];
 }
 
 function metaLines(k) {

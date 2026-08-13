@@ -301,6 +301,16 @@ export const dictionaries = {
     "key_real_keys_hidden": "real key(s) hidden",
     "key_no_real_keys_hidden": "No real keys to hide",
     "key_spoofed_count": "key(s) spoofed",
+    "key_filter_placeholder_syntax": "Filter — text, or tap a badge (class: app: purpose:)",
+    "key_vending_warning_title": "Play Integrity may be outside TEESimulator's control.",
+    "key_vending_warning_sub": "The Play Integrity key (com.android.vending, integrity.api.key.alias) is untouched, so it roots in the real TEE and Play Integrity can attest through it, bypassing the keybox. Switch to All and delete it to force attestation through a key this module controls.",
+    "key_filter_chip_clear": "Clear filter ",
+    "key_filter_chip_set": "Filter by ",
+
+    // --- RKP ---
+    "rkp_title": "Remote Key Provision",
+    "rkp_banner_title": "You usually don't need to change these.",
+    "rkp_banner_sub": "The module handles remote provisioning while these stay on. Only if a device explicitly fails keybox attestation — a rare case — should you toggle them all off to force keystore2 onto the keybox.",
 
     // --- Settings ---
     "settings_language": "Language",
@@ -608,6 +618,16 @@ export const dictionaries = {
     "key_real_keys_hidden": "個真實裝置金鑰已隱藏",
     "key_no_real_keys_hidden": "沒有可隱藏的真實裝置金鑰",
     "key_spoofed_count": "個偽裝金鑰",
+    "key_filter_placeholder_syntax": "篩選 — 輸入文字或點擊標籤 (class: app: purpose:)",
+    "key_vending_warning_title": "Play Integrity 可能不受 TEESimulator 控制。",
+    "key_vending_warning_sub": "Play Integrity 金鑰 (com.android.vending, integrity.api.key.alias) 尚未變更，因此仍根植於真實 TEE 且 Play Integrity 可以繞過 Keybox 通過其認證。請切換至「全部」並將其刪除，以強制透過本模組控制的金鑰進行認證。",
+    "key_filter_chip_clear": "清除篩選條件 ",
+    "key_filter_chip_set": "依此篩選 ",
+
+    // --- RKP ---
+    "rkp_title": "遠端金鑰佈署 (RKP)",
+    "rkp_banner_title": "通常不需要變更這些設定。",
+    "rkp_banner_sub": "在開啟狀態下，模組會自動處理遠端金鑰佈署。只有在少數極罕見情況下裝置的 Keybox 認證顯式失敗時，才需要全部關閉以強制 keystore2 使用 Keybox。",
 
     // --- Settings ---
     "settings_language": "語言",
@@ -915,6 +935,16 @@ export const dictionaries = {
     "key_real_keys_hidden": "个真实设备密钥已隐藏",
     "key_no_real_keys_hidden": "没有可隐藏的真实设备密钥",
     "key_spoofed_count": "个伪装密钥",
+    "key_filter_placeholder_syntax": "筛选 — 输入文本或点击标签 (class: app: purpose:)",
+    "key_vending_warning_title": "Play Integrity 可能不受 TEESimulator 控制。",
+    "key_vending_warning_sub": "Play Integrity 密钥 (com.android.vending, integrity.api.key.alias) 尚未修改，因此仍根植于真实 TEE 且 Play Integrity 可以绕过 Keybox 通过其认证。请切换至“全部”并将其删除，以强制通过本模块控制的密钥进行认证。",
+    "key_filter_chip_clear": "清除筛选条件 ",
+    "key_filter_chip_set": "按此筛选 ",
+
+    // --- RKP ---
+    "rkp_title": "远程密钥供应 (RKP)",
+    "rkp_banner_title": "通常不需要更改这些设置。",
+    "rkp_banner_sub": "在开启状态下，模块会自动处理远程密钥供应。只有在少数极罕见情况下设备的 Keybox 认证显式失败时，才需要全部关闭以强制 keystore2 使用 Keybox。",
 
     // --- Settings ---
     "settings_language": "语言",

@@ -24,9 +24,10 @@ import org.json.JSONObject
  * is ignored. (A key keystore2 super-encrypts before storing would hide the marker, but the attestation
  * keys these apps create are not auth-bound, so their blobs are stored as the TA returned them.)
  *
- * The keybox that signed a key is recovered from its stored certificate chain: the leaf attestation
- * cert is issued by the keybox's signing (batch) cert, so the leaf's issuer DN — and the batch/root
- * subjects in the chain — match an entry in [KeyboxInspector.signerIndex].
+ * The keybox that rooted a key is recovered from its stored certificate chain: a key is attributed to
+ * a keybox only when its chain embeds that keybox's WHOLE signing chain (root through batch), matched
+ * against [KeyboxInspector.signerChains]. Whether the leaf itself was batch-issued (the generated /
+ * patched distinction) is a separate check against [KeyboxInspector.signerIndex].
  *
  * Reads never touch the live file: keystore2 owns persistent.sqlite in WAL mode under a live lock, so we
  * snapshot it (+ its -wal / -shm siblings) into a private dir under [Const.DATA_DIR], open the COPY
@@ -168,7 +169,7 @@ object KeystoreDb {
                     }
                 }
             val cf = CertificateFactory.getInstance("X.509")
-            val signers = KeyboxInspector.signerIndex()
+            val signerChains = KeyboxInspector.signerChains()
             val out = ArrayList<AttestedKey>()
             var skippedNoAttestation = 0
             var skippedRooted = 0
@@ -184,10 +185,12 @@ object KeystoreDb {
                     continue
                 }
                 // Skip keys already rooted in a currently-configured keybox (ones we've patched, or a
-                // generation key's chain): re-signing them would be redundant. A key rooted in a keybox
-                // that is no longer configured (e.g. after a keybox swap) is NOT matched, so it is
+                // generation key's chain): re-signing them would be redundant. Matching requires the
+                // WHOLE keybox chain to be embedded, so a genuine device key that only shares Google's
+                // real root/intermediate is NOT matched and does get re-rooted. A key rooted in a keybox
+                // that is no longer configured (e.g. after a keybox swap) is likewise unmatched, so it is
                 // re-signed under the new keybox — the re-attest self-heals a rotation.
-                if (matchKeybox(certs, leaf, signers) != null) {
+                if (matchKeybox(certs, signerChains) != null) {
                     skippedRooted++
                     continue
                 }
@@ -524,8 +527,8 @@ object KeystoreDb {
 
     /**
      * Fill in each key's metadata that lives in its stored certificate chain: the signing algorithm of
-     * the generated key (the leaf certificate's public key) and the keybox that signed it (the leaf's
-     * issuer, or any chain subject, matched against [KeyboxInspector.signerIndex]). Fetches every blob of
+     * the generated key (the leaf certificate's public key) and the keybox that rooted it (the keybox
+     * whose whole chain is embedded, via [KeyboxInspector.signerChains]). Fetches every blob of
      * the listed keys in one pass; rows and [ids] are index-aligned. Best effort — a key whose certs
      * don't parse simply gets neither field. Also attaches a "class" naming how the chain is
      * keybox-rooted (generated / delegated / patched / untouched), always set for every row. Also
@@ -567,6 +570,7 @@ object KeystoreDb {
         }
 
         val signers = KeyboxInspector.signerIndex()
+        val signerChains = KeyboxInspector.signerChains()
         val cf = CertificateFactory.getInstance("X.509")
         for (i in rows.indices) {
             val blobs = blobsById[ids[i]]
@@ -574,8 +578,7 @@ object KeystoreDb {
             val certs = parseCerts(blobs, cf)
             val leaf = if (certs.isEmpty()) null else leafOf(certs)
             if (leaf != null) rows[i].put("keyAlgorithm", keyAlgorithm(leaf))
-            val keybox = matchKeybox(certs, leaf, signers)
-            keybox?.let { rows[i].put("keybox", it) }
+            val keybox = matchKeybox(certs, signerChains)
             // Classify the key by how (and whether) its chain is keybox-rooted. A generated key
             // carries our marker and its leaf is signed directly by a keybox batch; a delegated key
             // is marked but signed by our attestation key, keybox-rooted only through a deeper cert;
@@ -592,6 +595,12 @@ object KeystoreDb {
                     else -> "untouched"
                 }
             rows[i].put("class", cls)
+            // Only attribute a keybox to a key we actually rooted through it. matchKeybox() also fires
+            // on a genuine untouched key that shares Google's real root/intermediate with an imported
+            // Google keybox, which would show a Keybox line on an "Untouched" row — a contradiction. A
+            // patched key's keybox is its leaf issuer; a delegated key's is a deeper chain cert; an
+            // untouched key has none of ours, so drop the coincidental match.
+            if (cls != "untouched") keybox?.let { rows[i].put("keybox", it) }
             purposesById[ids[i]]?.let { vals ->
                 val labels = vals.toSortedSet().map { PURPOSE_LABELS[it] ?: it.toString() }
                 rows[i].put("purposes", JSONArray(labels))
@@ -622,17 +631,21 @@ object KeystoreDb {
             ?: certs.first()
     }
 
-    /** The keybox that signed this chain: the leaf's issuer, else any chain cert that is a keybox subject. */
+    /**
+     * The keybox that rooted this key's chain: the keybox whose ENTIRE signing chain — root, any
+     * intermediate, and the batch signer — is embedded in the key's certificates. Matching the whole
+     * chain (not just one cert) is what tells a key we re-rooted onto a keybox apart from a genuine
+     * device key that merely shares Google's real root/intermediate with an imported Google keybox.
+     * Returns the first keybox chain fully contained in [certs], or null.
+     */
     private fun matchKeybox(
         certs: List<X509Certificate>,
-        leaf: X509Certificate?,
-        signers: Map<String, String>,
+        signerChains: List<Pair<String, Set<String>>>,
     ): String? {
-        if (signers.isEmpty()) return null
-        if (leaf != null) signers[KeyboxInspector.canonicalDn(leaf.issuerX500Principal)]?.let { return it }
-        for (cert in certs) {
-            signers[KeyboxInspector.canonicalDn(cert.issuerX500Principal)]?.let { return it }
-            signers[KeyboxInspector.canonicalDn(cert.subjectX500Principal)]?.let { return it }
+        if (certs.isEmpty() || signerChains.isEmpty()) return null
+        val present = certs.mapTo(HashSet<String>()) { KeyboxInspector.canonicalDn(it.subjectX500Principal) }
+        for ((name, chain) in signerChains) {
+            if (present.containsAll(chain)) return name
         }
         return null
     }
