@@ -545,6 +545,11 @@ html, body { overscroll-behavior-y: contain; }
 .scope-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .scope-row.selected { border-color: var(--accent); background: var(--accent-weak); }
 .scope-row.claimed { opacity: .5; cursor: default; }
+/* Auto-included: in scope, but not by the user's hand. Dashed and hollow throughout, deliberately
+ * never the solid/ticked treatment a deliberate pick gets — that contrast IS the message. */
+.scope-row.auto { border-color: var(--accent); border-style: dashed; }
+.scope-auto { font-size: 10px; padding: 2px 8px; color: var(--accent); border: 1px dashed var(--accent); background: transparent; }
+.scope-auto-note { margin: 0; }
 .scope-row:disabled { cursor: default; }
 
 /* Row icon: the lazy <img> and its letter-avatar fallback share one 40x40 rounded box. The
@@ -571,6 +576,10 @@ html, body { overscroll-behavior-y: contain; }
 .scope-check { flex: none; width: 24px; height: 24px; border-radius: 6px; border: 2px solid var(--line); position: relative; }
 .scope-row.selected .scope-check, .scope-check.on { border-color: var(--accent); background: var(--accent); }
 .scope-row.selected .scope-check::after, .scope-check.on::after { content: ""; position: absolute; left: 7px; top: 3px; width: 6px; height: 11px; border: solid var(--accent-fg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+/* A dashed ring with a centred dot: reads as "on" without borrowing the tick that means "you chose
+ * this". The row is still tappable — tapping pins it and it becomes a real tick. */
+.scope-check.auto { border-color: var(--accent); border-style: dashed; background: transparent; }
+.scope-check.auto::after { content: ""; position: absolute; left: 5px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
 
 /* --- sort bottom-sheet (scope picker) ----------------------------------- */
 .sort-sheet { display: flex; flex-direction: column; gap: 12px; }

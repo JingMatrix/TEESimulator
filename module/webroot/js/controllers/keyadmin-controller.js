@@ -32,11 +32,14 @@ export function create(mount) {
     renderKeys(mount, state, handler);
   }
 
-  async function refresh() {
+  // `force` re-resolves the daemon's uid -> app mapping instead of reading its snapshot. Only the
+  // pull-to-refresh passes it: a load or a post-delete reload wants the cheap answer, since deleting
+  // a key changes the key list but never which apps are in scope.
+  async function refresh(force = false) {
     state.loading = true;
     render();
     try {
-      const res = await keyAdmin("keysDb");
+      const res = await keyAdmin("keysDb", { refresh: force });
       state.keys = res && Array.isArray(res.keys) ? res.keys : [];
       state.available = !!(res && res.available);
       state.apiLevel = (res && Number(res.apiLevel)) || 0;
@@ -136,7 +139,7 @@ export function create(mount) {
     }
   }
 
-  attachPullToRefresh(mount, refresh);
+  attachPullToRefresh(mount, () => refresh(true));
 
   return {
     load() {

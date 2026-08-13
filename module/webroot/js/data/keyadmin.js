@@ -178,7 +178,20 @@ export async function keyAdmin(action, args = {}) {
     case "list":
       return request("GET", "/keys");
     case "keysDb":
-      return request("GET", "/keys/db");
+      // Economical by default: the daemon maps uid -> app from the scope snapshot it published on the
+      // last push, which costs nothing. refresh:true forces a live re-resolve (a full installed-app
+      // enumeration) and belongs only on a user-driven refresh, never on a load or a poll.
+      return request("GET", "/keys/db" + (args && args.refresh ? "?refresh=1" : ""));
+    case "scope":
+      // The daemon's RESOLVED per-profile truth from the last push:
+      //   { ok, epoch, resolvedAtMs, baselineReady,
+      //     profiles:[ { id, autoInclude, packages:[…], explicitUids:[…], autoUids:[…] } ] }
+      // The only place auto-included uids are visible — the rule needs known_packages.json, which is
+      // root-only and unreadable from here, so this cannot be recomputed client-side. It changes only
+      // when the daemon re-resolves (start, config.json change, POST /rescan), so it is deliberately
+      // NOT part of the Scope page's 9s /packages poll. An older daemon 404s this; treat that as
+      // "no auto data" rather than an error.
+      return request("GET", "/scope");
     case "packages":
       return request("GET", "/packages");
     case "usageClear":

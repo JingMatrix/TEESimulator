@@ -37,9 +37,16 @@ import org.json.JSONObject
  *
  * Contract (all responses application/json; send header `X-Teesim-Token: <token>`): GET /status ->
  * { ok, version, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
- * cert{...}} ] } GET /keys/db -> { ok, available, apiLevel, keys:[ {id, alias, uid, package, state, class,
- * created?, keybox?, keyAlgorithm?, purposes?} ] } (target-app keys with a stored attestation cert, from
- * keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no such database) GET
+ * cert{...}} ] } GET /keys/db[?refresh=1] -> { ok, available, apiLevel, keys:[ {id, alias, uid, package,
+ * state, class, created?, keybox?, keyAlgorithm?, purposes?} ] } (target-app keys with a stored
+ * attestation cert, from keystore2's DB on API >= 31; empty + available=false on 10/11 where there is no
+ * such database. The uid->app mapping comes from the resolved snapshot; refresh=1 — the WebUI's
+ * pull-to-refresh only — forces a live re-resolve instead) GET /scope -> { ok, epoch, resolvedAtMs,
+ * baselineReady, profiles:[ {id, autoInclude, packages:[..], explicitUids:[..], autoUids:[..]} ] } (what
+ * the last push actually targets, per profile; the only place auto-included uids are visible, since the
+ * rule needs the root-only known_packages.json baseline. Empty profiles[] with epoch 0 before the first
+ * push) POST /rescan -> { ok, uids } (re-resolve against the live device and re-push; how a newly
+ * installed app is discovered, there being no package watcher) GET
  * /packages -> { ok, firstAppUid, apps:[ {uid, packages:[..], label, system, launchable, enabled,
  * installTime, freq, lastUsed, recent} ] } (every installed app, one entry per uid, for the Scope
  * picker: installTime = epoch ms of first install; freq = persistent key-request count; lastUsed =
@@ -242,7 +249,8 @@ object KeyAdmin {
                     when {
                         method == "GET" && path == "/status" -> status()
                         method == "GET" && path == "/keys" -> listKeys()
-                        method == "GET" && path == "/keys/db" -> keysDb()
+                        method == "GET" && path == "/keys/db" -> keysDb(query)
+                        method == "GET" && path == "/scope" -> scope()
                         method == "GET" && path == "/packages" -> packages()
                         method == "POST" && path == "/rescan" -> rescan()
                         method == "POST" && path == "/usage/clear" -> usageClear()
@@ -327,8 +335,8 @@ object KeyAdmin {
      * Android 10/11 there is no keystore2 database, so `available` is false and `keys` is empty —
      * the WebUI turns that into its "hidden" hint.
      */
-    private fun keysDb(): JSONObject {
-        val targets = targetUidToPackage()
+    private fun keysDb(query: Map<String, String>): JSONObject {
+        val targets = targetUidToPackage(query["refresh"] == "1")
         val keys = JSONArray()
         KeystoreDb.listKeys(targets).forEach { keys.put(it) }
         return JSONObject()
@@ -357,14 +365,65 @@ object KeyAdmin {
      * [Scope.uidToPackage] (which folds in raw uid:N tokens and auto-included apps, mapping the
      * package-less ones to their uid:token). Keeps the try/catch + empty-map fallback so a broken
      * config just yields an empty stored-keys view rather than a 500.
+     *
+     * Economical by default: it answers from the resolved snapshot the last push published, which
+     * costs nothing. [force] — set only by the WebUI's pull-to-refresh — pays for a live re-resolve
+     * instead, which re-enumerates every installed app. That is the deal everywhere in this daemon:
+     * automatic reads take the snapshot, a user asking for fresh data gets a fresh answer.
+     *
+     * The snapshot describes the last SUCCESSFULLY PUSHED config, so if config.json was edited and the
+     * push then failed, this reflects last-good rather than the file on disk. That divergence is
+     * transient — the ConfigStore watcher re-pushes — and it is arguably the more honest answer, since
+     * the stored-keys view is about which apps are actually being attested for.
      */
-    private fun targetUidToPackage(): Map<Int, String> =
+    private fun targetUidToPackage(force: Boolean = false): Map<Int, String> =
         try {
-            Scope.uidToPackage(ConfigStore.load())
+            Scope.uidToPackage(ConfigStore.load(), force)
         } catch (e: Exception) {
             SystemLogger.warning("KeyAdmin: config load failed for /keys/db", e)
             emptyMap()
         }
+
+    /**
+     * The daemon's RESOLVED scope — per profile, what the last push actually targets. Read straight off
+     * the snapshot [Scope.lastResolved] published by the push path: it never calls Scope.resolve (which
+     * enumerates every installed app when a profile auto-includes) and takes no lock, so it is cheap
+     * and safe on a KeyAdmin connection thread.
+     *
+     * This is the ONLY channel by which the WebUI can learn which apps are auto-included. The rule
+     * needs known_packages.json, a root-only file the WebUI cannot read, so the answer has to come from
+     * here rather than be recomputed client-side — which is also what keeps the rule from being
+     * implemented twice and drifting.
+     *
+     * Before the first push there is no snapshot; that answers ok with an empty profiles[] and epoch 0
+     * rather than an error, so a WebUI that loads first simply shows no auto data yet.
+     */
+    private fun scope(): JSONObject {
+        val snap = Scope.lastResolved()
+        val profiles = JSONArray()
+        if (snap != null)
+            for (s in snap.scopes) {
+                val autos = s.autoUids.sorted()
+                profiles.put(
+                    JSONObject()
+                        .put("id", s.profileId)
+                        .put("autoInclude", s.autoInclude)
+                        .put("packages", JSONArray(s.packageNames))
+                        .put("explicitUids", JSONArray((s.uids - s.autoUids).sorted()))
+                        .put("autoUids", JSONArray(autos))
+                )
+            }
+        SystemLogger.info(
+            "KeyAdmin: /scope epoch=${snap?.epoch ?: 0} profiles=${profiles.length()} " +
+                "auto=${snap?.scopes?.sumOf { it.autoUids.size } ?: 0} baselineReady=${snap?.baselineReady == true}"
+        )
+        return JSONObject()
+            .put("ok", true)
+            .put("epoch", snap?.epoch ?: 0L)
+            .put("resolvedAtMs", snap?.atMs ?: 0L)
+            .put("baselineReady", snap?.baselineReady == true)
+            .put("profiles", profiles)
+    }
 
     /**
      * Every installed app, one entry per uid, for the WebUI's Scope picker. The daemon runs
