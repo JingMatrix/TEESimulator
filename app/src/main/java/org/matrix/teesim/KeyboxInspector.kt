@@ -87,6 +87,41 @@ object KeyboxInspector {
         return out
     }
 
+    /**
+     * Every keybox's signing chain as a set of its certificates' canonical subject DNs — one entry per
+     * `<Key>` block (a keybox usually holds an ecdsa and an rsa chain), paired with the keybox filename.
+     * Used to attribute a stored attestation key to a keybox only when the key's own chain embeds that
+     * keybox's WHOLE chain, from the root certificate down through the intermediate to the batch signer.
+     * A single shared root/intermediate — as a genuine device key shares with a Google keybox — is not
+     * enough, so a coincidental match no longer names a keybox. Best effort: an unparseable keybox or
+     * chain simply contributes nothing.
+     */
+    fun signerChains(): List<Pair<String, Set<String>>> {
+        val out = ArrayList<Pair<String, Set<String>>>()
+        val files = File(Const.DATA_DIR).listFiles { f -> f.isFile && NAME_RE.matches(f.name) } ?: return out
+        for (file in files) {
+            try {
+                val root = newSafeBuilder().parse(file).documentElement
+                val scope = firstChild(root, "Keybox") ?: root
+                val keyNodes = scope.getElementsByTagName("Key")
+                for (i in 0 until keyNodes.length) {
+                    val ke = keyNodes.item(i) as? Element ?: continue
+                    val certParent = firstChild(ke, "CertificateChain") ?: ke
+                    val certNodes = certParent.getElementsByTagName("Certificate")
+                    val dns = HashSet<String>()
+                    for (j in 0 until certNodes.length) {
+                        val cert = parsePem(certNodes.item(j).textContent) ?: continue
+                        dns.add(canonicalDn(cert.subjectX500Principal))
+                    }
+                    if (dns.isNotEmpty()) out.add(file.name to dns)
+                }
+            } catch (e: Exception) {
+                SystemLogger.warning("KeyboxInspector.signerChains: skipping ${file.name}", e)
+            }
+        }
+        return out
+    }
+
     /** RFC 2253 canonical form of a DN, so subject/issuer strings compare regardless of encoding quirks. */
     fun canonicalDn(p: javax.security.auth.x500.X500Principal): String =
         p.getName(javax.security.auth.x500.X500Principal.CANONICAL)
