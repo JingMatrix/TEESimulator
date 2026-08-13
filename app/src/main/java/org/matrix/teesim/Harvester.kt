@@ -121,6 +121,16 @@ object Harvester {
         "verifiedBootHash" to "ro.boot.vbmeta.digest",
     )
 
+    /** The ro.boot.vbmeta.* values to reflect for [h]: the PRESENTED boot key and hash — the override
+     *  when one is active, else the real captured bytes. Unlike a plain read of the override map, this
+     *  includes a genuinely captured value, so ro.boot.vbmeta.digest tracks the attested verifiedBootHash
+     *  even on a device whose bootloader never populated the property (#228). A field whose presented
+     *  value is not a real 32-byte value is skipped — we never write an all-zero prop. */
+    fun bootPropValues(h: Record): Map<String, String> = buildMap {
+        h.effectiveBootKey().takeIf { isUsableBootValue(it) }?.let { put(BOOT_PROP.getValue("verifiedBootKey"), it.toHex()) }
+        h.effectiveBootHash().takeIf { isUsableBootValue(it) }?.let { put(BOOT_PROP.getValue("verifiedBootHash"), it.toHex()) }
+    }
+
     private fun sourceFor(field: String): OverrideSource =
         when {
             field in SUPPLEMENT_IDS -> OverrideSource.SUPPLEMENT
@@ -128,18 +138,20 @@ object Harvester {
             else -> OverrideSource.REQUIRED
         }
 
-    /** Whether a field's override may be edited in the WebUI. Boot key/hash are editable only when the
-     *  device reported an all-zero (unlocked) value; everything required-but-not-boot stays locked. */
-    private fun editableFor(field: String, bootKeyRaw: ByteArray, bootHashRaw: ByteArray): Boolean =
+    /** The editability we STAMP on a freshly built override. Synthesized level/version fields are always
+     *  editable; the boot key/hash carry their own flag (set when built — true only for a fallback value),
+     *  so they are not decided here; everything else (SUPPLEMENT ids, required captures) stays locked. */
+    private fun editableFor(field: String): Boolean = field in SYNTHESIZED_FIELDS
+
+    /** Whether the user's overrides.json may change [field] on [base]: synthesized level/version fields
+     *  always; the boot key/hash only when their current override is a fallback (its editable flag is set)
+     *  — a real captured, device-property or computed value is locked; everything else is ignored. */
+    private fun userEditable(field: String, base: Record): Boolean =
         when (field) {
             in SYNTHESIZED_FIELDS -> true
-            "verifiedBootKey" -> !isReal(bootKeyRaw)
-            "verifiedBootHash" -> !isReal(bootHashRaw)
-            else -> false // SUPPLEMENT ids are shown only; per-profile config spoofs them
+            "verifiedBootKey", "verifiedBootHash" -> base.overrides[field]?.editable == true
+            else -> false
         }
-
-    private fun editableFor(field: String, captured: Record): Boolean =
-        editableFor(field, captured.verifiedBootKey, captured.verifiedBootHash)
 
     /** One harvested (or fallback) device-identity record. */
     data class Record(
@@ -259,36 +271,54 @@ object Harvester {
             else -> attestationVersion
         }
 
-    /** Build the typed default overrides from a raw field->value map, deciding editability against the
-     *  raw captured boot key/hash. `userEdited` is false: these are the daemon's computed defaults. Values
-     *  are the machine form (the level integer, "true", hex) — the WebUI formats them for display. */
-    private fun typedOverrides(
-        values: Map<String, String>,
-        bootKeyRaw: ByteArray,
-        bootHashRaw: ByteArray,
-    ): Map<String, Override> =
+    /** Build the typed default overrides from a field->value map (non-boot fields; the boot key/hash are
+     *  added by [buildOverrides] with their own editability). `userEdited` is false: these are the daemon's
+     *  computed defaults. Values are the machine form (the level integer, "true", hex) — the WebUI formats
+     *  them for display. */
+    private fun typedOverrides(values: Map<String, String>): Map<String, Override> =
         values.mapValues { (field, value) ->
-            Override(value, sourceFor(field), editableFor(field, bootKeyRaw, bootHashRaw), userEdited = false)
+            Override(value, sourceFor(field), editableFor(field), userEdited = false)
         }
+
+    /** A synthesized boot value plus whether it is user-editable — true only for a last-resort fallback,
+     *  false for a real value (a captured device property, or the digest we computed ourselves). */
+    private data class BootOverride(val value: String, val editable: Boolean)
+
+    private fun bootOverride(field: String, bo: BootOverride): Override =
+        Override(bo.value, sourceFor(field), bo.editable, userEdited = false)
+
+    /** The full override map: the non-boot synthesized/required defaults, plus the boot key/hash overrides
+     *  (each present only when the raw capture is unusable), each carrying its own editability. */
+    private fun buildOverrides(
+        fab: Map<String, String>,
+        rawKey: ByteArray,
+        rawHash: ByteArray,
+    ): Map<String, Override> {
+        val m = typedOverrides(fab).toMutableMap()
+        bootKeyOverride(rawKey)?.let { m["verifiedBootKey"] = bootOverride("verifiedBootKey", it) }
+        bootHashOverride(rawHash)?.let { m["verifiedBootHash"] = bootOverride("verifiedBootHash", it) }
+        return m
+    }
 
     /** Add or replace one computed-default override, keeping the raw captured fields untouched. */
     private fun Record.withOverride(field: String, value: String): Record =
         copy(
             overrides =
-                overrides + (field to Override(value, sourceFor(field), editableFor(field, this))),
+                overrides + (field to Override(value, sourceFor(field), editableFor(field))),
         )
 
     /**
      * Layer the user's overrides.json (field -> value) over the daemon's computed defaults, honoring only
-     * editable fields (synthesized levels/versions, and an all-zero boot key/hash) — a hand-edited id or
-     * required field is ignored, since ids are a per-profile concern. A blank value resets a field to its
-     * computed default; an out-of-range value is dropped with a warning. This is what the daemon pushes.
+     * editable fields (see [userEditable]): the synthesized levels/versions, and the boot key/hash only
+     * when their value is a fallback — a hand-edited id, a required capture, or a real/computed boot value
+     * is ignored. A blank value resets a field to its computed default; an out-of-range value is dropped
+     * with a warning. This is what the daemon pushes.
      */
     fun applyUserOverrides(base: Record, user: Map<String, String>): Record {
         if (user.isEmpty()) return base
         val merged = base.overrides.toMutableMap()
         for ((field, raw) in user) {
-            if (!editableFor(field, base)) {
+            if (!userEditable(field, base)) {
                 SystemLogger.info("override: ignoring non-editable field '$field'")
                 continue
             }
@@ -343,17 +373,17 @@ object Harvester {
                         // in which case adopt the fresh (guaranteed non-zero) one.
                         fresh.copy(
                             verifiedBootKey =
-                                if (isReal(existing.verifiedBootKey)) existing.verifiedBootKey
+                                if (isUsableBootValue(existing.verifiedBootKey)) existing.verifiedBootKey
                                 else fresh.verifiedBootKey,
                             verifiedBootHash =
-                                if (isReal(existing.verifiedBootHash)) existing.verifiedBootHash
+                                if (isUsableBootValue(existing.verifiedBootHash)) existing.verifiedBootHash
                                 else fresh.verifiedBootHash,
                             // When we keep existing's real captured boot value, drop fresh's synthesized
                             // override for it — the captured value is now honest and needs no override.
                             overrides =
                                 fresh.overrides.filterKeys { k ->
-                                    !(k == "verifiedBootKey" && isReal(existing.verifiedBootKey)) &&
-                                        !(k == "verifiedBootHash" && isReal(existing.verifiedBootHash))
+                                    !(k == "verifiedBootKey" && isUsableBootValue(existing.verifiedBootKey)) &&
+                                        !(k == "verifiedBootHash" && isUsableBootValue(existing.verifiedBootHash))
                                 },
                         )
                     } else {
@@ -366,17 +396,58 @@ object Harvester {
                 else -> existing?.takeIf { !it.harvestFailed } ?: fallback()
             }
 
-        val enriched = markFabricatedAttestation(supplementDeviceIds(effective))
+        val stable = freezeSynthBoot(effective, existing)
+        val enriched = markFabricatedAttestation(supplementDeviceIds(stable))
         persist(enriched)
         SystemLogger.info(
             "Harvest complete: failed=${enriched.harvestFailed} " +
-                "bootKey=${effective.verifiedBootKey.toHex()} " +
+                "bootKey=${stable.effectiveBootKey().toHex()} bootHash=${stable.effectiveBootHash().toHex()} " +
                 "locked=${effective.deviceLocked} vbState=${effective.verifiedBootState} " +
                 "attestSecLevel=${effective.attestationSecurityLevel} " +
                 "os=${effective.osVersion} osPatch=${effective.osPatchLevel} " +
                 "vendorPatch=${enriched.vendorPatchLevel} bootPatch=${enriched.bootPatchLevel}"
         )
         return enriched
+    }
+
+    /**
+     * Keep the synthesized boot key/hash coherent across reboots, honoring their different needs. The KEY
+     * feeds the KEK, so whenever the raw capture is unusable it is pinned to the first persisted value and
+     * never allowed to drift — a change would orphan every previously wrapped keystore blob. The HASH is
+     * attestation-only, so a real value (the digest we compute from the partitions) is used live and tracks
+     * the device across updates; only the last-resort RANDOM fallback is pinned, so ro.boot.vbmeta.digest
+     * does not flap each boot, and a persisted value is preferred over a fresh random when this harvest
+     * could not compute one. [prior] is the last persisted record, or null on the very first harvest.
+     */
+    private fun freezeSynthBoot(effective: Record, prior: Record?): Record {
+        if (prior == null) return effective
+        var overrides = effective.overrides
+
+        if (!isUsableBootValue(effective.verifiedBootKey)) {
+            prior.overrides["verifiedBootKey"]?.let { pinned ->
+                if (overrides["verifiedBootKey"] != pinned) {
+                    overrides = overrides + ("verifiedBootKey" to pinned)
+                    SystemLogger.info("Harvest: pinned verifiedBootKey to the persisted value (KEK stability)")
+                }
+            }
+        }
+
+        if (!isUsableBootValue(effective.verifiedBootHash)) {
+            val fresh = overrides["verifiedBootHash"]
+            // fresh.editable is true only for the random fallback; a computed digest (editable=false) is
+            // left live so it follows an OTA that changes the real vbmeta.
+            if (fresh != null && fresh.editable) {
+                prior.overrides["verifiedBootHash"]?.let { persisted ->
+                    if (fresh != persisted) {
+                        overrides = overrides + ("verifiedBootHash" to persisted)
+                        SystemLogger.info(
+                            "Harvest: reused the persisted verifiedBootHash (this harvest fell back to a random value)"
+                        )
+                    }
+                }
+            }
+        }
+        return if (overrides === effective.overrides) effective else effective.copy(overrides = overrides)
     }
 
     // A system package name to present as the caller for IPhoneSubInfo. The legacy getDeviceId* path
@@ -663,15 +734,10 @@ object Harvester {
         if (verifiedBootState != 0) fab["verifiedBootState"] = "0"
 
         // The RAW captured boot key/hash, exactly as the leaf reported them (all-zero on an unlocked
-        // device, or absent). We keep the raw bytes in the record and, when they are not usable, add an
-        // editable override carrying the value we actually present (from ro.boot.vbmeta.* or a stable
-        // fallback). The override is editable precisely because the capture was all-zero — see editableFor.
+        // device, or absent). We keep the raw bytes in the record; when they are not usable, buildOverrides
+        // adds the value we actually present — see bootKeyOverride / bootHashOverride for the precedence.
         val rawBootKey = verifiedBootKey ?: ByteArray(32)
         val rawBootHash = verifiedBootHash ?: ByteArray(32)
-        defaultBootOverride("ro.boot.vbmeta.public_key_digest", ::fallbackBootKey, rawBootKey)
-            ?.let { fab["verifiedBootKey"] = it }
-        defaultBootOverride("ro.boot.vbmeta.digest", ::fallbackBootHash, rawBootHash)
-            ?.let { fab["verifiedBootHash"] = it }
 
         // When the leaf omits MODULE_HASH (older HAL versions do), deduce it from /apex exactly the way
         // Android's attestation and keystore2 build it, so a key attested with it still verifies. The RAW
@@ -722,7 +788,7 @@ object Harvester {
             imei = imei,
             meid = meid,
             imei2 = imei2,
-            overrides = typedOverrides(fab, rawBootKey, rawBootHash),
+            overrides = buildOverrides(fab, rawBootKey, rawBootHash),
             harvestedAt = System.currentTimeMillis(),
         )
     }
@@ -919,23 +985,42 @@ object Harvester {
         DeviceProps.prop(prop, "").ifBlank { fallback ?: "" }
 
     /**
-     * Resolve a verified-boot value: prefer a real, non-zero 32-byte value from the
-     * attested leaf; else the device's vbmeta digest property; else a deterministic
-     * stable fallback. Never all-zeros — that is what an unlocked device reports and
-     * it fails attestation.
+     * The verified-boot HASH override to present when the TEE reported no usable value, and whether it is
+     * user-editable — editable ONLY for the last-resort random. We do NOT read `ro.boot.vbmeta.digest`: it
+     * is a system property any module can set and it is exactly the value that is missing/unreliable on the
+     * affected devices (#228). Instead we compute the AVB vbmeta digest ourselves from the partitions, and
+     * only fall back to a per-install random when that computation fails (logged as a warning). Null when
+     * the raw capture is already a usable hash — the honest captured value stands.
      */
-    /** The value to present for a boot key/hash when the RAW capture is unusable (all-zero on an unlocked
-     *  device, or absent): the ro.boot.vbmeta.* property if it holds a real 32-byte value, else a stable
-     *  synthesized fallback — returned as hex. Null when the capture is already real, so no override is
-     *  recorded and the honest captured value stands. */
-    private fun defaultBootOverride(prop: String, fallback: () -> ByteArray, raw: ByteArray): String? {
-        if (isReal(raw)) return null
-        hexBytes(DeviceProps.prop(prop, ""))?.let { return it.toHex() }
-        return fallback().toHex()
+    private fun bootHashOverride(raw: ByteArray): BootOverride? {
+        if (isUsableBootValue(raw)) return null
+        VbMeta.computeDigest()?.let {
+            SystemLogger.info("boot hash: TEE reported none; using the vbmeta digest computed from partitions")
+            return BootOverride(it.toHex(), editable = false)
+        }
+        SystemLogger.warning(
+            "boot hash: TEE reported none and the vbmeta digest could not be computed; using a random per-install fallback"
+        )
+        return BootOverride(fallbackBootHash().toHex(), editable = true)
+    }
+
+    /**
+     * The verified-boot KEY override to present when the TEE reported no usable value, and whether it is
+     * user-editable — editable only for the synthesized constant. We have no self-computation for the key,
+     * so we take the device's own `ro.boot.vbmeta.public_key_digest` when it holds a real value, else a
+     * deterministic constant. Either way it must stay stable — it feeds the KEK — so it is never randomized
+     * and, once persisted, is pinned by [freezeSynthBoot]. Null when the raw capture is already usable.
+     */
+    private fun bootKeyOverride(raw: ByteArray): BootOverride? {
+        if (isUsableBootValue(raw)) return null
+        hexBytes(DeviceProps.prop("ro.boot.vbmeta.public_key_digest", ""))?.let {
+            return BootOverride(it.toHex(), editable = false)
+        }
+        return BootOverride(fallbackBootKey().toHex(), editable = true)
     }
 
     /** A usable boot value: exactly 32 bytes and not all zero. */
-    private fun isReal(v: ByteArray?): Boolean = v != null && v.size == 32 && v.any { it.toInt() != 0 }
+    private fun isUsableBootValue(v: ByteArray?): Boolean = v != null && v.size == 32 && v.any { it.toInt() != 0 }
 
     /** Parse 64 hex chars into 32 non-zero bytes, or null. */
     private fun hexBytes(s: String): ByteArray? {
@@ -949,7 +1034,7 @@ object Harvester {
     // --- fallback (no working TEE) ---------------------------------------------
 
     private fun fallback(): Record {
-        SystemLogger.warning("Harvest failed; using fixed non-zero boot key + Build.VERSION props")
+        SystemLogger.warning("Harvest failed; synthesizing boot values + Build.VERSION props")
         val osVersion = DeviceProps.deviceOsVersion()
         val osPatchLevel = DeviceProps.toYyyymm(DeviceProps.systemSecurityPatch())
         val vendorPatchLevel = DeviceProps.toYyyymmdd(DeviceProps.vendorSecurityPatch())
@@ -984,14 +1069,14 @@ object Harvester {
             imei = "",
             meid = "",
             imei2 = "",
-            // No working TEE: every attestation-critical value is synthesized (machine form values).
+            // No working TEE: every attestation-critical value is synthesized. The boot key/hash go through
+            // buildOverrides, so the hash is still the digest we compute from the vbmeta partitions when we
+            // can read them (random only as a last resort), exactly as on the success path.
             overrides =
-                typedOverrides(
+                buildOverrides(
                     mapOf(
                         "deviceLocked" to "true",
                         "verifiedBootState" to "0",
-                        "verifiedBootKey" to fallbackBootKey().toHex(),
-                        "verifiedBootHash" to fallbackBootHash().toHex(),
                         "osVersion" to osVersion.toString(),
                         "osPatchLevel" to osPatchLevel.toString(),
                         "vendorPatchLevel" to vendorPatchLevel.toString(),
@@ -1005,10 +1090,19 @@ object Harvester {
         )
     }
 
-    // Deterministic, non-zero, stable across runs so the fallback KEK is also stable.
+    // The verified-boot KEY must be deterministic and stable across runs: it feeds the reference TA's
+    // key-encryption-key (rot_data → tag::hidden), so a value that changed between reboots would make
+    // every previously-wrapped keystore blob undecryptable. A fixed non-zero constant keeps the KEK
+    // stable. NEVER randomize this.
     private fun fallbackBootKey(): ByteArray = sha256("TEESimulator/verified_boot_key")
 
-    private fun fallbackBootHash(): ByteArray = sha256("TEESimulator/verified_boot_hash")
+    // The verified-boot HASH is attestation-only — it is NOT part of the KEK (the TA's rot_data carries
+    // key + locked + state, never the hash), so it can be anything non-zero without touching stored-key
+    // decryptability. Generate a per-install random value instead of a shared constant, so every device
+    // does not present the same fingerprintable digest. It is regenerated on each harvest but FROZEN into
+    // the persisted record by run()/freezeSynthBoot, so the value stays put across reboots — a
+    // ro.boot.vbmeta.digest that flapped each boot would itself be a signal.
+    private fun fallbackBootHash(): ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
     private fun sha256(s: String): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
@@ -1118,14 +1212,14 @@ object Harvester {
             imei = o.optString("imei", ""),
             meid = o.optString("meid", ""),
             imei2 = o.optString("imei2", ""),
-            overrides = readOverrides(o, bootKey, bootHash),
+            overrides = readOverrides(o),
             harvestedAt = o.optLong("harvestedAt", System.currentTimeMillis()),
         )
     }
 
-    /** Rebuild the typed override map from persisted JSON: the v2 `overrides` object, or a legacy v1
-     *  `fabricated` value-map (migrated by re-deriving source/editability). Absent → empty. */
-    private fun readOverrides(o: JSONObject, bootKeyRaw: ByteArray, bootHashRaw: ByteArray): Map<String, Override> {
+    /** Rebuild the typed override map from persisted JSON: the v2 `overrides` object (each entry carries
+     *  its own editable flag), or a legacy v1 `fabricated` value-map. Absent → empty. */
+    private fun readOverrides(o: JSONObject): Map<String, Override> {
         o.optJSONObject("overrides")?.let { obj ->
             val m = LinkedHashMap<String, Override>()
             for (field in obj.keys()) {
@@ -1138,7 +1232,7 @@ object Harvester {
                         Override(
                             e.optString("value", ""),
                             src,
-                            e.optBoolean("editable", editableFor(field, bootKeyRaw, bootHashRaw)),
+                            e.optBoolean("editable", editableFor(field)),
                             e.optBoolean("userEdited", false),
                         )
                 }
@@ -1146,11 +1240,7 @@ object Harvester {
             return m
         }
         o.optJSONObject("fabricated")?.let { obj ->
-            return typedOverrides(
-                obj.keys().asSequence().associateWith { obj.getString(it) },
-                bootKeyRaw,
-                bootHashRaw,
-            )
+            return typedOverrides(obj.keys().asSequence().associateWith { obj.getString(it) })
         }
         return emptyMap()
     }

@@ -30,8 +30,6 @@ object App {
     // every resolveAndPush, so an edit to overrides.json (which trips the DATA_DIR watcher) takes effect.
     @Volatile private lateinit var harvest: Harvester.Record
     @Volatile private var lastGoodConfig: ConfigStore.Config? = null
-    // The ro.boot.vbmeta.* values we last pushed to resetprop, so we only re-set them when they change.
-    @Volatile private var lastBootProps: Map<String, String> = emptyMap()
     // Cleared after the first committed push, so the startup-only attest-key purge runs exactly once.
     private val firstCommit = java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -348,21 +346,21 @@ object App {
     }
 
     /**
-     * When a verifiedBootKey/Hash override is active (only possible when the device reported an all-zero,
-     * unlocked boot value), reflect the spoofed value into the matching ro.boot.vbmeta.* property so that
-     * anything reading those props directly sees what attestation presents. Only re-sets a property when
-     * its value changed, so the package/config watchers don't resetprop on every unrelated event.
+     * Force the matching ro.boot.vbmeta.* property to the boot key/hash we actually PRESENT (the override
+     * when one is active, else the real captured value), so anything reading those props directly sees
+     * exactly what attestation reports. We compare against the LIVE property and overwrite it on any
+     * mismatch — the value we attest wins unconditionally, whether the property was empty (some bootloaders
+     * never populate ro.boot.vbmeta.digest — unlocked / verification-disabled / OEM AVB, #228), stale, or
+     * changed by another module. A match is left untouched, so a steady state does no work.
      */
     private fun applyBootProps(h: Harvester.Record) {
-        val want =
-            Harvester.BOOT_PROP.mapNotNull { (field, prop) ->
-                h.overrides[field]?.value?.takeIf { it.isNotEmpty() }?.let { prop to it }
-            }.toMap()
-        if (want == lastBootProps) return
-        for ((prop, value) in want) {
-            if (lastBootProps[prop] != value) SysProp.set(prop, value)
+        for ((prop, value) in Harvester.bootPropValues(h)) {
+            val live = DeviceProps.prop(prop, "")
+            if (live != value) {
+                SysProp.set(prop, value)
+                SystemLogger.info("boot prop: forced $prop to the attested value (was '${live.ifEmpty { "unset" }}')")
+            }
         }
-        lastBootProps = want
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */
