@@ -81,8 +81,6 @@ export function create(mount) {
 
   function handler(action, arg) {
     switch (action) {
-      case "refresh":
-        return refresh();
       case "filter":
         state.filter = arg;
         render();

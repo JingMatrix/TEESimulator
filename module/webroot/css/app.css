@@ -63,7 +63,7 @@
 }
 
 /* --- panel heads (each controller paints its own) ----------------------- */
-.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; flex-wrap: wrap; }
 .panel-title { margin: 0; font-size: 20px; font-weight: 700; }
 .panel-actions { display: flex; gap: 8px; }
 
@@ -185,8 +185,13 @@ input[type="file"].input { padding: 8px 10px; }
 .sel-icon::after { content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
 /* Key-scope control: a segmented "Spoofed | All" toggle on its own row under the filter field, with a
  * muted hint counting the real device keys the default "Spoofed" scope is hiding. */
-.keyscope-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
-.keyscope-hint { font-size: 12px; }
+/* The scope control sits in the panel head where Refresh used to, with its caption stacked
+ * underneath and right-aligned to the segments it describes. */
+.keyscope-box { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+/* .segmented carries align-self: flex-start for its usual left-aligned contexts; in this column it
+ * must follow the box and sit over its own caption. */
+.keyscope { align-self: flex-end; }
+.keyscope-hint { font-size: 12px; text-align: right; }
 .selmenu-backdrop { position: fixed; inset: 0; z-index: 40; }
 .selmenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 41; min-width: 190px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); padding: 6px; }
 .selmenu button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; background: transparent; color: var(--fg); cursor: pointer; border-radius: 6px; font: inherit; }
