@@ -10,6 +10,7 @@ import android.os.SystemClock
 import java.io.File
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.json.JSONObject
 
 /**
  * Privileged control daemon, launched via app_process. Bootstraps just enough of the Android
@@ -125,7 +126,13 @@ object App {
             Scope.baselineKnownPackages()
             resolveAndPush()
             ConfigStore.watch { resolveAndPush() }
-            PackageWatch.start(appContext) { resolveAndPush() }
+            // The third and last re-resolve trigger: the WebUI's pull-to-refresh on the Profiles
+            // screen. Discovery of newly installed apps is LAZY by design — there is no package
+            // observer, because a broadcast receiver registered from this process is silently
+            // dropped by AMS (no ProcessRecord for a bare app_process; it throws on API 32/33 and
+            // no-ops from 34 on). So the set of installed apps is only ever re-read here, on a
+            // config change, and at daemon start.
+            KeyAdmin.onRescan = { resolveAndPush() }
             startUsagePoll()
 
             SystemLogger.info("Daemon initialised; entering main loop")
@@ -257,7 +264,7 @@ object App {
      * On config validation failure the last-good config is kept.
      */
     @Synchronized
-    private fun resolveAndPush() {
+    private fun resolveAndPush(): Int {
         // Re-layer the user's overrides.json over the frozen capture — an override edit trips the same
         // DATA_DIR watcher that calls us, so this is where a changed override becomes live. Refresh the
         // record the WebUI reads, and reflect any boot key/hash override into ro.boot.vbmeta.*.
@@ -275,14 +282,33 @@ object App {
             lastGoodConfig
                 ?: run {
                     SystemLogger.warning("No valid config yet; nothing to push")
-                    return
+                    return -1
                 }
-        try {
+        return try {
             val msg = Resolver.resolve(cfg, harvest)
             Control.push(msg.toString())
+            countTargetUids(msg)
         } catch (e: Exception) {
             SystemLogger.error("Failed to resolve/push config", e)
+            -1
         }
+    }
+
+    /**
+     * How many distinct caller uids the freshly pushed config targets, read back off the wire message
+     * rather than re-resolving — [Scope.resolve] enumerates every installed app when a profile
+     * auto-includes, and doing that twice per rescan just to count would double the cost of the
+     * WebUI's pull-to-refresh. Deduplicated across profiles, since the same uid never legally appears
+     * in two of them but a count that silently double-reported would be a confusing thing to show.
+     */
+    private fun countTargetUids(msg: JSONObject): Int {
+        val profiles = msg.optJSONArray("profiles") ?: return 0
+        val all = HashSet<Int>()
+        for (i in 0 until profiles.length()) {
+            val uids = profiles.optJSONObject(i)?.optJSONArray("uids") ?: continue
+            for (j in 0 until uids.length()) all.add(uids.getInt(j))
+        }
+        return all.size
     }
 
     /**

@@ -63,17 +63,30 @@ object Resolver {
             },
         )
 
+        // Resolve each profile ONCE, here, and keep the ProfileScope: this is the only place in the
+        // daemon that calls Scope.resolve, so it is also the only place that pays for the installed-app
+        // enumeration an auto-including profile needs. Everything else (ReAttest, /keys/db, /scope, the
+        // WebUI) reads the snapshot published below rather than resolving again.
         val profiles = JSONArray()
+        val scopes = ArrayList<Scope.ProfileScope>(config.profiles.size)
         for (p in config.profiles) {
-            profiles.put(resolveProfile(p, config.profiles.filter { it.id != p.id }, harvest))
+            val scope = Scope.resolve(p, config.profiles.filter { it.id != p.id })
+            scopes.add(scope)
+            profiles.put(resolveProfile(p, scope, harvest))
         }
         msg.put("profiles", profiles)
+        // Published as the last act of building the message, so a resolve that throws part-way
+        // publishes nothing. There is no "push succeeded" moment to wait for instead: Control.push
+        // only stages the JSON for the connection thread, and actual delivery is confirmed much later
+        // by the lib's ack. So the snapshot means "the config the daemon last resolved and staged",
+        // which is exactly what the WebUI and ReAttest need to reason about.
+        Scope.publishResolved(msg.getLong("epoch"), scopes)
         return msg
     }
 
     private fun resolveProfile(
         p: ConfigStore.ProfileConfig,
-        others: List<ConfigStore.ProfileConfig>,
+        scope: Scope.ProfileScope,
         harvest: Harvester.Record,
     ): JSONObject {
         val o = JSONObject()
@@ -135,7 +148,6 @@ object Resolver {
         // fallback, effective set with no -1) resolved centrally by Scope, which also folds in raw
         // uid:N tokens and the autoIncludeNewApps expansion and logs the per-entry detail. The two
         // arrays are independent here (uids[] may be longer or shorter than packages[]).
-        val scope = Scope.resolve(p, others)
         o.put("packages", JSONArray(scope.packageNames))
         val uids = JSONArray()
         for (u in scope.uids) uids.put(u)

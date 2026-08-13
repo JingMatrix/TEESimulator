@@ -10,8 +10,22 @@
 //   renderScope(host, state, actions)
 //     host    the overlay content node (an .editor-host div)
 //     state   { profileName, apps, packages, claimedByOther, firstAppUid,
-//               search, filter, sort, loading, error, iconUrl }
+//               search, filter, sort, loading, error, iconUrl,
+//               autoOwner, autoInfo, autoCount, pendingSave }
 //               - apps            the DRAFT entry strings (packages + uid: tokens)
+//               - autoOwner       Map(uid -> profile name) for uids the DAEMON includes automatically
+//                                 (autoIncludeNewApps). These are NEVER in `apps` — config.json does
+//                                 not name them — so this is the only way the picker can know. The
+//                                 rule itself lives solely in Scope.kt; this file paints its answer.
+//               - autoInfo        { baselineReady, epoch } from the daemon's snapshot, or null when
+//                                 /scope is unavailable (older daemon) — then no auto state is shown
+//               - autoCount       how many uids THIS profile auto-includes, per the last resolve
+//               - pendingSave     the draft differs from the saved config, so the daemon's auto set
+//                                 is one save behind what is on screen
+//
+// Row state precedence: selected > claimed (explicit, another profile) > auto > default. A row is
+// never both selected and auto: pinning an app removes it from the daemon's auto set on the next
+// resolve (Scope.kt drops uids the profile now names explicitly).
 //               - packages        the keyAdmin("packages") result, or null while loading; each
 //                                 row carries uid/packages/label/system/launchable/enabled plus
 //                                 the usage columns installTime/freq/lastUsed/recent
@@ -72,10 +86,15 @@ export function renderScope(host, state, actions) {
     profileName, apps = [], packages = null, claimedByOther = new Map(),
     firstAppUid = 10000, search = "", filter = "recent", sort = "freq",
     loading = false, error = null,
+    // Defaulted so an older daemon (no /scope route) renders exactly the previous UI.
+    autoOwner = new Map(), autoInfo = null, autoCount = 0, pendingSave = false,
   } = state;
   const iconUrl = typeof state.iconUrl === "function" ? state.iconUrl : () => null;
 
   const appsSet = new Set(apps);
+  // "In scope automatically, for THIS profile, and not already pinned." A pinned row is selected,
+  // never auto — the two states are exclusive by construction.
+  const autoMine = (row) => autoOwner.get(row.uid) === profileName && !isSelected(row, appsSet);
 
   // ---- header ----------------------------------------------------------
   host.appendChild(el("div", { class: "drill-head" }, [
@@ -139,24 +158,34 @@ export function renderScope(host, state, actions) {
   // The visible rows: search + group filter, then sorted. Computed once so the ops row and the
   // list share exactly the same set (the ops act only on what the user can see).
   const q = search.trim().toLowerCase();
+  // "In scope" means pinned OR auto-included here — an auto row genuinely IS in this profile's
+  // scope, so the Selected tab must list it and the float-to-top must lift it.
+  const inScope = (row) => isSelected(row, appsSet) || autoMine(row);
   const rows = installed
     .filter((row) => matchSearch(row, q))
-    .filter((row) => matchFilter(row, filter, isSelected(row, appsSet)))
+    .filter((row) => matchFilter(row, filter, inScope(row)))
     // Selected rows always float to the top of every group (and of a search result), with the chosen
     // sort applied within the selected and unselected partitions alike — so what you've picked is
     // right there, and the rest stays ordered underneath.
     .sort((a, b) => {
-      const sa = isSelected(a, appsSet) ? 0 : 1;
-      const sb = isSelected(b, appsSet) ? 0 : 1;
+      const sa = inScope(a) ? 0 : 1;
+      const sb = inScope(b) ? 0 : 1;
       return sa - sb || compareRows(a, b, sort);
     });
+
+  // Counted over the WHOLE inventory, not the filtered rows, so the badge doesn't jump as the user
+  // searches or switches tabs.
+  const autoMineShown = installed.filter(autoMine).length;
 
   // The bulk-op targets: every visible row NOT claimed by another profile AND not a privileged
   // (system/shell) uid — those are excluded so Select-all/Invert can never add a uid < firstAppUid
   // without the deliberate per-row confirm that onToggleApp enforces. Each is { add, cur }: the entry
   // a select would add, and the entry (if any) currently selecting it (to remove).
+  // Auto rows are excluded too: they cannot be deselected (there is no per-app exclusion), so
+  // Clear and Invert have no meaning on them, and Select-all pinning the whole auto set in one tap
+  // is never what the gesture was asking for. Only a deliberate per-row tap pins one.
   const visibleEntries = rows
-    .filter((row) => !claimOf(row, claimedByOther) && row.uid >= firstAppUid)
+    .filter((row) => !claimOf(row, claimedByOther) && row.uid >= firstAppUid && !autoOwner.has(row.uid))
     .map((row) => {
       const pkgs = row.packages || [];
       const add = pkgs[0] || ("uid:" + row.uid);
@@ -176,9 +205,25 @@ export function renderScope(host, state, actions) {
           ? el("button", { type: "button", class: "linklike danger", text: "Clear usage", onclick: () => actions.onClearUsage() })
           : null,
       ]),
-      el("span", { class: "muted small", text: selectedCount + " selected" }),
+      el("span", { class: "muted small", text: selectedCount + " selected" + (autoMineShown ? " · " + autoMineShown + " auto" : "") }),
     ]);
     body.appendChild(ops);
+
+    // Say what the dashed rows are. Discovery is the daemon's, so this reports its state rather
+    // than deriving anything: an unseeded baseline means the fail-safe in Scope.resolve is holding
+    // auto-include back, which is otherwise visible only in logcat.
+    const note = autoInfo && autoInfo.baselineReady === false
+      ? "Auto-include is idle until the package baseline is seeded."
+      : autoCount || autoMineShown
+        ? "Auto-include is on — dashed apps are in scope automatically. Tap one to pin it here."
+        : null;
+    if (note) {
+      const kids = [el("span", { text: note })];
+      // The draft has diverged from what the daemon resolved, so the dashed set on screen is one
+      // save behind. Say so rather than re-deriving the rule to predict it.
+      if (pendingSave) kids.push(el("span", { class: "muted", text: " Auto-include updates when you save." }));
+      body.appendChild(el("p", { class: "muted small scope-auto-note" }, kids));
+    }
   }
 
   // ---- pinned "In scope" section: selected entries with no visible row -
@@ -220,7 +265,7 @@ export function renderScope(host, state, actions) {
     } else if (rows.length) {
       const list = el("div", { class: "scope-list" });
       for (const row of rows) {
-        list.appendChild(scopeRow(row, { appsSet, claimedByOther, firstAppUid, iconUrl }, actions));
+        list.appendChild(scopeRow(row, { appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner, profileName }, actions));
       }
       body.appendChild(list);
     }
@@ -232,7 +277,7 @@ export function renderScope(host, state, actions) {
   host.appendChild(el("div", { class: "drill-foot" }, [
     el("span", { class: "status" }, [
       el("span", { class: "dot ok" }),
-      el("span", { class: "muted small", text: apps.length + " selected" }),
+      el("span", { class: "muted small", text: apps.length + " selected" + (autoMineShown ? " · " + autoMineShown + " auto" : "") }),
     ]),
     el("button", { class: "btn primary", text: "Done", onclick: () => actions.onDone() }),
   ]));
@@ -245,7 +290,7 @@ function emptyText(filter, total, q) {
   if (!total) return "No apps found on the device.";
   if (q) return "No apps match “" + q + "”.";
   if (filter === "recent") return "No app has requested a key since boot yet.";
-  if (filter === "selected") return "Nothing selected yet — tap an app to add it.";
+  if (filter === "selected") return "Nothing in scope yet — tap an app to add it.";
   return "No apps match.";
 }
 
@@ -295,8 +340,15 @@ function byLabel(a, b) {
 // One tappable row for a uid. Selecting toggles the primary package-name entry (or, when the row
 // is already selected via a specific package / uid token, that same entry, so a tap truly
 // un-selects). A row already owned by another profile is greyed out and inert.
+//
+// The third state is auto-include: the daemon already targets this uid, but config.json does not
+// name it. Such a row is painted dashed with a hollow dot — deliberately NOT the solid tick — and
+// stays TAPPABLE, because tapping pins it (Scope.resolve then drops it from the auto set, since the
+// profile now names it explicitly). Un-pinning returns it to auto, not to excluded: there is no
+// per-app exclusion, so the check is honestly a pin/unpin control whose "off" floor is "still in
+// scope automatically". The title says exactly that, because the pill alone cannot.
 function scopeRow(row, ctx, actions) {
-  const { appsSet, claimedByOther, firstAppUid, iconUrl } = ctx;
+  const { appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner = new Map(), profileName } = ctx;
   const pkgs = (row.packages || []).slice();
   const primary = pkgs[0] || ("uid:" + row.uid);
   const label = row.label || primary;
@@ -316,18 +368,34 @@ function scopeRow(row, ctx, actions) {
     ? (pkgs.length === 1 ? pkgs[0] : pkgs[0] + " +" + (pkgs.length - 1))
     : "uid:" + row.uid;
 
+  const autoBy = autoOwner.get(row.uid) || null;
+  const autoMine = !!autoBy && autoBy === profileName && !selected;
+  const autoOther = !!autoBy && autoBy !== profileName;
+
   const pills = [];
   if (lowUid) pills.push(el("span", { class: "pill warn scope-pill", text: "system uid" }));
   if (claimedBy) pills.push(el("span", { class: "chip small scope-claimed", text: "in " + claimedBy }));
+  if (autoMine) pills.push(el("span", { class: "pill scope-auto", text: "auto" }));
+  if (autoOther) pills.push(el("span", { class: "chip small scope-claimed", text: "auto in " + autoBy }));
   if (row.recent) pills.push(el("span", { class: "scope-recent-dot", title: "Requested a key since boot", "aria-label": "recent" }));
   if (row.freq > 0) pills.push(el("span", { class: "scope-freq", title: row.freq + " key requests recorded", text: fmtFreq(row.freq) }));
 
-  const cls = "scope-row" + (selected ? " selected" : "") + (claimedBy ? " claimed" : "");
+  const cls = "scope-row" + (selected ? " selected" : autoMine ? " auto" : "") + (claimedBy ? " claimed" : "");
+
+  // Only an explicit claim by another profile disables a row. An auto row — mine or another's —
+  // stays tappable: Scope.resolve excludes explicitly-named uids from auto-include, so an explicit
+  // pick legally beats auto and the UI must not forbid what the daemon permits.
+  const title = claimedBy ? "Already targeted by profile " + claimedBy
+    : autoMine ? "In scope automatically — tap to pin it to " + profileName +
+      ". To exclude it, turn off Auto-include new apps."
+    : autoOther ? "Auto-included by profile " + autoBy + " — tap to pin it here instead."
+    : label;
 
   return el("button", {
     type: "button", class: cls, disabled: !!claimedBy,
+    // Left false for an auto row: the user did not press it. The pill and title carry that truth.
     "aria-pressed": selected ? "true" : "false",
-    title: claimedBy ? "Already targeted by profile " + claimedBy : label,
+    title,
     onclick: claimedBy ? null : () => actions.onToggleApp(toggleEntry),
   }, [
     iconEl(row, primary, label, iconUrl),
@@ -338,7 +406,7 @@ function scopeRow(row, ctx, actions) {
       ]),
       el("span", { class: "scope-pkg mono", text: pkgLine + "  ·  uid " + row.uid + (row.enabled === false ? "  ·  disabled" : "") }),
     ]),
-    el("span", { class: "scope-check" + (selected ? " on" : ""), "aria-hidden": "true" }),
+    el("span", { class: "scope-check" + (selected ? " on" : autoMine ? " auto" : ""), "aria-hidden": "true" }),
   ]);
 }
 

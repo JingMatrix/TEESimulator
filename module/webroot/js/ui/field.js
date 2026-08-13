@@ -14,6 +14,9 @@
 //                           the app's real name, not just its package
 //            - installedSet optional Set of installed package names, so a scope chip can
 //                           flag a package that is not currently installed on the device
+//            - autoInclude  whether this profile has auto-include on
+//            - autoCount    how many apps the daemon currently auto-includes for it (0 when
+//                           /scope is unavailable), so the face can count what apps[] cannot
 //            - autoInclude  whether this profile has auto-include on (scope face empty state)
 //            - autoTakenBy  for the auto-include toggle: the OTHER profile that already owns
 //                           auto-include (or null); when set, the switch renders disabled with
@@ -205,8 +208,14 @@ function scopeWidget(d, value, ctx) {
   const labelMap = ctx.labelMap || null;         // package -> human label
   const installedSet = ctx.installedSet || null; // installed package names
 
+  // apps[] only ever names hand-picked entries, so on its own the count under-reports a profile that
+  // auto-includes. Add the daemon's auto count beside it — otherwise this face says "2 apps" for a
+  // profile being attested for eleven.
+  const autoCount = Number(ctx.autoCount) || 0;
+  const countText = (apps.length ? apps.length + (apps.length === 1 ? " app" : " apps") : "No apps") +
+    (autoCount ? " · " + autoCount + " auto" : "");
   const header = el("div", { class: "scope-field-head" }, [
-    el("span", { class: "scope-field-count", text: apps.length ? apps.length + (apps.length === 1 ? " app" : " apps") : "No apps" }),
+    el("span", { class: "scope-field-count", text: countText }),
     el("button", { id: ctx.id, type: "button", class: "btn primary small", text: "Configure scope →", onclick: () => ctx.openScope && ctx.openScope() }),
   ]);
 
@@ -231,8 +240,16 @@ function scopeWidget(d, value, ctx) {
       chips.push(el("span", { class: "chip scope-chip more", text: "+" + (apps.length - SCOPE_PREVIEW_MAX) + " more" }));
     }
     kids.push(el("div", { class: "applist scope-preview" }, chips));
-  } else if (ctx.autoInclude) {
-    kids.push(el("span", { class: "muted small", text: "Auto-include on — new apps added automatically." }));
+  }
+
+  // Rendered ALONGSIDE the chips, not only instead of them: a profile with picks AND auto-include is
+  // the common case, and it is exactly the one where apps[] alone misleads. Worded from the live
+  // count so it stops claiming apps are added "automatically" when there are none.
+  if (ctx.autoInclude) {
+    kids.push(el("span", { class: "muted small", text: autoCount
+      ? "Auto-include on — " + autoCount + (autoCount === 1 ? " app" : " apps") + " installed since TEESimulator started " +
+        (autoCount === 1 ? "is" : "are") + " also in scope."
+      : "Auto-include on — no new apps in scope yet." }));
   }
 
   return el("div", { class: "scope-field" }, kids);

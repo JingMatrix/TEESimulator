@@ -2,9 +2,9 @@
 // from keystore2's database on Android 12+, or a hint on Android 10/11 where there is no
 // keystore2 database to read. Rows are multi-selectable (a checkbox each, plus select-all),
 // filterable by alias/app/keybox, and removable — every intent goes through the injected
-// handler(action, arg). It never imports data/keyadmin.js (the controller wires the two)
-// and owns its own global-button metadata (KEY_ACTIONS); the Delete-selected button is
-// rendered inline because its label carries the live selection count.
+// handler(action, arg). It never imports data/keyadmin.js (the controller wires the two).
+// The Delete-selected button is rendered inline because its label carries the live selection
+// count; the panel head otherwise holds the Spoofed/All scope control.
 //
 // renderKeys(mount, state, handler)
 //   state = { keys, available, apiLevel, unavailable, loading, deleting, filter, selected, menuOpen, spoofedOnly }
@@ -17,7 +17,7 @@
 //     filter      the current filter text
 //     selected    Set of selected key ids
 //     menuOpen    true while the in-field selection menu is open
-//   handler(action, arg): "refresh" | "filter"(text) | "toggle"(id) | "toggleMenu" | "closeMenu" |
+//   handler(action, arg): "filter"(text) | "toggle"(id) | "toggleMenu" | "closeMenu" | "toggleSpoofed" |
 //                         "selectFiltered"(ids[]) | "selectAll" | "unselectAll" | "inverse" | "deleteSelected"
 //
 // The search box sits in its own card above the list card. Its trailing icon opens a small
@@ -26,7 +26,6 @@
 // and restored after — the caret never jumps mid-type.
 
 import { el, clear } from "./dom.js";
-import { KEY_ACTIONS } from "./key-actions.js";
 
 export function renderKeys(mount, state, handler) {
   // Capture filter-box focus before the teardown so a keystroke re-render doesn't drop the caret.
@@ -51,8 +50,8 @@ export function renderKeys(mount, state, handler) {
     spoofedOnly = true,
   } = state;
 
-  // Panel head: Delete-selected (only when something is checked; its label counts the selection),
-  // then the global actions (Refresh) from KEY_ACTIONS.
+  // Panel head: Delete-selected (only when something is checked; its label counts the selection).
+  // The scope control is appended below, once the counts it reports have been computed.
   const actionBtns = [];
   if (selected.size) {
     actionBtns.push(el("button", {
@@ -61,14 +60,10 @@ export function renderKeys(mount, state, handler) {
       onclick: () => handler("deleteSelected"),
     }));
   }
-  for (const a of KEY_ACTIONS.filter((a) => a.scope === "global")) {
-    actionBtns.push(el("button", {
-      class: "btn ghost" + (a.danger ? " danger" : ""), text: a.label, onclick: () => handler(a.name),
-    }));
-  }
+  const panelActions = el("div", { class: "panel-actions" }, actionBtns);
   mount.appendChild(el("div", { class: "panel-head" }, [
     el("h1", { class: "panel-title", text: "Stored keys" }),
-    el("div", { class: "panel-actions" }, actionBtns),
+    panelActions,
   ]));
 
   if (loading) {
@@ -108,15 +103,23 @@ export function renderKeys(mount, state, handler) {
   // (generated / delegated / patched) sort ahead of untouched ones; the sort is stable,
   // so within a class the daemon's namespace+alias order is preserved.
   const q = filter.trim().toLowerCase();
-  let matched = q ? keys.filter((k) => matchesFilter(k, q)) : keys;
+  const matchedAll = q ? keys.filter((k) => matchesFilter(k, q)) : keys;
   // The apps' own untouched (real hardware) keys are hidden by default so the list shows only what we
-  // spoofed; the "All" scope segment reveals them for inspection or deletion.
-  const hiddenReal = spoofedOnly ? matched.filter((k) => !isSpoofed(k)).length : 0;
-  if (spoofedOnly) matched = matched.filter(isSpoofed);
+  // spoofed; the "All" segment reveals them for inspection or deletion. Both counts are taken over the
+  // same filtered population, so the two segments describe it from opposite sides — "Spoofed" reports
+  // what it is holding back, "All" reports how much of what you are looking at we actually touched.
+  const spoofedCount = matchedAll.filter(isSpoofed).length;
+  const hiddenReal = matchedAll.length - spoofedCount;
+  const matched = spoofedOnly ? matchedAll.filter(isSpoofed) : matchedAll;
   const shown = matched.slice().sort((a, b) => classRank(a) - classRank(b));
 
-  // Search card: the filter box, the selection menu, and the spoofed/all scope control.
-  mount.appendChild(searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler));
+  // The scope control takes the slot Refresh used to hold. Reloading is already a pull-to-refresh
+  // away (keyadmin-controller binds it to this mount), so the header is better spent on the one
+  // control that changes what the screen is showing.
+  panelActions.appendChild(scopeControl(spoofedOnly, spoofedCount, hiddenReal, handler));
+
+  // Search card: the filter box and the selection menu.
+  mount.appendChild(searchCard(filter, shown, menuOpen, handler));
 
   // List card: one row per shown key, each with its own checkbox.
   const listCard = el("div", { class: "card keypanel" });
@@ -155,7 +158,7 @@ export function renderKeys(mount, state, handler) {
 // The search card: a field that looks like an input, holding the borderless filter box and a
 // trailing icon button. The button opens an in-field menu of bulk-selection actions; a full-screen
 // backdrop below the menu dismisses it on an outside tap.
-function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
+function searchCard(filter, shown, menuOpen, handler) {
   const filterInput = el("input", {
     id: "keyfilter", class: "filter-input", type: "text", value: filter,
     placeholder: "Filter by alias, app, or keybox",
@@ -181,29 +184,39 @@ function searchCard(filter, shown, menuOpen, spoofedOnly, hiddenReal, handler) {
     ]));
   }
 
-  // Scope control: "Spoofed" (default) lists only keys this module spoofed; "All" also shows the apps'
-  // own real device keys. Both segments drive the same toggleSpoofed action — clicking the active one
-  // is a no-op. The hint reports how many real keys "Spoofed" is currently hiding.
+  return el("div", { class: "card keysearch" }, [field]);
+}
+
+// Scope control, in the panel head: "Spoofed" (default) lists only keys this module spoofed; "All"
+// also shows the apps' own real device keys. Both segments drive the same toggleSpoofed action —
+// clicking the active one is a no-op.
+//
+// The caption underneath is the whole point of pairing them: each mode names what the OTHER one
+// holds. In Spoofed the list is a subset, so it says how many real keys it is hiding; in All the
+// list is everything, so it says how much of it we actually touched. Either way the number that is
+// off-screen (or mixed in) is stated rather than left to be inferred from the row styling.
+function scopeControl(spoofedOnly, spoofedCount, hiddenReal, handler) {
+  const seg = (label, on, title, onclick) =>
+    el("button", {
+      class: "seg" + (on ? " on" : ""), type: "button", text: label,
+      "aria-pressed": on ? "true" : "false", title, onclick,
+    });
   const scope = el("div", { class: "segmented keyscope", role: "group", "aria-label": "Which keys to list" }, [
-    el("button", {
-      class: "seg" + (spoofedOnly ? " on" : ""), type: "button", text: "Spoofed",
-      "aria-pressed": spoofedOnly ? "true" : "false", title: "Only keys this module spoofed",
-      onclick: () => { if (!spoofedOnly) handler("toggleSpoofed"); },
-    }),
-    el("button", {
-      class: "seg" + (!spoofedOnly ? " on" : ""), type: "button", text: "All",
-      "aria-pressed": !spoofedOnly ? "true" : "false", title: "Include the apps' own real device keys",
-      onclick: () => { if (spoofedOnly) handler("toggleSpoofed"); },
-    }),
+    seg("Spoofed", spoofedOnly, "Only keys this module spoofed",
+      () => { if (!spoofedOnly) handler("toggleSpoofed"); }),
+    seg("All", !spoofedOnly, "Include the apps' own real device keys",
+      () => { if (spoofedOnly) handler("toggleSpoofed"); }),
   ]);
-  const scopeRow = el("div", { class: "keyscope-row" }, [scope]);
-  if (spoofedOnly && hiddenReal) {
-    scopeRow.appendChild(el("span", {
-      class: "keyscope-hint muted",
-      text: hiddenReal + " real device key(s) hidden",
-    }));
-  }
-  return el("div", { class: "card keysearch" }, [field, scopeRow]);
+
+  const n = (count, one, many) => count + " " + (count === 1 ? one : many);
+  const caption = spoofedOnly
+    ? (hiddenReal ? n(hiddenReal, "real key", "real keys") + " hidden" : "No real keys to hide")
+    : n(spoofedCount, "key", "keys") + " spoofed";
+
+  return el("div", { class: "keyscope-box" }, [
+    scope,
+    el("span", { class: "keyscope-hint muted", text: caption }),
+  ]);
 }
 
 function matchesFilter(k, q) {
