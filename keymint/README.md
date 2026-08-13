@@ -163,8 +163,11 @@ it is also ours — as does StrongBox:
   transact for a target uid, so on a hybrid device keystore2 falls back to *no* attest key and
   appends nothing, leaving the TA's keybox-rooted chain intact. It is scoped to target uids
   (`teesim_is_target_uid`, and the resolution runs on the app's binder thread so `getCallingUid`
-  is the app's) and gated on `remote_provisioning.tee.rkp_only`, which is only *read*, never
-  written — a global property change would be an obvious detection point.
+  is the app's) and gated *per security level*: the request's `getRegistration` names its component
+  (`GetRegIsStrongBox` reads the `irpcName` arg), so we consult `remote_provisioning.strongbox.rkp_only`
+  for a StrongBox request and `remote_provisioning.tee.rkp_only` for a TE one, and skip the denial when
+  that level is RKP-only (there keystore2 would fail the key rather than fall back). The property is
+  only *read*, never written — a global change would be an obvious detection point.
 - **A foreign attest key on a leaf** — one an app made before we covered it — is forwarded to the
   real HAL (its leaf keeps the real root of trust). The durable fix is that attest keys are now
   ours, so once regenerated the app takes the "ours" path; the startup purge deletes any
@@ -209,7 +212,8 @@ not the forwarding guard.
 ## Files
 
 - [`keymint_hook.cpp`](keymint_hook.cpp) — the `AIBinder_transact` hook, the KeyMint redirect, the
-  remote-provisioning denial for target apps (`IsRkpProvisioning` / `RkpOnlyTee`), and
+  remote-provisioning denial for target apps (`IsRkpProvisioning`, gated per level by
+  `GetRegIsStrongBox` / `PropIsRkpOnly`), and
   `teesim_hook_install`,
   which uses LSPlt to patch the caller's PLT slot for the symbol. It scans `/proc/self/maps`
   and probes only the main executable first — the binder client that issues the KeyMint call
