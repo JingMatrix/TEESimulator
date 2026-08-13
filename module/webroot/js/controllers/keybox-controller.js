@@ -169,10 +169,10 @@ export function create(mount) {
 
   const rkpActions = {
     async toggle(name, on) {
-      const r = await setRkpProp(name, on);
-      if (!r.ok) toast("Could not set " + name + ": " + (r.error || "failed"));
-      else toast((on ? "Enabled " : "Disabled ") + name);
-      return refreshRkp(); // re-read so the switch reflects the value the device actually took
+      // No toast: the switch is its own feedback, and refreshRkp re-reads so a failed write just
+      // snaps the knob back to the value the device actually took.
+      await setRkpProp(name, on);
+      return refreshRkp();
     },
   };
 

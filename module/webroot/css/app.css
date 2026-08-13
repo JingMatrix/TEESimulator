@@ -148,6 +148,8 @@ input[type="file"].input { padding: 8px 10px; }
 .banner { background: var(--chip); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
 .banner.error { border-color: var(--danger); }
 .banner.error > div:first-child { color: var(--danger); font-weight: 600; }
+.banner.warn { border-color: var(--warn); }
+.banner.warn > div:first-child { color: var(--warn); font-weight: 600; }
 
 .save-bar { flex-direction: row; align-items: center; justify-content: space-between; }
 
@@ -221,6 +223,12 @@ input[type="file"].input { padding: 8px 10px; }
 .chip.kclass-patched { color: var(--warn); }
 .chip.kclass-delegated { color: var(--accent); }
 .chip.kclass-untouched { color: var(--muted); }
+/* A badge that is also a filter toggle: the plain .chip pill as a real button, kept compact (not the
+ * 44px .chip.clickable) since these sit inline in a key's metadata. .active means its token is in the
+ * filter — a filled accent pill overriding the per-class/purpose tint. */
+button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
+.chip.chip-tap:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chip.chip-tap.active { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
 .keyrow.readonly .keymeta { opacity: .85; }
 .keybtns { display: flex; gap: 6px; flex: none; }
 .code { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; font-family: ui-monospace, monospace; font-size: 12px; margin: 0; white-space: pre; }

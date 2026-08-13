@@ -20,6 +20,19 @@ export function renderRkpSection(host, state, actions) {
     el("h1", { class: "panel-title", text: "Remote Key Provision" }),
   ]));
 
+  // These knobs almost never need touching: the module already handles remote provisioning so the
+  // keybox stays in effect. Turning them off is an escape hatch for the rare device where keybox
+  // attestation explicitly fails — hence the calm, informational tone rather than an alarm.
+  if (rows.some((r) => r.on)) {
+    host.appendChild(el("div", { class: "card" }, [el("div", { class: "banner" }, [
+      el("div", { text: "You usually don't need to change these." }),
+      el("div", { class: "muted small", text:
+        "The module handles remote provisioning while these stay on. Only if a device explicitly fails " +
+        "keybox attestation — a rare case — should you toggle them all off to force keystore2 onto the " +
+        "keybox." }),
+    ])]));
+  }
+
   const card = el("div", { class: "card" });
   for (const r of rows) card.appendChild(rkpRow(r, actions));
   host.appendChild(card);
