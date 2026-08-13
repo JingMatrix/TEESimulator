@@ -213,7 +213,8 @@ not the forwarding guard.
 
 - [`keymint_hook.cpp`](keymint_hook.cpp) — the `AIBinder_transact` hook, the KeyMint redirect, the
   remote-provisioning denial for target apps (`IsRkpProvisioning`, gated per level by
-  `GetRegIsStrongBox` / `PropIsRkpOnly`), and
+  `GetRegIsStrongBox` / `ReadRkpOnly`, with a one-shot `LogRkpPolicySnapshot` of the device's
+  rkp_only / enable_rkpd properties at install), and
   `teesim_hook_install`,
   which uses LSPlt to patch the caller's PLT slot for the symbol. It scans `/proc/self/maps`
   and probes only the main executable first — the binder client that issues the KeyMint call

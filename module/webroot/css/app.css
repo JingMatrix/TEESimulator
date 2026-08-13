@@ -65,6 +65,9 @@
 /* --- panel heads (each controller paints its own) ----------------------- */
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; flex-wrap: wrap; }
 .panel-title { margin: 0; font-size: 20px; font-weight: 700; }
+/* A second panel stacked inside the Keyboxes screen (Remote Key Provision): its own flex column
+   restores the head-to-card gap the screen only gives its direct children. */
+.rkp-section { display: flex; flex-direction: column; gap: 14px; }
 .panel-actions { display: flex; gap: 8px; }
 
 /* --- cards & rows ------------------------------------------------------- */

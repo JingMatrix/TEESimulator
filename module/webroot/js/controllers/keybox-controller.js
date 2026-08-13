@@ -5,8 +5,10 @@
 
 import { listKeyboxes, importKeybox, renameKeybox, deleteKeybox } from "../data/keybox-io.js";
 import { keyAdmin } from "../data/keyadmin.js";
+import { readRkpProps, setRkpProp } from "../data/rkp-io.js";
 import { renderKeyboxes, renderKeyboxImport, renderKeyboxInspect, fillKeyboxInspect } from "../ui/keybox-view.js";
-import { toast, confirmDialog, promptDialog, openSheet, openOverlay } from "../ui/dom.js";
+import { renderRkpSection } from "../ui/rkp-view.js";
+import { el, toast, confirmDialog, promptDialog, openSheet, openOverlay } from "../ui/dom.js";
 import { attachPullToRefresh } from "../ui/pull-refresh.js";
 
 export function create(mount) {
@@ -17,9 +19,28 @@ export function create(mount) {
   let sheetHost = null;     // content element inside the import sheet
   let sheetOverlay = null;  // { close } while the sheet is open
   let inspectOverlay = null; // { close } while the inspect drill-in is open
+  let rkpRows = [];         // the Remote Key Provision knobs this device defines (empty => no section)
+  let rkpWrap = null;       // the <section> hosting that panel, recreated on every full render
 
   function render() {
-    renderKeyboxes(mount, { files }, actions);
+    renderKeyboxes(mount, { files }, actions); // clears mount, paints the Keyboxes panel
+    // Append the Remote Key Provision section as a sibling flex child of the screen so it keeps the
+    // screen's inter-panel gap and its own head/card spacing. renderKeyboxes just cleared the mount,
+    // so recreate the wrapper — only when the device actually exposes one of the RKP properties.
+    rkpWrap = rkpRows.length ? el("section", { class: "rkp-section" }) : null;
+    if (rkpWrap) { mount.appendChild(rkpWrap); paintRkp(); }
+  }
+
+  function paintRkp() {
+    if (rkpWrap) renderRkpSection(rkpWrap, { rows: rkpRows }, rkpActions);
+  }
+
+  async function refreshRkp() {
+    rkpRows = await readRkpProps();
+    // A toggle only ever changes a value (the knob stays present), so the wrapper is already there
+    // and a repaint suffices; fall back to a full render only if the section has to appear/disappear.
+    if (!!rkpRows.length === !!rkpWrap) paintRkp();
+    else render();
   }
 
   function renderSheet() {
@@ -30,6 +51,7 @@ export function create(mount) {
 
   async function refresh() {
     files = await listKeyboxes();
+    rkpRows = await readRkpProps();
     render();
   }
 
@@ -142,6 +164,15 @@ export function create(mount) {
       if (!r.ok) { toast("Delete failed: " + (r.error || "unknown error")); return; }
       toast("Deleted " + (r.name || name));
       return refresh();
+    },
+  };
+
+  const rkpActions = {
+    async toggle(name, on) {
+      const r = await setRkpProp(name, on);
+      if (!r.ok) toast("Could not set " + name + ": " + (r.error || "failed"));
+      else toast((on ? "Enabled " : "Disabled ") + name);
+      return refreshRkp(); // re-read so the switch reflects the value the device actually took
     },
   };
 
