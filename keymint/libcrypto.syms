@@ -33,7 +33,7 @@ EVP_CIPHER_CTX_set_key_length
 EVP_CIPHER_CTX_set_padding
 EVP_CIPHER_iv_length
 EVP_CIPHER_key_length
-EVP_CipherFinal
+EVP_CipherFinal_ex
 EVP_CipherUpdate
 EVP_DecryptInit_ex
 EVP_DigestSign
