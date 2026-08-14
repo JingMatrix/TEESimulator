@@ -461,9 +461,9 @@ TsCreationResult* ImportKey(const PendingKey& k, int uid, const std::vector<KmPa
   std::vector<uint8_t> app_id;
   AddRequiredTags(params, uid, app_id, with_attestation);
   TsCreationResult* res = nullptr;
-  // The legacy Keystore HAL path has no wrapped KeyMint HAL to derive a level
-  // from, so -1 keeps the TA's configured default security level.
-  int32_t rc = teesim_km_import_key(ta.get(), params.data(), params.size(), /*security_level=*/-1,
+  // The legacy Keystore HAL path has a single TA per profile at its configured security level; the
+  // attestation is emitted at that level.
+  int32_t rc = teesim_km_import_key(ta.get(), params.data(), params.size(),
                                     KEY_FORMAT_PKCS8, k.pkcs8.data(), k.pkcs8.size(), nullptr, 0,
                                     nullptr, 0, nullptr, 0, &res);
   if (rc != 0 || !res) {
