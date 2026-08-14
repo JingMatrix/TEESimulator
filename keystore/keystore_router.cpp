@@ -826,12 +826,16 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   Profile prof;
   prof.id = p->id ? p->id : "";
   prof.ta = WrapTa(ta);
-  // uids[] is aligned 1:1 with packages[]; -1 marks a package that is not installed.
+  // uid_packages[] is aligned 1:1 with uids[] and names the package behind each one, or "" for a raw
+  // uid:N or an auto-included app that no entry names. It is carried on the wire rather than read off
+  // packages[] by index: the two arrays have not lined up since a profile could name an app it does
+  // not (yet) have installed, and pairing them by position hands a uid the wrong package name — which
+  // this hook would then attest under.
   for (int i = 0; i < p->n_uids && p->uids; ++i) {
     if (p->uids[i] < 0) continue;
-    const char* pkg =
-        (i < p->n_packages && p->packages && p->packages[i]) ? p->packages[i] : "";
+    const char* pkg = (p->uid_packages && p->uid_packages[i]) ? p->uid_packages[i] : "";
     prof.uids[p->uids[i]] = pkg;
+    LOGI("cfg:   uid %d -> package '%s'", p->uids[i], pkg);
   }
   g_staging.push_back(std::move(prof));
   return true;

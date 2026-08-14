@@ -1,23 +1,30 @@
 package org.matrix.teesim
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.IPackageManager
 import android.content.pm.PackageManager
+import android.content.pm.ParceledListSlice
+import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.os.IUserManager
 import android.os.Process
 import android.os.ServiceManager
 import android.util.LruCache
 import java.io.ByteArrayOutputStream
+import java.io.File
 
 /**
- * Package-name to uid resolution. Prefers the public [PackageManager] from the system context (it
- * hides the per-version aidl flag drift); keeps an [IPackageManager] handle for the reverse uid to
- * package-name mapping the legacy path needs.
+ * Package-name to uid resolution, across every Android user on the device. The public
+ * [PackageManager] from the system context answers for user 0 (it hides the per-version aidl flag
+ * drift); a work profile or a secondary user lives behind [IPackageManager]'s per-user overloads,
+ * which the daemon may call because it runs as root — PackageManagerService waives its
+ * cross-user permission check for uid 0.
  */
 object Packages {
 
@@ -27,27 +34,191 @@ object Packages {
         pm = context.packageManager
     }
 
-    /** Resolve a package name to its app uid, or -1 when it is not installed. */
-    fun uidForPackage(pkg: String): Int =
-        try {
-            @Suppress("DEPRECATION") pm.getPackageUid(pkg, 0)
-        } catch (e: PackageManager.NameNotFoundException) {
-            -1
-        } catch (e: Exception) {
-            SystemLogger.warning("uidForPackage($pkg) failed", e)
-            -1
-        }
+    // android.os.UserHandle.PER_USER_RANGE: the stride between two users' uids for the same app.
+    // A uid is therefore userId * 100000 + appId — user 0's Play Store is 10123, the work
+    // profile's clone of it is 1010123, and the two are different callers to keystore.
+    const val PER_USER_RANGE = 100000
+
+    /** The Android user a caller uid belongs to (0 for the primary/owner user). */
+    fun userIdOf(uid: Int): Int = if (uid < 0) 0 else uid / PER_USER_RANGE
+
+    /** The per-user uid of [appId] (a uid with its user stripped) inside user [userId]. */
+    fun uidOf(userId: Int, appId: Int): Int = userId * PER_USER_RANGE + appId % PER_USER_RANGE
+
+    /**
+     * Resolve a package name to its app uid inside [userId], or -1 when it is not installed there.
+     * User 0 goes through the public PackageManager (the path this has always taken); another user
+     * is asked of the package service directly, which is the only way to see a work profile.
+     */
+    fun uidForPackage(pkg: String, userId: Int = 0): Int =
+        if (userId == 0)
+            try {
+                @Suppress("DEPRECATION") pm.getPackageUid(pkg, 0)
+            } catch (e: PackageManager.NameNotFoundException) {
+                -1
+            } catch (e: Exception) {
+                SystemLogger.warning("uidForPackage($pkg) failed", e)
+                -1
+            }
+        else applicationInfoAsUser(pkg, userId)?.uid ?: -1
 
     /** The first uid the platform hands to a normal app; anything below is a system/shell uid. */
     fun firstAppUid(): Int = Process.FIRST_APPLICATION_UID
+
+    // --- users (work profiles and secondary users) -------------------------------
+
+    /**
+     * One Android user. [id] is what a uid carries (uid / [PER_USER_RANGE]), [name] is the label the
+     * WebUI shows next to an app, and [managed] marks a work profile — the common case behind #237,
+     * and the one worth naming as such when the ROM hands back an empty user name.
+     */
+    data class UserEntry(val id: Int, val name: String, val managed: Boolean)
+
+    // android.content.pm.UserInfo.FLAG_MANAGED_PROFILE.
+    private const val FLAG_MANAGED_PROFILE = 0x00000020
+
+    // The last user set we logged, so a per-resolve enumeration doesn't reprint the same line
+    // forever but a profile being created or removed still shows up in logcat when it happens.
+    @Volatile private var lastUsersLogged: String? = null
+
+    /**
+     * Every user on the device, primary first. Tries the user service (the authoritative answer,
+     * which root may ask), then falls back to the on-disk user directories, and finally to a
+     * single user 0 — a device with no work profile then behaves exactly as it did before.
+     */
+    fun users(): List<UserEntry> {
+        val found = usersFromService() ?: usersFromDisk() ?: listOf(UserEntry(0, "Owner", false))
+        val users = found.sortedBy { it.id }
+        val signature = users.joinToString(",") { "${it.id}:${it.name}" }
+        if (signature != lastUsersLogged) {
+            lastUsersLogged = signature
+            SystemLogger.info(
+                "Packages: ${users.size} user(s) on device — " +
+                    users.joinToString(", ") { "${it.id} '${it.name}'${if (it.managed) " (work)" else ""}" }
+            )
+        } else {
+            SystemLogger.verbose("Packages: ${users.size} user(s) on device (unchanged)")
+        }
+        return users
+    }
+
+    /**
+     * The user list from IUserManager, or null when the service is unreachable or its aidl does not
+     * match. getUsers grew its excludePartial/excludePreCreated arguments in Android 11, so the
+     * three-argument form is tried first on R+ and the Android 10 one-argument form is the retry;
+     * a ROM that reshuffled the interface lands on NoSuchMethodError and we fall back to disk.
+     */
+    private fun usersFromService(): List<UserEntry>? {
+        val binder =
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                    ServiceManager.waitForService("user")
+                else ServiceManager.getService("user")
+            } catch (e: Exception) {
+                SystemLogger.warning("Packages: user service lookup failed", e)
+                null
+            }
+        if (binder == null) {
+            SystemLogger.warning("Packages: user service not available; falling back to /data/system/users")
+            return null
+        }
+        val um =
+            try {
+                IUserManager.Stub.asInterface(binder)
+            } catch (e: Throwable) {
+                SystemLogger.warning("Packages: IUserManager.asInterface failed", e)
+                return null
+            }
+        val infos =
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) um.getUsers(true, true, true)
+                else um.getUsers(true)
+            } catch (e: Throwable) {
+                // NoSuchMethodError on an aidl mismatch, SecurityException if a ROM tightened the
+                // check beyond the platform's uid-0 waiver. Either way: try the other arity, then disk.
+                SystemLogger.warning("Packages: getUsers failed (${e.javaClass.simpleName}); retrying the legacy arity", e)
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) um.getUsers(true)
+                    else um.getUsers(true, true, true)
+                } catch (e2: Throwable) {
+                    SystemLogger.warning("Packages: getUsers unavailable on this ROM", e2)
+                    return null
+                }
+            }
+        if (infos == null || infos.isEmpty()) {
+            SystemLogger.warning("Packages: getUsers returned nothing; falling back to /data/system/users")
+            return null
+        }
+        return infos.mapNotNull { info ->
+            try {
+                val managed = (info.flags and FLAG_MANAGED_PROFILE) != 0
+                UserEntry(info.id, userLabel(info.id, info.name, managed), managed)
+            } catch (e: Throwable) {
+                SystemLogger.warning("Packages: unreadable UserInfo entry", e)
+                null
+            }
+        }
+    }
+
+    // /data/system/users/<id>/ is one directory per user and <id>.xml its record; the daemon is root,
+    // so reading them is a dependable last resort when the user service cannot be talked to. Only the
+    // ids are taken from the directory names; the name and the managed-profile flag are lifted out of
+    // the record with a narrow regex rather than a full XML parse, and both are optional.
+    private val USER_NAME_RE = Regex("<name>([^<]*)</name>")
+    private val USER_FLAGS_RE = Regex("flags=\"(-?\\d+)\"")
+
+    private fun usersFromDisk(): List<UserEntry>? {
+        val dir = File("/data/system/users")
+        val ids =
+            try {
+                dir.listFiles()?.filter { it.isDirectory }?.mapNotNull { it.name.toIntOrNull() }
+            } catch (e: Exception) {
+                SystemLogger.warning("Packages: cannot list /data/system/users", e)
+                null
+            }
+        if (ids.isNullOrEmpty()) return null
+        return ids.map { id ->
+            var name = ""
+            var flags = 0
+            try {
+                val xml = File(dir, "$id.xml")
+                if (xml.canRead()) {
+                    val text = xml.readText()
+                    name = USER_NAME_RE.find(text)?.groupValues?.get(1)?.trim().orEmpty()
+                    flags = USER_FLAGS_RE.find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                }
+            } catch (e: Exception) {
+                SystemLogger.warning("Packages: cannot read /data/system/users/$id.xml", e)
+            }
+            val managed = (flags and FLAG_MANAGED_PROFILE) != 0
+            UserEntry(id, userLabel(id, name, managed), managed)
+        }
+    }
+
+    /** The display name for a user: what the platform recorded, else a role-shaped stand-in. */
+    private fun userLabel(id: Int, name: String?, managed: Boolean): String {
+        val given = name?.trim().orEmpty()
+        if (given.isNotEmpty()) return given
+        return when {
+            id == 0 -> "Owner"
+            managed -> "Work profile"
+            else -> "User $id"
+        }
+    }
 
     /**
      * One installed app collapsed to its uid — the shape the Scope page and `GET /packages` render.
      * A shared-uid app contributes several [packages] under one entry; [label] is the best human
      * name; [system]/[launchable]/[enabled] are the aggregate flags described on [installedAppsByUid].
+     *
+     * [userId] is the Android user the entry was enumerated in, and [uid] already carries it (a work
+     * profile's clone of an app has both a different uid and the same [packages] as user 0's copy),
+     * so one app installed in two users is two entries here — which is exactly how a profile targets
+     * one of them without the other.
      */
     data class AppEntry(
         val uid: Int,
+        val userId: Int,
         val packages: List<String>,
         val label: String,
         val system: Boolean,
@@ -59,80 +230,173 @@ object Packages {
     )
 
     /**
-     * Every installed application on the device, grouped by uid (the daemon runs as root, so its
-     * PackageManager sees all apps as one uid namespace). Packages that share a uid collapse into a
-     * single entry whose [AppEntry.packages] lists them sorted. [AppEntry.system] is true when ANY
-     * member carries FLAG_SYSTEM; [AppEntry.launchable] when ANY member has a launcher entry;
-     * [AppEntry.label]/[AppEntry.enabled] come from the group's representative (first sorted) package.
-     * Failures are logged and swallowed per app so one bad entry never empties the whole list.
+     * Every installed application on the device, in every user, grouped by uid. Packages that share a
+     * uid collapse into a single entry whose [AppEntry.packages] lists them sorted. [AppEntry.system]
+     * is true when ANY member carries FLAG_SYSTEM; [AppEntry.launchable] when ANY member has a
+     * launcher entry; [AppEntry.label]/[AppEntry.enabled] come from the group's representative (first
+     * sorted) package. Failures are logged and swallowed per app, and per user, so one bad entry — or
+     * one unreadable work profile — never empties the whole list.
      */
     fun installedAppsByUid(): List<AppEntry> {
-        val infos =
-            try {
-                @Suppress("DEPRECATION") pm.getInstalledApplications(0)
-            } catch (e: Exception) {
-                SystemLogger.warning("installedAppsByUid: getInstalledApplications failed", e)
-                return emptyList()
+        val out = ArrayList<AppEntry>()
+        var total = 0
+        for (user in users()) {
+            val infos = installedApplications(user.id)
+            if (infos.isEmpty()) {
+                SystemLogger.warning("installedAppsByUid: user ${user.id} enumerated no app")
+                continue
             }
-        val byUid = HashMap<Int, MutableList<ApplicationInfo>>()
-        for (ai in infos) byUid.getOrPut(ai.uid) { ArrayList() }.add(ai)
+            total += infos.size
+            val byUid = HashMap<Int, MutableList<ApplicationInfo>>()
+            for (ai in infos) byUid.getOrPut(ai.uid) { ArrayList() }.add(ai)
 
-        val out = ArrayList<AppEntry>(byUid.size)
-        for ((uid, members) in byUid) {
-            try {
-                members.sortBy { it.packageName }
-                val pkgNames = members.map { it.packageName }
-                val rep = members.first()
-                val label =
-                    try {
-                        pm.getApplicationLabel(rep).toString().takeIf { it.isNotBlank() }
-                            ?: rep.packageName
-                    } catch (e: Exception) {
-                        rep.packageName
-                    }
-                val system = members.any { (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0 }
-                // getLaunchIntentForPackage(pkg) is the simplest "has a launcher entry" probe — it is
-                // exactly what a home screen would use to start the app.
-                val launchable = pkgNames.any { pm.getLaunchIntentForPackage(it) != null }
-                // Oldest member's first-install time is the group's install age; a per-package failure
-                // contributes nothing (0) rather than aborting the whole entry.
-                val installTime =
-                    pkgNames.mapNotNull { p ->
+            for ((uid, members) in byUid) {
+                try {
+                    members.sortBy { it.packageName }
+                    val pkgNames = members.map { it.packageName }
+                    val rep = members.first()
+                    val label =
                         try {
-                            @Suppress("DEPRECATION") pm.getPackageInfo(p, 0).firstInstallTime
+                            pm.getApplicationLabel(rep).toString().takeIf { it.isNotBlank() }
+                                ?: rep.packageName
                         } catch (e: Exception) {
-                            null
+                            rep.packageName
                         }
-                    }.minOrNull() ?: 0L
-                out.add(
-                    AppEntry(
-                        uid = uid,
-                        packages = pkgNames,
-                        label = label,
-                        system = system,
-                        launchable = launchable,
-                        enabled = rep.enabled,
-                        installTime = installTime,
+                    val system = members.any { (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0 }
+                    val launchable = pkgNames.any { hasLauncherEntry(it, user.id) }
+                    // Oldest member's first-install time is the group's install age; a per-package failure
+                    // contributes nothing (0) rather than aborting the whole entry. It is read per user
+                    // because a work profile installs its clone of an app at its own moment.
+                    val installTime =
+                        pkgNames.mapNotNull { p -> firstInstallTime(p, user.id) }.minOrNull() ?: 0L
+                    out.add(
+                        AppEntry(
+                            uid = uid,
+                            userId = user.id,
+                            packages = pkgNames,
+                            label = label,
+                            system = system,
+                            launchable = launchable,
+                            enabled = rep.enabled,
+                            installTime = installTime,
+                        )
                     )
-                )
-            } catch (e: Exception) {
-                SystemLogger.warning("installedAppsByUid: skipping uid $uid", e)
+                } catch (e: Exception) {
+                    SystemLogger.warning("installedAppsByUid: skipping uid $uid (user ${user.id})", e)
+                }
             }
         }
-        SystemLogger.info("Packages: enumerated ${infos.size} app(s) across ${out.size} uid(s)")
+        SystemLogger.info("Packages: enumerated $total app(s) across ${out.size} uid(s) in all users")
         return out
     }
 
-    /** Every installed package name on the device, for the auto-include baseline seed. Empty on
-     *  failure so a broken enumeration never seeds an empty baseline that later mislabels everything new. */
-    fun allInstalledPackageNames(): Set<String> =
-        try {
-            @Suppress("DEPRECATION")
-            pm.getInstalledApplications(0).mapTo(HashSet()) { it.packageName }
-        } catch (e: Exception) {
-            SystemLogger.warning("allInstalledPackageNames: getInstalledApplications failed", e)
-            emptySet()
+    /** Every installed package name on the device, in every user, for the auto-include baseline seed.
+     *  Empty on failure so a broken enumeration never seeds an empty baseline that later mislabels
+     *  everything new. The set is user-agnostic on purpose: the baseline answers "did this app exist
+     *  when TEESimulator first ran", which is a question about the app, not about one user's copy. */
+    fun allInstalledPackageNames(): Set<String> {
+        val out = HashSet<String>()
+        for (user in users()) installedApplications(user.id).mapTo(out) { it.packageName }
+        if (out.isEmpty()) SystemLogger.warning("allInstalledPackageNames: enumeration came back empty")
+        return out
+    }
+
+    // --- per-user PackageManager calls -------------------------------------------
+
+    /**
+     * Every application installed for [userId]. User 0 keeps the public PackageManager path it has
+     * always used; any other user goes through the package service, whose bulk call widened its
+     * `flags` argument from int to long in Android 13 — hence [sliceOf], which tries the arity this
+     * SDK expects and retries the other one when a ROM disagrees.
+     */
+    private fun installedApplications(userId: Int): List<ApplicationInfo> {
+        if (userId == 0)
+            return try {
+                @Suppress("DEPRECATION") pm.getInstalledApplications(0)
+            } catch (e: Exception) {
+                SystemLogger.warning("installedApplications(user 0): getInstalledApplications failed", e)
+                emptyList()
+            }
+        val ipm = packageManagerService() ?: return emptyList()
+        return sliceOf("getInstalledApplications(user $userId)") { wide ->
+            if (wide) ipm.getInstalledApplications(0L, userId) else ipm.getInstalledApplications(0, userId)
+        } ?: emptyList()
+    }
+
+    /** [pkg]'s ApplicationInfo inside [userId], or null when it is not installed there. */
+    private fun applicationInfoAsUser(pkg: String, userId: Int): ApplicationInfo? {
+        val ipm = packageManagerService() ?: return null
+        return callBothArities("getApplicationInfo($pkg, user $userId)") { wide ->
+            if (wide) ipm.getApplicationInfo(pkg, 0L, userId) else ipm.getApplicationInfo(pkg, 0, userId)
         }
+    }
+
+    /** [pkg]'s first-install epoch inside [userId], or null when it cannot be read. */
+    private fun firstInstallTime(pkg: String, userId: Int): Long? {
+        if (userId == 0)
+            return try {
+                @Suppress("DEPRECATION") pm.getPackageInfo(pkg, 0).firstInstallTime
+            } catch (e: Exception) {
+                null
+            }
+        val ipm = packageManagerService() ?: return null
+        return callBothArities("getPackageInfo($pkg, user $userId)") { wide ->
+                if (wide) ipm.getPackageInfo(pkg, 0L, userId) else ipm.getPackageInfo(pkg, 0, userId)
+            }
+            ?.firstInstallTime
+    }
+
+    /**
+     * Does [pkg] have a launcher entry in [userId] — the "is this a normal app the user can open"
+     * probe the picker's User/System split rides on. User 0 asks the same getLaunchIntentForPackage a
+     * home screen would; another user resolves the MAIN/LAUNCHER intent through the package service,
+     * which is the only cross-user form of that query.
+     */
+    private fun hasLauncherEntry(pkg: String, userId: Int): Boolean {
+        if (userId == 0) {
+            return try {
+                pm.getLaunchIntentForPackage(pkg) != null
+            } catch (e: Exception) {
+                false
+            }
+        }
+        val ipm = packageManagerService() ?: return false
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(pkg)
+        val list =
+            sliceOf("queryIntentActivities($pkg, user $userId)") { wide ->
+                if (wide) ipm.queryIntentActivities(intent, null, 0L, userId)
+                else ipm.queryIntentActivities(intent, null, 0, userId)
+            }
+        return !list.isNullOrEmpty()
+    }
+
+    /** [callBothArities] for the calls that answer with a chunked list. */
+    private fun <T> sliceOf(what: String, call: (Boolean) -> ParceledListSlice<T>?): List<T>? =
+        callBothArities(what, call)?.list
+
+    /**
+     * Run an IPackageManager call that exists in an int-`flags` and a long-`flags` form (the widening
+     * landed in Android 13), starting with the one this SDK level expects. A ROM whose aidl sits on
+     * the other side of that line answers with NoSuchMethodError, so the other arity is the retry
+     * rather than a hard failure; anything else is logged and swallowed as "not available".
+     */
+    private fun <T> callBothArities(what: String, call: (Boolean) -> T?): T? {
+        val wideFirst = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+        return try {
+            call(wideFirst)
+        } catch (e: NoSuchMethodError) {
+            SystemLogger.info("Packages: $what has the other flags arity on this ROM; retrying")
+            try {
+                call(!wideFirst)
+            } catch (e2: Throwable) {
+                SystemLogger.warning("Packages: $what failed on both arities", e2)
+                null
+            }
+        } catch (e: Throwable) {
+            SystemLogger.warning("Packages: $what failed", e)
+            null
+        }
+    }
 
     // Rendered PNG icons keyed by package. A browser <img> re-hits /icon on every list scroll, so caching
     // the encoded bytes (small; ~a few KB each) keeps those repeats off PackageManager + the PNG encoder.
@@ -143,12 +407,17 @@ object Packages {
      * The app icon for [pkg] rendered to a [ICON_PX]×[ICON_PX] PNG, or null when the package has no icon
      * or anything fails. Adaptive/vector icons have no intrinsic bitmap, so the drawable is always drawn
      * onto a fixed ARGB_8888 canvas rather than read as a bitmap. Results are memoized in [iconCache].
+     *
+     * [userId] only says where to LOOK the package up — an app installed in a work profile is missing
+     * from user 0's PackageManager — not what to draw: every user runs the same apk off the same
+     * sourceDir, so the rendered icon is identical and the cache stays keyed by package alone. The
+     * managed-profile badge a launcher overlays is a launcher's doing, and is deliberately not drawn.
      */
-    fun iconPng(pkg: String): ByteArray? {
+    fun iconPng(pkg: String, userId: Int = 0): ByteArray? {
         iconCache.get(pkg)?.let {
             return it
         }
-        val drawable = loadIconDrawable(pkg) ?: return null
+        val drawable = loadIconDrawable(pkg, userId) ?: return null
         return try {
             val png = drawableToPng(drawable)
             if (png != null) iconCache.put(pkg, png)
@@ -173,10 +442,18 @@ object Packages {
      * resource directly sidesteps the OEM path entirely and yields the real icon on every device.
      * getApplicationIcon is kept only as a last resort for apps that declare no icon resource.
      */
-    private fun loadIconDrawable(pkg: String): Drawable? {
+    private fun loadIconDrawable(pkg: String, userId: Int): Drawable? {
         try {
-            val ai = pm.getApplicationInfo(pkg, 0)
-            if (ai.icon != 0) {
+            // User 0's record first even for another user's app: it is the cheap public call, and the
+            // two describe the same apk. Only a package that user 0 does not have (a work-profile-only
+            // install) needs the per-user lookup.
+            val ai =
+                try {
+                    pm.getApplicationInfo(pkg, 0)
+                } catch (e: PackageManager.NameNotFoundException) {
+                    applicationInfoAsUser(pkg, userId)
+                }
+            if (ai != null && ai.icon != 0) {
                 pm.getResourcesForApplication(ai).getDrawable(ai.icon, null)?.let {
                     return it
                 }
@@ -187,7 +464,7 @@ object Packages {
         return try {
             pm.getApplicationIcon(pkg)
         } catch (e: Exception) {
-            SystemLogger.warning("iconPng($pkg): getApplicationIcon failed", e)
+            SystemLogger.warning("iconPng($pkg, user $userId): getApplicationIcon failed", e)
             null
         }
     }

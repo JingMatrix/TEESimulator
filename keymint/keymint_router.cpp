@@ -43,6 +43,18 @@ TaPtr WrapTa(::Ta* ta) {
   });
 }
 
+// The stride between two Android users' uids for the same app (android.os.UserHandle.PER_USER_RANGE).
+// A caller uid is userId * 100000 + appId, so this is what turns one into the other.
+constexpr int32_t kPerUserRange = 100000;
+
+// One package name routed to a profile, and the Android user it is routed in. An attestation
+// application id carries the package but not the user, so without `user_id` a work profile's clone of
+// an app would answer to the primary user's entry and vice versa.
+struct TargetPackage {
+  std::string name;
+  int32_t user_id = 0;
+};
+
 // A configured profile: its per-level TAs, the package names routed to it, and whether it patches the
 // real hardware attestation (patch mode) or mints the whole key in the TA (generation mode).
 struct Profile {
@@ -52,7 +64,7 @@ struct Profile {
   // key's characteristics are always read at the level the key was minted at.
   TaPtr ta_tee;
   TaPtr ta_strongbox;
-  std::vector<std::string> packages;
+  std::vector<TargetPackage> packages;
   std::vector<int32_t> uids;  // resolved caller uids, for requests that carry no app-id to match
   bool patch_mode = false;
 
@@ -137,7 +149,13 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
                                 SecurityLevel level) {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   if (g_profiles.empty()) return {};
+  // The Android user the request came from, or -1 when the caller is unknown (no binder transaction
+  // in flight). An unknown user cannot contradict a name match, so it accepts any entry's user.
+  const int32_t caller_user =
+      caller_uid == static_cast<uid_t>(-1) ? -1 : static_cast<int32_t>(caller_uid) / kPerUserRange;
   // Primary match: the ATTESTATION_APPLICATION_ID the app embeds in the request names its package.
+  // The blob names only the package, so the caller's user is what separates two users' copies of one
+  // app — a work profile's Play Store must not pick up the entry written for the primary user's.
   for (const auto& p : params) {
     if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
     if (p.value.getTag() != KeyParameterValue::blob) continue;
@@ -145,7 +163,13 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
     std::string hay(id.begin(), id.end());
     for (const auto& prof : g_profiles) {
       for (const auto& pkg : prof.packages) {
-        if (hay.find(pkg) != std::string::npos) return {prof.TaFor(level), prof.patch_mode};
+        if (hay.find(pkg.name) == std::string::npos) continue;
+        if (caller_user >= 0 && pkg.user_id != caller_user) {
+          LOGI("route: '%s' matches profile '%s' but for user %d, not the caller's user %d — skipped",
+               pkg.name.c_str(), prof.id.c_str(), pkg.user_id, caller_user);
+          continue;
+        }
+        return {prof.TaFor(level), prof.patch_mode};
       }
     }
   }
@@ -982,12 +1006,16 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
     SeedModuleHash(prof.ta_strongbox, seed);
   }
   for (int i = 0; i < p->n_packages && p->packages; ++i) {
-    if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
+    if (!p->packages[i]) continue;
+    // No package_users[] at all means an older daemon that only ever targeted the primary user.
+    prof.packages.push_back({p->packages[i], p->package_users ? p->package_users[i] : 0});
   }
   for (int i = 0; i < p->n_uids && p->uids; ++i) prof.uids.push_back(p->uids[i]);
   LOGI("cfg: staged profile '%s' (mode=%s, security_level=%d, %zu package(s), %zu uid(s))",
        prof.id.c_str(), prof.patch_mode ? "patch" : "generation", p->security_level,
        prof.packages.size(), prof.uids.size());
+  for (const auto& pkg : prof.packages)
+    LOGI("cfg:   package '%s' in user %d", pkg.name.c_str(), pkg.user_id);
   g_staging.push_back(std::move(prof));
   return true;
 }

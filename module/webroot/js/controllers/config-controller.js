@@ -13,7 +13,7 @@ import { load as ioLoad, save as ioSave, listKeyboxes } from "../data/config-io.
 import { getStatus } from "../data/status.js";
 import { keyAdmin, API_BASE, adminToken } from "../data/keyadmin.js";
 import { validateConfig } from "../domain/validate.js";
-import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE } from "../domain/schema.js";
+import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE, entryToken } from "../domain/schema.js";
 import { setPath, getPath } from "../domain/path.js";
 import { renderProfileList, renderProfileEditor } from "../ui/config-view.js";
 import { renderScope } from "../ui/scope-view.js";
@@ -59,6 +59,7 @@ export function create(mount) {
   let scopeSearch = "";      // the Scope page's search text
   let scopeSearchTimer = null; // debounce handle for search-driven re-renders
   let scopeFilter = "recent"; // "recent" (default) | "user" | "system" | "selected"
+  let scopeUserFilter = null; // an Android user id to show alone, or null for every user
   let scopeSort = "freq";    // "freq" (default) | "recent" | "name" | "install"
   let scopeLoading = false;  // the /packages fetch is in flight
   let scopeError = null;     // the /packages fetch failed with this message
@@ -85,10 +86,13 @@ export function create(mount) {
     if (!packagesCache || !Array.isArray(packagesCache.apps)) return null;
     const labelMap = new Map();
     const installedSet = new Set();
+    // Keyed by apps[] ENTRY, not bare package: "com.foo" and "com.foo@10" are two installs of one
+    // app in two users, and only the entry says which of them a chip is about.
     for (const row of packagesCache.apps) {
       for (const p of (row.packages || [])) {
-        installedSet.add(p);
-        if (!labelMap.has(p)) labelMap.set(p, row.label || p);
+        const entry = entryToken(p, row.userId || 0);
+        installedSet.add(entry);
+        if (!labelMap.has(entry)) labelMap.set(entry, row.label || p);
       }
     }
     return { labelMap, installedSet };
@@ -256,9 +260,13 @@ export function create(mount) {
   // so this builds synchronously (a browser <img> cannot set the token header, so it rides the
   // query, exactly like the log-download route). Null until the token is in hand — the row then
   // shows a letter-avatar instead.
-  function iconUrl(pkg) {
+  // `userId` says which Android user to look the package up in: an app installed only in a work
+  // profile has no record in user 0 for the daemon to read an icon from.
+  function iconUrl(pkg, userId) {
     if (!iconToken || !pkg) return null;
-    return API_BASE + "/icon?pkg=" + encodeURIComponent(pkg) + "&token=" + encodeURIComponent(iconToken);
+    return API_BASE + "/icon?pkg=" + encodeURIComponent(pkg) +
+      "&user=" + encodeURIComponent(userId || 0) +
+      "&token=" + encodeURIComponent(iconToken);
   }
 
   function renderScopeView() {
@@ -273,7 +281,7 @@ export function create(mount) {
       packages: packagesCache,
       claimedByOther: claimedByOther(scoping),
       firstAppUid: (packagesCache && packagesCache.firstAppUid) || 10000,
-      search: scopeSearch, filter: scopeFilter, sort: scopeSort,
+      search: scopeSearch, filter: scopeFilter, userFilter: scopeUserFilter, sort: scopeSort,
       loading: scopeLoading, error: scopeError, iconUrl,
       // The daemon's auto-include truth, and whether the draft has diverged from what it resolved.
       // The view states "auto-include updates when you save" off pendingSave rather than predicting
@@ -350,6 +358,7 @@ export function create(mount) {
     scoping = name;
     scopeSearch = "";
     scopeFilter = "recent";
+    scopeUserFilter = null;
     scopeSort = "freq";
     scopeError = null;
     // Draft = a private copy of the profile's current picks. The Scope page mutates this alone;
@@ -489,14 +498,18 @@ export function create(mount) {
   }
 
   // The uid an entry resolves to, from the cached device list — so a system/shell pick can be
-  // confirmed before it lands. A uid: token carries its uid directly; a package is looked up in
-  // the /packages inventory. Returns -1 when unknown (uninstalled package: no privileged risk).
+  // confirmed before it lands. A uid: token carries its uid directly; a package entry is looked up
+  // in the /packages inventory, matched on the entry (package AND user) so a work profile's copy
+  // resolves to its own uid rather than the primary user's. Returns -1 when unknown (uninstalled
+  // package: no privileged risk).
   function uidForEntry(entry) {
     const m = /^uid:(\d+)$/.exec(entry);
     if (m) return Number(m[1]);
     if (packagesCache && Array.isArray(packagesCache.apps)) {
       for (const row of packagesCache.apps) {
-        if ((row.packages || []).includes(entry)) return row.uid;
+        for (const p of (row.packages || [])) {
+          if (entryToken(p, row.userId || 0) === entry) return row.uid;
+        }
       }
     }
     return -1;
@@ -514,7 +527,9 @@ export function create(mount) {
         // confirm it explicitly so a mis-tap on a low uid can't silently target system_server.
         const uid = uidForEntry(entry);
         const firstAppUid = (packagesCache && packagesCache.firstAppUid) || 10000;
-        if (uid >= 0 && uid < firstAppUid) {
+        // The APP id decides: a secondary user's system uid is 1001000, above firstAppUid but no
+        // less privileged than user 0's 1000.
+        if (uid >= 0 && uid % 100000 < firstAppUid) {
           const ok = await confirmDialog(
             `Target privileged uid ${uid}?\n\nThis is a system/shell uid (e.g. shell, system_server), not a normal app. Only do this if you know exactly why.`,
             { confirmLabel: "Target it", danger: true });
@@ -546,6 +561,7 @@ export function create(mount) {
     // The in-field search button / Enter: render right now rather than on the debounce.
     onSearchSubmit() { clearTimeout(scopeSearchTimer); renderScopeView(); },
     onSetFilter(id) { scopeFilter = id; renderScopeView(); },
+    onSetUserFilter(id) { scopeUserFilter = id; renderScopeView(); },
     onOpenSort() { openSortSheet(); },
     // The three bulk ops act on the visible entries the view computed, each { add, cur }:
     // `add` is the entry a select would add, `cur` the entry currently selecting the row.
