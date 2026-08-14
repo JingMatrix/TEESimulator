@@ -7,7 +7,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
 import java.lang.reflect.InvocationTargetException
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -68,6 +67,10 @@ object Harvester {
     private const val TAG_VENDOR_PATCHLEVEL = 718
     private const val TAG_BOOT_PATCHLEVEL = 719
     private const val TAG_MODULE_HASH = 724
+    // The full KeyMint Tag value for MODULE_HASH (TagType.BYTES | 724 = 0x900002D4) — what
+    // IKeystoreService.getSupplementaryAttestationInfo expects, distinct from the cert extension's raw
+    // tag number 724 above. Same constant KeyStoreManager.MODULE_HASH resolves to.
+    private const val KM_TAG_MODULE_HASH = -1879047468
 
     // Attestation-ID tags (device properties). Captured so we can provision them back,
     // letting an app's device-ID attestation request succeed against the real values.
@@ -214,6 +217,12 @@ object Harvester {
         private fun effectiveBoot(field: String, captured: ByteArray): ByteArray =
             overrides[field]?.value?.let { hexBytes(it) } ?: captured
 
+        /** The MODULE_HASH we present: the override (hex, synthesized when the leaf omitted the tag)
+         *  when active, else the raw capture. Null only when neither exists — the lib then omits the
+         *  tag, and its v4-only gate omits it for older profiles regardless. */
+        fun effectiveModuleHash(): ByteArray? =
+            overrides["moduleHash"]?.value?.let { hexBytes(it) } ?: moduleHash
+
         private fun capturedString(field: String): String =
             when (field) {
                 "serial" -> serial
@@ -257,8 +266,9 @@ object Harvester {
             sdk == 30 -> 4 // Android 11 (Keymaster 4.1)
             sdk <= 32 -> 100 // Android 12 / 12L (KeyMint 1.0)
             sdk == 33 -> 200 // Android 13 (KeyMint 2.0)
-            sdk == 34 -> 300 // Android 14 (KeyMint 3.0)
-            else -> 400 // Android 15+ (KeyMint 4.0)
+            sdk <= 35 -> 300 // Android 14, 15 (KeyMint 3.0; Android 15 did not bump KeyMint)
+            sdk == 36 -> 400 // Android 16 (KeyMint 4.0; first release to carry MODULE_HASH)
+            else -> 500 // Android 17+ (KeyMint 5.0)
         }
 
     /** The `keymasterVersion` matching an `attestationVersion` (same derivation as the TA's cert.rs):
@@ -739,10 +749,11 @@ object Harvester {
         val rawBootKey = verifiedBootKey ?: ByteArray(32)
         val rawBootHash = verifiedBootHash ?: ByteArray(32)
 
-        // When the leaf omits MODULE_HASH (older HAL versions do), deduce it from /apex exactly the way
-        // Android's attestation and keystore2 build it, so a key attested with it still verifies. The RAW
-        // capture stays null; the deduced value is an override, shown honestly as synthesized.
-        if (capturedModuleHash == null) fab["moduleHash"] = computeModuleHash().toHex()
+        // When the leaf omits MODULE_HASH, present keystore2's own getSupplementaryAttestationInfo blob
+        // (SHA-256'd), or the /apex/apex-info-list.xml reconstruction as a fallback (see resolveModuleHash).
+        // The RAW capture stays null; this deduced value is a synthesized override. Resolver re-derives it
+        // live at each commit, so this persisted snapshot is only a seed.
+        if (capturedModuleHash == null) fab["moduleHash"] = resolveModuleHash().toHex()
 
         // Device-identity ids parsed per tag. An empty value means the tag was ABSENT from the leaf —
         // device-properties attestation omits imei/meid/serial — not a parse failure.
@@ -797,112 +808,101 @@ object Harvester {
         ASN1Integer.getInstance(t.baseObject.toASN1Primitive()).positiveValue.toInt()
 
     // --- module hash deduction --------------------------------------------------
-    // When the harvested leaf omits MODULE_HASH (tag 724) — older HAL versions do, and a failed
-    // harvest has no leaf at all — the reference TA still expects the value Android's attestation
-    // would carry: the SHA-256 over a DER SET OF SEQUENCE{ OCTET_STRING name, INTEGER version } built
-    // from every active APEX/module, the SET's members ordered by the DER encoding of the name alone.
-    // We reproduce that structure byte-for-byte so a key attested with the deduced hash still verifies.
+    // getSupplementaryAttestationInfo(MODULE_HASH) returns a DER blob whose SHA-256 is the MODULE_HASH
+    // tag (724), so that digest is exactly what our attested tag must carry. We take it from keystore2
+    // directly when available; otherwise we reproduce it from apexd's own module list — a DER SET OF
+    // SEQUENCE{ OCTET_STRING name, INTEGER version } over every active APEX, members ordered by the DER
+    // encoding of the name alone (keystore2's maintenance.rs encode_module_info), SHA-256'd.
 
-    /** Active APEX packages as (name, version), read from /apex the way apexd exposes them. */
-    private val apexInfos: List<Pair<String, Long>> by lazy {
-        val root = File("/apex")
-        if (!root.exists() || !root.isDirectory) return@lazy emptyList()
-        val results = mutableListOf<Pair<String, Long>>()
-        root.listFiles()?.forEach { file ->
-            if (!file.isDirectory) return@forEach
-            val name = file.name
-            if (name.startsWith(".")) return@forEach // "." / ".."
-            if (name.contains("@")) return@forEach // versioned mount points
-            if (name == "sharedlibs") return@forEach
-            val manifest = File(file, "apex_manifest.pb")
-            if (manifest.exists()) {
-                runCatching {
-                    val bytes = FileInputStream(manifest).use { it.readBytes() }
-                    ApexManifestParser(bytes).parse()?.let { results.add(it) }
-                }
-            }
+    /**
+     * The MODULE_HASH to attest. `getSupplementaryAttestationInfo(MODULE_HASH)` returns a DER blob (the
+     * stored `ENCODED_MODULE_INFO`, see keystore2's service.rs) whose SHA-256 is the tag-724 value, so we
+     * must present that exact digest. Precedence:
+     *   1. keystore2's own `getSupplementaryAttestationInfo(MODULE_HASH)`, SHA-256'd — the exact blob
+     *      keystore2 stores, so the digest matches by construction. Available once keystore2 has latched
+     *      the info at boot.
+     *   2. a reconstruction from apexd's output file `/apex/apex-info-list.xml` ([apexInfoListModules]),
+     *      DER-encoded and hashed exactly as keystore2's maintenance.rs does (same moduleName + versionCode
+     *      source apexd feeds getActivePackages) — used when keystore2 has no value yet. apexd writes the
+     *      file once after activation completes, so it is never partially populated.
+     * Returns 32 zero bytes only if both are unavailable (Resolver then keeps the persisted value).
+     */
+    fun resolveModuleHash(): ByteArray {
+        Keystore2Service.getSupplementaryAttestationInfo(KM_TAG_MODULE_HASH)?.let { der ->
+            SystemLogger.info("moduleHash: via keystore2 getSupplementaryAttestationInfo (${der.size} DER bytes)")
+            return sha256(der)
         }
-        results.distinctBy { it.first }
+        apexInfoListModules()?.let { modules ->
+            SystemLogger.info("moduleHash: keystore2 info unavailable; via /apex/apex-info-list.xml (${modules.size} modules)")
+            return sha256(moduleInfoDer(modules))
+        }
+        SystemLogger.warning("moduleHash: keystore2 and /apex/apex-info-list.xml both unavailable; no module hash")
+        return ByteArray(32)
     }
 
     /**
-     * The moduleHash Android's attestation would report. BouncyCastle's DERSet would re-sort its
-     * members by their whole encoding, but keystore2 orders by the DER-encoded name only, so the SET
-     * is assembled and tagged by hand: sort the SEQUENCE encodings by their name's encoding, then wrap
-     * the concatenation in a DER SET (tag 0x31) and SHA-256 it. Returns 32 zero bytes on any failure.
+     * Option 2 for [resolveModuleHash]: the active APEX set read from apexd's canonical output file,
+     * `/apex/apex-info-list.xml` — the same (moduleName, versionCode) pairs apexd feeds getActivePackages,
+     * but as a plain root-readable file instead of an IApexService binder call. apexd writes it once after
+     * every module is activated, so (unlike a live directory scan) it is never partially populated.
+     * Attributes are read individually, not by position, since XML attribute order is not guaranteed.
+     * Returns null if the file is absent/unreadable/empty.
      */
-    private fun computeModuleHash(): ByteArray =
-        runCatching {
-            val members =
-                apexInfos.map { (name, version) ->
-                    val nameOctet = DEROctetString(name.toByteArray(Charsets.UTF_8))
-                    val seq =
-                        DERSequence(
-                            ASN1EncodableVector().apply {
-                                add(nameOctet)
-                                add(ASN1Integer(version))
-                            }
-                        )
-                    nameOctet.encoded to seq.encoded
+    private fun apexInfoListModules(): List<Pair<String, Long>>? {
+        val file = File("/apex/apex-info-list.xml")
+        if (!file.exists()) return null
+        return runCatching {
+            val xml = file.readText()
+            val nameRe = Regex("moduleName=\"([^\"]*)\"")
+            val versionRe = Regex("versionCode=\"([^\"]*)\"")
+            val activeRe = Regex("isActive=\"([^\"]*)\"")
+            Regex("<apex-info\\b[^>]*>")
+                .findAll(xml)
+                .mapNotNull { match ->
+                    val tag = match.value
+                    if (activeRe.find(tag)?.groupValues?.get(1) != "true") return@mapNotNull null
+                    val name = nameRe.find(tag)?.groupValues?.get(1) ?: return@mapNotNull null
+                    val version = versionRe.find(tag)?.groupValues?.get(1)?.toLongOrNull() ?: return@mapNotNull null
+                    name to version
                 }
-            val payload = ByteArrayOutputStream()
-            members
-                .sortedWith { a, b -> compareBytes(a.first, b.first) }
-                .forEach { payload.write(it.second) }
-            MessageDigest.getInstance("SHA-256").digest(derSet(payload.toByteArray()))
+                .toList()
+                .ifEmpty { null }
         }
             .getOrElse {
-                SystemLogger.error("Failed to deduce module hash from /apex", it)
-                ByteArray(32)
+                SystemLogger.warning("apexInfoListModules: failed to parse /apex/apex-info-list.xml", it)
+                null
             }
-
-    /** Minimal apex_manifest.pb reader: proto field 1 = name (string), field 2 = version (int64). */
-    private class ApexManifestParser(private val data: ByteArray) {
-        private var pos = 0
-
-        fun parse(): Pair<String, Long>? {
-            var name: String? = null
-            var version: Long? = null
-            while (pos < data.size) {
-                val tag = readVarint()
-                val field = tag ushr 3
-                val wire = (tag and 0x07).toInt()
-                when (field) {
-                    1L -> {
-                        val len = readVarint().toInt()
-                        if (pos + len > data.size) return null
-                        name = String(data, pos, len, Charsets.UTF_8)
-                        pos += len
-                    }
-                    2L -> version = readVarint()
-                    else -> skip(wire)
-                }
-            }
-            return if (name != null && version != null) name to version else null
-        }
-
-        private fun readVarint(): Long {
-            var value = 0L
-            var shift = 0
-            while (pos < data.size) {
-                val b = data[pos++].toInt()
-                value = value or ((b and 0x7F).toLong() shl shift)
-                if (b and 0x80 == 0) return value
-                shift += 7
-            }
-            return value
-        }
-
-        private fun skip(wire: Int) {
-            when (wire) {
-                0 -> readVarint()
-                1 -> pos += 8
-                2 -> pos += readVarint().toInt()
-                5 -> pos += 4
-                else -> throw IllegalStateException("unknown wire type $wire")
-            }
-        }
     }
+
+    /**
+     * DER-encode a module list the way keystore2 does (maintenance.rs `encode_module_info`): a SET OF
+     * SEQUENCE{ OCTET_STRING name, INTEGER version }, the SET ordered by each name's OCTET_STRING encoding
+     * only (keystore2's `DerOrd for ModuleInfo` sorts by name, not the whole element as strict X.690
+     * would). BouncyCastle's DERSet would re-sort by the whole encoding, so the SET is assembled and
+     * tagged by hand: sort the SEQUENCE encodings by their name's encoding, then wrap in a DER SET (0x31).
+     */
+    private fun moduleInfoDer(infos: List<Pair<String, Long>>): ByteArray {
+        val members =
+            infos.map { (name, version) ->
+                val nameOctet = DEROctetString(name.toByteArray(Charsets.UTF_8))
+                val seq =
+                    DERSequence(
+                        ASN1EncodableVector().apply {
+                            add(nameOctet)
+                            add(ASN1Integer(version))
+                        }
+                    )
+                nameOctet.encoded to seq.encoded
+            }
+        val payload = ByteArrayOutputStream()
+        members
+            .sortedWith { a, b -> compareBytes(a.first, b.first) }
+            .forEach { payload.write(it.second) }
+        return derSet(payload.toByteArray())
+    }
+
+    private fun sha256(bytes: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(bytes)
 
     /** Unsigned lexicographic byte comparison — the order DER uses for its SET members. */
     private fun compareBytes(a: ByteArray, b: ByteArray): Int {
@@ -1081,7 +1081,7 @@ object Harvester {
                         "osPatchLevel" to osPatchLevel.toString(),
                         "vendorPatchLevel" to vendorPatchLevel.toString(),
                         "bootPatchLevel" to bootPatchLevel.toString(),
-                        "moduleHash" to computeModuleHash().toHex(),
+                        "moduleHash" to resolveModuleHash().toHex(),
                     ),
                     zero,
                     zero,

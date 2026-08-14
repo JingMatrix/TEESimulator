@@ -12,8 +12,9 @@ import org.json.JSONObject
  * common/control.cpp ApplyConfig().
  *
  * Field names mirror control.cpp exactly: top level: type, epoch, bootInfo, profiles bootInfo:
- * verifiedBootKey(b64), verifiedBootHash(b64), deviceLocked, verifiedBootState, strongBoxAvailable,
- * attestVersionTee, attestVersionStrongBox profile: id, keyboxB64, mode, securityLevel(int),
+ * verifiedBootKey(b64), verifiedBootHash(b64), moduleHash(b64, optional), deviceLocked,
+ * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox
+ * profile: id, keyboxB64, mode, securityLevel(int),
  * osVersion, osPatchLevel, vendorPatchLevel,
  * bootPatchLevel, deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name
  * entry verbatim (kept even when not installed, since a name-match still fires on a later install);
@@ -40,6 +41,17 @@ object Resolver {
                 // capture. Never all-zero, so the attested key still verifies.
                 put("verifiedBootKey", b64.encodeToString(harvest.effectiveBootKey()))
                 put("verifiedBootHash", b64.encodeToString(harvest.effectiveBootHash()))
+                // The MODULE_HASH to attach to generation-mode keys, so they carry the tag keystore2
+                // sends the real HAL only once per boot (and never resends to a TA built afterwards).
+                // Re-derived live at each commit from keystore2's own getSupplementaryAttestationInfo blob
+                // (SHA-256'd) — the exact digest keystore2 pushed to the real HAL — so it stays correct even
+                // after an APEX/Play-system update changes the module set; the persisted capture/override
+                // is only a fallback when that live source is unavailable. Emitted only for KeyMint v4+
+                // attestations (the TA gates on version), so an older profile never carries it.
+                val moduleHash =
+                    Harvester.resolveModuleHash().takeIf { hash -> hash.any { it.toInt() != 0 } }
+                        ?: harvest.effectiveModuleHash()
+                moduleHash?.let { put("moduleHash", b64.encodeToString(it)) }
                 // Always present a locked, Verified boot state. Module users run unlocked bootloaders, and
                 // reporting the device's real state (unlocked / Unverified) fails attestation by
                 // construction. These are the "required" overrides the WebUI shows read-only.
