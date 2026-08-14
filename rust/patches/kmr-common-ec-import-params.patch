@@ -1,0 +1,52 @@
+diff --git a/common/src/crypto/ec.rs b/common/src/crypto/ec.rs
+index 722bebe..37d93ec 100644
+--- a/common/src/crypto/ec.rs
++++ b/common/src/crypto/ec.rs
+@@ -414,21 +414,42 @@ fn import_pkcs8_key_impl(key_info: &pkcs8::PrivateKeyInfo) -> Result<KeyMaterial
+                     key_info.algorithm.oid
+                 )
+             })?;
+-            let curve_oid = algo_params
++            let curve_oid: pkcs8::ObjectIdentifier = algo_params
+                 .decode_as()
+                 .map_err(|_e| km_err!(InvalidArgument, "imported key has no OID parameter"))?;
++
++            // The inner ECPrivateKey (SEC1) may legally omit its optional parameters field
++            // (RFC 5915), since the curve is already named by the PKCS#8 AlgorithmIdentifier.
++            // BoringSSL's strict SEC1 parser rejects such keys with MISSING_PARAMETERS, so
++            // normalize the encoding by injecting the curve OID before it is stored in the
++            // keyblob. The real TEE HALs accept the parameterless form, and apps import it.
++            let sec1_key = sec1::EcPrivateKey::from_der(key_info.private_key)
++                .map_err(|e| der_err!(e, "failed to parse inner SEC1 EC private key"))?;
++            let private_key = if sec1_key.parameters.is_none() {
++                let normalized = sec1::EcPrivateKey {
++                    private_key: sec1_key.private_key,
++                    parameters: Some(sec1::EcParameters::NamedCurve(curve_oid.clone())),
++                    public_key: sec1_key.public_key,
++                };
++                normalized
++                    .to_der()
++                    .map_err(|e| der_err!(e, "failed to re-encode inner SEC1 EC private key"))?
++            } else {
++                try_to_vec(key_info.private_key)?
++            };
++
+             let (curve, key) = match curve_oid {
+                 ALGO_PARAM_P224_OID => {
+-                    (EcCurve::P224, Key::P224(NistKey(try_to_vec(key_info.private_key)?)))
++                    (EcCurve::P224, Key::P224(NistKey(private_key)))
+                 }
+                 ALGO_PARAM_P256_OID => {
+-                    (EcCurve::P256, Key::P256(NistKey(try_to_vec(key_info.private_key)?)))
++                    (EcCurve::P256, Key::P256(NistKey(private_key)))
+                 }
+                 ALGO_PARAM_P384_OID => {
+-                    (EcCurve::P384, Key::P384(NistKey(try_to_vec(key_info.private_key)?)))
++                    (EcCurve::P384, Key::P384(NistKey(private_key)))
+                 }
+                 ALGO_PARAM_P521_OID => {
+-                    (EcCurve::P521, Key::P521(NistKey(try_to_vec(key_info.private_key)?)))
++                    (EcCurve::P521, Key::P521(NistKey(private_key)))
+                 }
+                 oid => {
+                     return Err(km_err!(
