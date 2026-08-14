@@ -179,11 +179,12 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
   if (const tjson::Value *e = msg.get("epoch")) epoch = static_cast<uint64_t>(e->as_int(0));
 
   // Device-wide boot info.
-  std::vector<uint8_t> vb_key, vb_hash;
+  std::vector<uint8_t> vb_key, vb_hash, module_hash;
   TsBootInfo boot{};
   if (const tjson::Value *bi = msg.get("bootInfo")) {
     if (const tjson::Value *k = bi->get("verifiedBootKey")) Base64Decode(k->as_string(), vb_key);
     if (const tjson::Value *h = bi->get("verifiedBootHash")) Base64Decode(h->as_string(), vb_hash);
+    if (const tjson::Value *m = bi->get("moduleHash")) Base64Decode(m->as_string(), module_hash);
     boot.device_locked = bi->get("deviceLocked") ? bi->get("deviceLocked")->as_bool(true) : true;
     boot.verified_boot_state =
         bi->get("verifiedBootState") ? int32_t(bi->get("verifiedBootState")->as_int(0)) : 0;
@@ -203,6 +204,8 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
   boot.verified_boot_key_len = vb_key.size();
   boot.verified_boot_hash = vb_hash.data();
   boot.verified_boot_hash_len = vb_hash.size();
+  boot.module_hash = module_hash.data();
+  boot.module_hash_len = module_hash.size();
   teesim_cfg_begin(&boot);
 
   const tjson::Value *profiles = msg.get("profiles");

@@ -58,11 +58,18 @@ std::mutex g_cfg_mu;
 std::vector<Profile> g_profiles;
 TaPtr g_default_ta;  // serves ops on our blobs; any profile's TA decrypts them
 bool g_strongbox_ok = false;  // device can patch real StrongBox keys; else StrongBox forces generation
+// The device-wide MODULE_HASH to seed a freshly built TA with, so a generation-mode key carries the
+// tag keystore2 only sends once per boot (and never resends to a TA built afterwards). Preference:
+// the exact bytes keystore2 pushed via setAdditionalAttestationInfo, captured below; the daemon's own
+// computed value (g_stage_module_hash) is only a fallback for when we never saw that one-shot call.
+// Guarded by g_cfg_mu. Empty until either source provides one.
+std::vector<uint8_t> g_module_hash;
 
 // Staging state built up by teesim_cfg_begin/add_profile before the swap.
 std::vector<Profile> g_staging;
 std::vector<uint8_t> g_stage_vb_key;
 std::vector<uint8_t> g_stage_vb_hash;
+std::vector<uint8_t> g_stage_module_hash;  // MODULE_HASH to seed each TA with at creation (may be empty)
 bool g_stage_locked = true;
 int32_t g_stage_vb_state = 0;
 bool g_stage_strongbox_ok = false;
@@ -160,6 +167,20 @@ std::vector<TaPtr> AllProfileTas() {
   tas.reserve(g_profiles.size());
   for (const auto& p : g_profiles) tas.push_back(p.ta);
   return tas;
+}
+
+// Record `hash` on `ta` as Tag::MODULE_HASH so a generation-mode key it mints carries the module
+// hash. No-op for an empty hash. Setting the value a TA already holds is idempotent in the reference
+// TA (a repeat of the same bytes is ignored), so the later keystore2 forward over the same value is
+// harmless; only a genuinely different value is rejected, which this logs.
+void SeedModuleHash(const TaPtr& ta, const std::vector<uint8_t>& hash) {
+  if (hash.empty() || !ta) return;
+  KmParam p{};
+  p.tag = static_cast<uint32_t>(Tag::MODULE_HASH);
+  p.blob = hash.data();
+  p.blob_len = hash.size();
+  int32_t rc = teesim_km_set_additional_attestation_info(ta.get(), &p, 1);
+  if (rc != 0) LOGW("SeedModuleHash: TA rejected (%d)", rc);
 }
 
 // --- AIDL KeyParameter <-> flat KmParam --------------------------------------
@@ -743,6 +764,14 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
   // key we attest carries the same value keystore2 pushes to the real HAL and a verifier that checks
   // it still validates. Applied to every profile since the info is device-wide; best-effort per TA.
   ndk::ScopedAStatus setAdditionalAttestationInfo(const std::vector<KeyParameter>& info) override {
+    // Latch keystore2's MODULE_HASH as the authoritative value to seed TAs built later this boot: it
+    // is the exact bytes the real HAL got, so a verifier comparing against a genuine device matches.
+    for (const auto& p : info) {
+      if (p.tag == Tag::MODULE_HASH && p.value.getTag() == KeyParameterValue::blob) {
+        std::lock_guard<std::mutex> lk(g_cfg_mu);
+        g_module_hash = p.value.get<KeyParameterValue::blob>();
+      }
+    }
     auto km = ToKmVec(info);
     for (const auto& ta : AllProfileTas()) {
       int32_t rc = teesim_km_set_additional_attestation_info(ta.get(), km.data(), km.size());
@@ -888,6 +917,7 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
                         boot->verified_boot_key + boot->verified_boot_key_len);
   g_stage_vb_hash.assign(boot->verified_boot_hash,
                          boot->verified_boot_hash + boot->verified_boot_hash_len);
+  g_stage_module_hash.assign(boot->module_hash, boot->module_hash + boot->module_hash_len);
   g_stage_locked = boot->device_locked;
   g_stage_vb_state = boot->verified_boot_state;
   g_stage_strongbox_ok = boot->strongbox_available;
@@ -909,6 +939,18 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   prof.id = p->id ? p->id : "";
   prof.ta = WrapTa(ta);
   prof.patch_mode = p->mode && std::string(p->mode) == "patch";
+  // Seed the fresh TA with the device-wide MODULE_HASH so a generation-mode key it mints carries the
+  // tag, independent of keystore2's one-shot delivery. Prefer keystore2's captured bytes; fall back
+  // to the daemon's computed value when we never saw that call. The reference TA emits the tag only
+  // for KeyMint v4+ attestations, so seeding an older-version profile is harmless.
+  {
+    std::vector<uint8_t> seed;
+    {
+      std::lock_guard<std::mutex> lk(g_cfg_mu);
+      seed = g_module_hash.empty() ? g_stage_module_hash : g_module_hash;
+    }
+    SeedModuleHash(prof.ta, seed);
+  }
   for (int i = 0; i < p->n_packages && p->packages; ++i) {
     if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
   }

@@ -28,6 +28,11 @@ typedef struct {
   size_t verified_boot_key_len;
   const uint8_t *verified_boot_hash;
   size_t verified_boot_hash_len;
+  // SHA-256 the daemon computed over the device's active APEX/module set, to attach as
+  // Tag::MODULE_HASH on keys we mint. NULL/0 when unavailable; the TA emits the tag only for
+  // KeyMint v4+ attestations regardless, so an older-version profile never carries it.
+  const uint8_t *module_hash;
+  size_t module_hash_len;
   bool device_locked;
   int32_t verified_boot_state;
   bool strongbox_available;  // device can produce a real StrongBox-backed key; gates patch at that level

@@ -12,8 +12,9 @@ import org.json.JSONObject
  * common/control.cpp ApplyConfig().
  *
  * Field names mirror control.cpp exactly: top level: type, epoch, bootInfo, profiles bootInfo:
- * verifiedBootKey(b64), verifiedBootHash(b64), deviceLocked, verifiedBootState, strongBoxAvailable,
- * attestVersionTee, attestVersionStrongBox profile: id, keyboxB64, mode, securityLevel(int),
+ * verifiedBootKey(b64), verifiedBootHash(b64), moduleHash(b64, optional), deviceLocked,
+ * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox
+ * profile: id, keyboxB64, mode, securityLevel(int),
  * osVersion, osPatchLevel, vendorPatchLevel,
  * bootPatchLevel, deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name
  * entry verbatim (kept even when not installed, since a name-match still fires on a later install);
@@ -40,6 +41,11 @@ object Resolver {
                 // capture. Never all-zero, so the attested key still verifies.
                 put("verifiedBootKey", b64.encodeToString(harvest.effectiveBootKey()))
                 put("verifiedBootHash", b64.encodeToString(harvest.effectiveBootHash()))
+                // The MODULE_HASH to attach to generation-mode keys, so they carry the tag keystore2
+                // sends the real HAL only once per boot (and never resends to a TA built afterwards).
+                // The lib prefers keystore2's own captured bytes and uses this only as a fallback; it
+                // is emitted only for KeyMint v4+ attestations, so an older profile never carries it.
+                harvest.effectiveModuleHash()?.let { put("moduleHash", b64.encodeToString(it)) }
                 // Always present a locked, Verified boot state. Module users run unlocked bootloaders, and
                 // reporting the device's real state (unlocked / Unverified) fails attestation by
                 // construction. These are the "required" overrides the WebUI shows read-only.

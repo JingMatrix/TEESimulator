@@ -214,6 +214,12 @@ object Harvester {
         private fun effectiveBoot(field: String, captured: ByteArray): ByteArray =
             overrides[field]?.value?.let { hexBytes(it) } ?: captured
 
+        /** The MODULE_HASH we present: the override (hex, synthesized when the leaf omitted the tag)
+         *  when active, else the raw capture. Null only when neither exists — the lib then omits the
+         *  tag, and its v4-only gate omits it for older profiles regardless. */
+        fun effectiveModuleHash(): ByteArray? =
+            overrides["moduleHash"]?.value?.let { hexBytes(it) } ?: moduleHash
+
         private fun capturedString(field: String): String =
             when (field) {
                 "serial" -> serial
@@ -257,8 +263,9 @@ object Harvester {
             sdk == 30 -> 4 // Android 11 (Keymaster 4.1)
             sdk <= 32 -> 100 // Android 12 / 12L (KeyMint 1.0)
             sdk == 33 -> 200 // Android 13 (KeyMint 2.0)
-            sdk == 34 -> 300 // Android 14 (KeyMint 3.0)
-            else -> 400 // Android 15+ (KeyMint 4.0)
+            sdk <= 35 -> 300 // Android 14, 15 (KeyMint 3.0; Android 15 did not bump KeyMint)
+            sdk == 36 -> 400 // Android 16 (KeyMint 4.0; first release to carry MODULE_HASH)
+            else -> 500 // Android 17+ (KeyMint 5.0)
         }
 
     /** The `keymasterVersion` matching an `attestationVersion` (same derivation as the TA's cert.rs):

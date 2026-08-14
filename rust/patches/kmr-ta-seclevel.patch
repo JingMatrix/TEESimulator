@@ -1,5 +1,5 @@
 diff --git a/ta/src/cert.rs b/ta/src/cert.rs
-index ce07450..9d90f4b 100644
+index ce07450..39b4d20 100644
 --- a/ta/src/cert.rs
 +++ b/ta/src/cert.rs
 @@ -300,9 +300,21 @@ enum SecurityLevel {
@@ -25,7 +25,22 @@ index ce07450..9d90f4b 100644
      challenge: &'a [u8],
      app_id: &'a [u8],
      security_level: keymint::SecurityLevel,
-@@ -352,9 +364,9 @@ pub(crate) fn attestation_extension<'a>(
+@@ -333,6 +345,14 @@ pub(crate) fn attestation_extension<'a>(
+         keymint::SecurityLevel::Software => (params, &[]),
+         _ => (&[], params),
+     };
++    // Tag::MODULE_HASH (724) was introduced in KeyMint v4 (attestationVersion 400); no earlier
++    // KeyMint or Keymaster attestation carries it. Gate the additional info by the version this key
++    // is emitted at so the tag tracks that version even when the TA has a module hash recorded. The
++    // check is here (per emission) rather than at the TA's recorded state because a single TA attests
++    // at different versions per security level, so a dual-level device that reports v4 at TEE and v3
++    // at StrongBox stays honest at each level.
++    let additional_attestation_info: &[KeyParam] =
++        if attestation_version >= 400 { additional_attestation_info } else { &[] };
+     let sw_enforced = AuthorizationList::new(
+         sw_chars,
+         sw_params,
+@@ -352,9 +372,9 @@ pub(crate) fn attestation_extension<'a>(
      let sec_level = SecurityLevel::try_from(security_level as u32)
          .map_err(|_| km_err!(InvalidArgument, "invalid security level {security_level:?}"))?;
      let ext = AttestationExtension {
