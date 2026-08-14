@@ -1,0 +1,37 @@
+diff --git a/boringssl/src/ec.rs b/boringssl/src/ec.rs
+index ddecdd1..7f41132 100644
+--- a/boringssl/src/ec.rs
++++ b/boringssl/src/ec.rs
+@@ -45,10 +45,29 @@ fn private_key_from_der_for_group(
+ #[cfg(not(soong))]
+ fn private_key_from_der_for_group(
+     der: &[u8],
+-    _group: &openssl::ec::EcGroupRef,
++    group: &openssl::ec::EcGroupRef,
+ ) -> Result<openssl::ec::EcKey<openssl::pkey::Private>, openssl::error::ErrorStack> {
+-    // This doesn't work if the encoded data is missing the curve.
+-    openssl::ec::EcKey::private_key_from_der(der)
++    use foreign_types::ForeignTypeRef;
++    // Upstream rust-openssl has no equivalent of that modification, and its `private_key_from_der`
++    // names no group: `EC_KEY_parse_private_key` then rejects a SEC1 key that legally omits its
++    // optional parameters field (RFC 5915, the curve being named by the enclosing PKCS#8
++    // AlgorithmIdentifier) with MISSING_PARAMETERS, and conversely accepts one naming a curve
++    // other than the one the caller is about to use the key with. Reach for the same entry point
++    // the Android modification uses; openssl-sys binds it from BoringSSL's headers just as
++    // bssl-sys does.
++    //
++    // Safety: `cbs` borrows `der`, which BoringSSL only reads from and only for the duration of
++    // the call, as it does `group`. A successful parse returns a fresh `EC_KEY` whose sole
++    // reference `EcKey` takes ownership of.
++    unsafe {
++        ffi::init();
++        let mut cbs = ffi::CBS { data: der.as_ptr(), len: der.len() };
++        let parsed = ffi::EC_KEY_parse_private_key(&mut cbs, group.as_ptr());
++        if parsed.is_null() {
++            return Err(openssl::error::ErrorStack::get());
++        }
++        Ok(openssl::ec::EcKey::from_ptr(parsed))
++    }
+ }
+ 
+ /// [`crypto::Ec`] implementation based on BoringSSL.

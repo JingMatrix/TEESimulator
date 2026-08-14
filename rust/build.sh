@@ -32,11 +32,13 @@ fi
 # mismatch nor silently falls back to a different preinstalled NDK (CI runners preset ANDROID_NDK_ROOT).
 export ANDROID_NDK_HOME="$NDK_HOME" ANDROID_NDK_ROOT="$NDK_HOME" ANDROID_NDK="$NDK_HOME"
 
-# Adapt the reference TA to build under Cargo rather than Soong: the BoringSSL
-# backend (openssl-sys vs bssl-sys, kmr-crypto-boring.patch) and a per-request
-# attestation security level (kmr-ta-seclevel.patch). Each patch is applied to the
-# submodule working tree, idempotently — skipped when it already reverse-applies,
-# i.e. is already present.
+# Adapt the reference TA to build under Cargo rather than Soong — the BoringSSL backend
+# (openssl-sys vs bssl-sys, kmr-crypto-boring.patch) and the group-aware EC private key
+# parse that only Android's rust-openssl fork offers (kmr-crypto-boring-ec-group.patch) —
+# and to what an in-process TA can do: a per-request attestation security level
+# (kmr-ta-seclevel.patch) and auth tokens it holds no device HMAC key to verify
+# (kmr-ta-authtoken.patch). Each patch is applied to the submodule working tree,
+# idempotently — skipped when it already reverse-applies, i.e. is already present.
 for PATCH in "$HERE"/patches/*.patch; do
   if git -C "$ROOT/third_party/keymint" apply -p1 --reverse --check "$PATCH" 2>/dev/null; then
     :
