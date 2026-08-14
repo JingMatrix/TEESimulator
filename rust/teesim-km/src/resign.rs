@@ -70,9 +70,12 @@ impl Ta {
         let cert = Certificate::from_der(leaf).map_err(wrap("parse real leaf"))?;
         let mut tbs = cert.tbs_certificate;
 
-        // Sign with the keybox key matching the attested key's algorithm, and append that key's chain.
-        let is_ec = tbs.subject_public_key_info.algorithm.oid == ID_EC_PUBLIC_KEY;
-        let (batch_key, batch_chain) = self.sign_info.batch(is_ec);
+        // Sign with the keybox key matching the attested key's algorithm; batch() falls back to the
+        // keybox's other key when that algorithm is absent (an EC-only RKP keybox signs every leaf
+        // with its EC key) and reports which key it returned, so `is_ec` here is the signing key's
+        // algorithm — what the signature fields must describe, not the attested key's.
+        let want_ec = tbs.subject_public_key_info.algorithm.oid == ID_EC_PUBLIC_KEY;
+        let (batch_key, batch_chain, is_ec) = self.sign_info.batch(want_ec);
         let batch_leaf = batch_chain.first().ok_or_else(|| err("keybox chain is empty"))?;
         let batch_leaf =
             Certificate::from_der(&batch_leaf.encoded_certificate).map_err(wrap("parse keybox leaf"))?;
