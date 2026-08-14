@@ -343,7 +343,6 @@ pub unsafe extern "C" fn teesim_km_generate_key(
     ta: *mut Ta,
     params: *const KmParam,
     n_params: usize,
-    security_level: i32,
     ak_blob: *const u8,
     ak_blob_len: usize,
     ak_params: *const KmParam,
@@ -353,11 +352,12 @@ pub unsafe extern "C" fn teesim_km_generate_key(
     out: *mut *mut TsCreationResult,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let key_params = to_keyparams(params, n_params)?;
         let attestation_key =
             build_attestation_key(ak_blob, ak_blob_len, ak_params, ak_n_params, ak_issuer, ak_issuer_len)?;
-        let result = ta.generate_key(key_params, attestation_key, security_level)?;
+        let result = ta.generate_key(key_params, attestation_key)?;
         Ok(TsCreationResult::new(result))
     }) {
         Ok(r) => {
@@ -375,7 +375,6 @@ pub unsafe extern "C" fn teesim_km_import_key(
     ta: *mut Ta,
     params: *const KmParam,
     n_params: usize,
-    security_level: i32,
     key_format: i32,
     key_data: *const u8,
     key_data_len: usize,
@@ -388,6 +387,7 @@ pub unsafe extern "C" fn teesim_km_import_key(
     out: *mut *mut TsCreationResult,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let key_params = to_keyparams(params, n_params)?;
         let format = KeyFormat::n(key_format)
@@ -395,7 +395,7 @@ pub unsafe extern "C" fn teesim_km_import_key(
         let data = if key_data.is_null() { Vec::new() } else { slice::from_raw_parts(key_data, key_data_len).to_vec() };
         let attestation_key =
             build_attestation_key(ak_blob, ak_blob_len, ak_params, ak_n_params, ak_issuer, ak_issuer_len)?;
-        let result = ta.import_key(key_params, format, data, attestation_key, security_level)?;
+        let result = ta.import_key(key_params, format, data, attestation_key)?;
         Ok(TsCreationResult::new(result))
     }) {
         Ok(r) => {
@@ -420,6 +420,7 @@ pub unsafe extern "C" fn teesim_km_patch_attestation(
     out: *mut *mut TsCreationResult,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &*ta;
         let leaf = if leaf.is_null() { &[][..] } else { slice::from_raw_parts(leaf, leaf_len) };
         let certs = ta.patch_attestation(leaf)?;
@@ -517,6 +518,7 @@ pub unsafe extern "C" fn teesim_km_begin(
     out: *mut *mut TsBeginResult,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let purpose = KeyPurpose::n(purpose)
             .ok_or(OpError { code: ERR_UNKNOWN, msg: format!("bad purpose {purpose}") })?;
@@ -610,6 +612,7 @@ pub unsafe extern "C" fn teesim_km_update(
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
         ta.update(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
@@ -634,6 +637,7 @@ pub unsafe extern "C" fn teesim_km_update_aad(
     timestamp_token_ptr: *const TsTimestampToken,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let data = if input.is_null() { Vec::new() } else { slice::from_raw_parts(input, input_len).to_vec() };
         ta.update_aad(op_handle, data, auth_token(auth_token_ptr), timestamp_token(timestamp_token_ptr))
@@ -661,6 +665,7 @@ pub unsafe extern "C" fn teesim_km_finish(
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         ta.finish(
             op_handle,
@@ -683,7 +688,10 @@ pub unsafe extern "C" fn teesim_km_finish(
 /// See module docs.
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_abort(ta: *mut Ta, op_handle: i64) -> i32 {
-    match call(|| (&mut *ta).abort(op_handle)) {
+    match call(|| {
+        let _lk = crate::lock_ta();
+        (&mut *ta).abort(op_handle)
+    }) {
         Ok(()) => 0,
         Err(code) => code,
     }
@@ -695,7 +703,10 @@ pub unsafe extern "C" fn teesim_km_abort(ta: *mut Ta, op_handle: i64) -> i32 {
 /// `ta` is a valid TA handle.
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_early_boot_ended(ta: *mut Ta) -> i32 {
-    match call(|| (&mut *ta).early_boot_ended()) {
+    match call(|| {
+        let _lk = crate::lock_ta();
+        (&mut *ta).early_boot_ended()
+    }) {
         Ok(()) => 0,
         Err(code) => code,
     }
@@ -710,6 +721,7 @@ pub unsafe extern "C" fn teesim_km_set_additional_attestation_info(
     n_info: usize,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let params = to_keyparams(info, n_info)?;
         ta.set_additional_attestation_info(params)
@@ -726,6 +738,7 @@ pub unsafe extern "C" fn teesim_km_set_additional_attestation_info(
 #[no_mangle]
 pub unsafe extern "C" fn teesim_km_delete_key(ta: *mut Ta, key_blob: *const u8, key_blob_len: usize) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let blob = if key_blob.is_null() { &[][..] } else { slice::from_raw_parts(key_blob, key_blob_len) };
         (&mut *ta).delete_key(blob)
     }) {
@@ -747,6 +760,7 @@ pub unsafe extern "C" fn teesim_km_upgrade_key(
     out_len: *mut usize,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let blob = if key_blob.is_null() { &[][..] } else { slice::from_raw_parts(key_blob, key_blob_len) };
         let upgrade_params = to_keyparams(params, n_params)?;
@@ -779,6 +793,7 @@ pub unsafe extern "C" fn teesim_km_get_key_characteristics(
     out: *mut *mut TsCharacteristics,
 ) -> i32 {
     match call(|| {
+        let _lk = crate::lock_ta();
         let ta = &mut *ta;
         let blob = if key_blob.is_null() { &[][..] } else { slice::from_raw_parts(key_blob, key_blob_len) };
         let id = if app_id.is_null() { Vec::new() } else { slice::from_raw_parts(app_id, app_id_len).to_vec() };

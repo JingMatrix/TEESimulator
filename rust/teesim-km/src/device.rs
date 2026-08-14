@@ -41,6 +41,21 @@ impl crypto::MonotonicClock for Clock {
     }
 }
 
+/// Wall-clock time as milliseconds since the Unix epoch, backed by `CLOCK_REALTIME`.
+///
+/// This is the value keystore2 would stamp into `Tag::CREATION_DATETIME`; we need it
+/// because the emulation wrapper around this device's Keymaster 4.0 HAL reports a
+/// pre-KeyMint version, so keystore2 never adds the tag itself (see `ops::ensure_creation_datetime`).
+pub fn realtime_ms_since_epoch() -> i64 {
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // Safety: `time` is a valid structure that the call fills in.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut time) };
+    if rc < 0 {
+        return 0;
+    }
+    (time.tv_sec * 1000) + (time.tv_nsec / 1_000_000)
+}
+
 /// Stub remote-provisioning artifacts. The interceptor never routes
 /// IRemotelyProvisionedComponent calls here, so only `derive_bytes_from_hbk`
 /// needs to work (and only to be deterministic).

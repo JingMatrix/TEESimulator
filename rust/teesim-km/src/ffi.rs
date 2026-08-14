@@ -196,6 +196,7 @@ pub unsafe extern "C" fn teesim_km_process(
         if handle.is_null() || req_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
             return -1;
         }
+        let _lk = crate::lock_ta();
         let ta = &mut *handle;
         let req = slice::from_raw_parts(req_ptr, req_len);
         let rsp = ta.process(req);
@@ -236,6 +237,8 @@ pub unsafe extern "C" fn teesim_km_destroy(handle: *mut Ta) {
         return;
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
+        // Serialize against any in-flight operation on this handle before freeing it.
+        let _lk = crate::lock_ta();
         drop(Box::from_raw(handle));
     }));
 }

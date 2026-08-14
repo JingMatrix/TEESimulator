@@ -5,10 +5,10 @@
 // arguments coming from keystore2 have our marker stripped before they reach the
 // TA; blobs we hand back get the marker applied so later operations route here.
 
-use crate::{as_array, mark_blob, strip_marker, OpError, Ta};
+use crate::{as_array, device, mark_blob, strip_marker, OpError, Ta};
 use kmr_wire::keymint::{
-    AttestationKey, HardwareAuthToken, KeyCharacteristics, KeyCreationResult, KeyFormat, KeyParam,
-    KeyPurpose, SecurityLevel,
+    AttestationKey, DateTime, HardwareAuthToken, KeyCharacteristics, KeyCreationResult, KeyFormat,
+    KeyParam, KeyPurpose, Tag,
 };
 use kmr_wire::secureclock::TimeStampToken;
 use kmr_wire::{
@@ -63,87 +63,48 @@ impl Ta {
         Rsp::from_cbor_value(resp_value).map_err(|e| local(format!("{e:?}")))
     }
 
-    /// Apply a per-request attestation identity — security level and KeyMint HAL version — to the
-    /// inner TA for the duration of one generateKey/importKey, returning the previous pair to restore
-    /// afterwards. The record's `attestationSecurityLevel` / `keymasterSecurityLevel` and the
-    /// KeyCharacteristics `securityLevel` follow `hw_info.security_level`; its `attestationVersion`
-    /// follows the TA's raw `attestation_version` (and `keyMintVersion` is derived from it in cert.rs).
-    /// Overriding both makes the record reflect the real HAL the request came through: `security_level`
-    /// picks the level (0 Software, 1 TrustedEnvironment, 2 StrongBox) and the version harvested (or
-    /// fabricated) at that level (StrongBox falling back to the TEE version). A level outside the known
-    /// set leaves the TA's defaults in place.
-    fn override_attestation_identity(&mut self, security_level: i32) -> Option<(SecurityLevel, i32)> {
-        let level = match security_level {
-            0 => SecurityLevel::Software,
-            1 => SecurityLevel::TrustedEnvironment,
-            2 => SecurityLevel::Strongbox,
-            _ => return None,
-        };
-        let prev = (self.inner.security_level(), self.inner.attestation_version());
-        self.inner.set_security_level(level);
-        let version = match level {
-            SecurityLevel::Strongbox => self.attest_version_strongbox,
-            _ => self.attest_version_tee,
-        };
-        self.inner.set_attestation_version(version);
-        Some(prev)
-    }
-
-    /// generateKey. The returned key blob carries our marker. `security_level` is
-    /// the level of the HAL the request came through; the attestation is emitted at
-    /// that level, with the KeyMint version harvested for it (see
-    /// `override_attestation_identity`).
+    /// generateKey. The returned key blob carries our marker. This TA instance is fixed at one
+    /// security level, so the record's `attestationSecurityLevel` and version come from the instance
+    /// the request was routed to — no per-request override.
     pub fn generate_key(
         &mut self,
-        key_params: Vec<KeyParam>,
+        mut key_params: Vec<KeyParam>,
         attestation_key: Option<AttestationKey>,
-        security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
         log::info!(
-            "teesim_km: generate_key: {} param(s), security_level={}, attest_key={}",
+            "teesim_km: generate_key: {} param(s), security_level={:?}, attest_key={}",
             key_params.len(),
-            security_level,
+            self.inner.security_level(),
             attestation_key.is_some()
         );
-        let restore = self.override_attestation_identity(security_level);
+        ensure_creation_datetime(&mut key_params);
         let resp: Result<GenerateKeyResponse, OpError> =
             self.perform(GenerateKeyRequest { key_params, attestation_key });
-        if let Some((level, version)) = restore {
-            self.inner.set_security_level(level);
-            self.inner.set_attestation_version(version);
-        }
         let ret = resp?.ret;
         crate::resign::log_chain("teesim_km: generate_key result", &ret.certificate_chain);
         Ok(marked_result(ret))
     }
 
-    /// importKey. The returned key blob carries our marker. `security_level` is
-    /// the level of the HAL the request came through; the attestation is emitted at
-    /// that level, with the KeyMint version harvested for it (see
-    /// `override_attestation_identity`).
+    /// importKey. The returned key blob carries our marker. As with `generate_key`, the attestation
+    /// level and version follow this fixed-level TA instance.
     pub fn import_key(
         &mut self,
-        key_params: Vec<KeyParam>,
+        mut key_params: Vec<KeyParam>,
         key_format: KeyFormat,
         key_data: Vec<u8>,
         attestation_key: Option<AttestationKey>,
-        security_level: i32,
     ) -> Result<KeyCreationResult, OpError> {
         log::info!(
-            "teesim_km: import_key: {} param(s), format={:?}, {} key bytes, security_level={}, attest_key={}",
+            "teesim_km: import_key: {} param(s), format={:?}, {} key bytes, security_level={:?}, attest_key={}",
             key_params.len(),
             key_format,
             key_data.len(),
-            security_level,
+            self.inner.security_level(),
             attestation_key.is_some()
         );
-        let restore = self.override_attestation_identity(security_level);
+        ensure_creation_datetime(&mut key_params);
         let resp: Result<ImportKeyResponse, OpError> =
             self.perform(ImportKeyRequest { key_params, key_format, key_data, attestation_key });
-        if let Some((level, version)) = restore {
-            self.inner.set_security_level(level);
-            self.inner.set_attestation_version(version);
-        }
         let ret = resp?.ret;
         crate::resign::log_chain("teesim_km: import_key result", &ret.certificate_chain);
         Ok(marked_result(ret))
@@ -292,6 +253,27 @@ impl Ta {
         })?;
         Ok(resp.ret)
     }
+}
+
+/// Stamp `Tag::CREATION_DATETIME` into the parameters when keystore2 has not already done so.
+///
+/// On a genuine KeyMint device keystore2 always adds this tag before generateKey/importKey
+/// (`add_required_parameters`, gated on `hw_info.versionNumber >= 100`), and the reference TA both
+/// records it in the software-enforced attestation list and requires it whenever `INCLUDE_UNIQUE_ID`
+/// is set (unique-id derivation folds in the creation time). This device's KeyMaster 4.0 HAL is
+/// exposed to keystore2 through an emulation wrapper that reports version 40, so keystore2 skips the
+/// tag entirely: unique-id requests (Google Wallet / device-ID attestation) then fail with
+/// `INVALID_ARGUMENT`, and even ordinary attestations omit `creationDateTime` that a real device
+/// would carry. Adding it here reproduces the value keystore2 would have supplied.
+///
+/// Left untouched if the tag is already present, so a genuine KeyMint backend's value always wins.
+fn ensure_creation_datetime(params: &mut Vec<KeyParam>) {
+    if params.iter().any(|p| p.tag() == Tag::CreationDatetime) {
+        return;
+    }
+    let ms_since_epoch = device::realtime_ms_since_epoch();
+    log::info!("teesim_km: adding CreationDatetime={ms_since_epoch} (keystore2 omitted it)");
+    params.push(KeyParam::CreationDatetime(DateTime { ms_since_epoch }));
 }
 
 /// Apply our marker to the key blob inside a creation result.
