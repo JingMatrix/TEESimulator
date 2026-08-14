@@ -159,11 +159,22 @@ object Resolver {
         // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[] (caller-uid
         // fallback, effective set with no -1) resolved centrally by Scope, which also folds in raw
         // uid:N tokens and the autoIncludeNewApps expansion and logs the per-entry detail. The two
-        // arrays are independent here (uids[] may be longer or shorter than packages[]).
+        // arrays are independent here (uids[] may be longer or shorter than packages[]), so each
+        // carries its own companion: packageUsers[] says which Android user a name-match is confined
+        // to, and uidPackages[] names the package behind a uid for the legacy keystore1 path, which
+        // has to rebuild an attestation application id the caller never got to send.
         o.put("packages", JSONArray(scope.packageNames))
+        val packageUsers = JSONArray()
+        for (u in scope.packageUsers) packageUsers.put(u)
+        o.put("packageUsers", packageUsers)
         val uids = JSONArray()
-        for (u in scope.uids) uids.put(u)
+        val uidPackages = JSONArray()
+        for (u in scope.uids) {
+            uids.put(u)
+            uidPackages.put(scope.uidPackages[u] ?: "")
+        }
         o.put("uids", uids)
+        o.put("uidPackages", uidPackages)
         return o
     }
 

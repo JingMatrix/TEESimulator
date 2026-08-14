@@ -6,9 +6,11 @@ import org.json.JSONObject
 /**
  * The persistent key-request frequency memory behind the Scope picker ([Const.usageFile]). Every uid
  * that asks keystore for a key is recorded by the lib and polled by [App]; that poll turns per-uid
- * deltas into per-PACKAGE updates here. Package name (not uid) is the key because a uid is recycled on
- * reinstall/clear-data while the package identity the user recognises persists — so "com.foo asked for
- * 42 keys" survives an uninstall/reinstall and even a factory boot.
+ * deltas into per-APP updates here. The key is the app token — the package name, or `pkg@user` outside
+ * the primary user, exactly as [Scope.entryToken] spells it — and not the uid, because a uid is
+ * recycled on reinstall/clear-data while the app identity the user recognises persists, so "com.foo
+ * asked for 42 keys" survives an uninstall/reinstall and even a factory boot. The user is part of the
+ * key so a work profile's copy of an app keeps its own count rather than inheriting the other's.
  *
  * On disk: { "version":1, "apps": { "com.foo": { "count":42, "lastUsed":<epochMs> } } }. [count]
  * accumulates across boots (the poller adds deltas); [lastUsed] is the wall-clock epoch of the most

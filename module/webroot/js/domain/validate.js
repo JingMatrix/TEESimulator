@@ -33,7 +33,8 @@ export function validateProfile(name, profile) {
       if (f.required && apps.length < 1 && !autoIncludes) {
         errors.push({ field: f.key, msg: "At least one app is required (or turn on Auto-include new apps)." });
       }
-      // Each entry is a package name OR a raw uid: token (APP_ENTRY_RE), not package-only.
+      // Each entry is a package name, a package@user name, OR a raw uid: token (APP_ENTRY_RE),
+      // not package-only.
       for (const entry of apps) {
         if (typeof entry !== "string" || !APP_ENTRY_RE.test(entry)) {
           errors.push({ field: f.key, msg: `Invalid app entry: ${entry}` });

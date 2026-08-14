@@ -13,8 +13,10 @@ object ConfigStore {
 
     class ConfigException(message: String) : Exception(message)
 
-    // The two accepted apps[] entry shapes: a package name, or the advanced raw-uid token uid:N.
-    private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
+    // The accepted apps[] entry shapes: a package name (the app as installed for the primary user),
+    // the same name suffixed with @N for Android user N (a work profile or a secondary user), or the
+    // advanced raw-uid token uid:N.
+    private val PKG_RE = Regex("^[A-Za-z0-9_.]+(@\\d+)?$")
     private val UID_RE = Regex("^uid:\\d+$")
 
     /** One profile as written by the WebUI, before resolution against the device. */
@@ -106,13 +108,13 @@ object ConfigStore {
             if (apps.isEmpty() && !autoIncludeNewApps)
                 throw ConfigException("profile '$id' has no apps (and does not auto-include new apps)")
 
-            // Each apps[] entry is either a package name or the advanced raw-uid token uid:N. Validate
-            // the shape here so a typo can't silently slip through to routing, and keep the per-entry
-            // uniqueness (a package name OR a uid token may live in only one profile — the router needs
-            // exactly one owner per caller).
+            // Each apps[] entry is a package name, a pkg@user name, or the advanced raw-uid token
+            // uid:N. Validate the shape here so a typo can't silently slip through to routing, and keep
+            // the per-entry uniqueness (a package/user pair OR a uid token may live in only one profile
+            // — the router needs exactly one owner per caller).
             for (entry in apps) {
                 if (PKG_RE.matches(entry)) {
-                    // a plain package name — nothing further to validate
+                    // a package name, optionally naming the user it lives in — nothing further to validate
                 } else if (UID_RE.matches(entry)) {
                     val n = entry.substring(4).toIntOrNull()
                     if (n == null || n < 0)
@@ -121,7 +123,8 @@ object ConfigStore {
                         )
                 } else {
                     throw ConfigException(
-                        "profile '$id' app entry '$entry' is neither a package name nor a uid:N token"
+                        "profile '$id' app entry '$entry' is neither a package name (optionally " +
+                            "@<user>) nor a uid:N token"
                     )
                 }
                 val prev = seenApps.put(entry, id)
@@ -134,10 +137,12 @@ object ConfigStore {
                 // the SAME caller uid — a package vs a uid:N token (com.foo vs uid:10123), or two packages
                 // that share a uid (a sharedUserId pair). Both would put two profiles' keyboxes on one
                 // caller (last-writer-wins in routing). Reject on the effective uid too, when it resolves.
+                // Scope.parse is what splits pkg@user, so the uid compared here is the per-user one: the
+                // same package in two users is two callers and may legitimately sit in two profiles.
                 val uid =
                     when {
                         UID_RE.matches(entry) -> entry.substring(4).toIntOrNull() ?: -1
-                        else -> Packages.uidForPackage(entry)
+                        else -> Scope.parse(entry).uid
                     }
                 if (uid >= 0) {
                     val prevUid = seenUids.put(uid, id)
