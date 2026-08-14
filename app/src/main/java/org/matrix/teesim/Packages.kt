@@ -290,13 +290,26 @@ object Packages {
         return out
     }
 
+    /**
+     * Installed package names per Android user id, primary user first. One enumeration per user and
+     * nothing else — no labels, icons, install times or launcher probes — because the baseline paths
+     * that use it care only about which names exist, and would otherwise pay two binder calls per
+     * package for answers they throw away.
+     */
+    fun installedPackageNamesByUser(): Map<Int, Set<String>> {
+        val out = LinkedHashMap<Int, Set<String>>()
+        for (user in users())
+            out[user.id] = installedApplications(user.id).mapTo(HashSet()) { it.packageName }
+        return out
+    }
+
     /** Every installed package name on the device, in every user, for the auto-include baseline seed.
      *  Empty on failure so a broken enumeration never seeds an empty baseline that later mislabels
      *  everything new. The set is user-agnostic on purpose: the baseline answers "did this app exist
      *  when TEESimulator first ran", which is a question about the app, not about one user's copy. */
     fun allInstalledPackageNames(): Set<String> {
         val out = HashSet<String>()
-        for (user in users()) installedApplications(user.id).mapTo(out) { it.packageName }
+        for (names in installedPackageNamesByUser().values) out.addAll(names)
         if (out.isEmpty()) SystemLogger.warning("allInstalledPackageNames: enumeration came back empty")
         return out
     }

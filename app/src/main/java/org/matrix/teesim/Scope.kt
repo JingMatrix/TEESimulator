@@ -337,7 +337,8 @@ object Scope {
      * packages only. Left as it was, every app that lives solely in a work profile would read as
      * "installed after the baseline" and an auto-include profile would swallow the whole profile at
      * once on the first run after an update. Such a file is therefore topped up once — with the
-     * packages of every user — and rewritten as version 2.
+     * packages that live OUTSIDE the primary user, and only those, so user 0's half of the baseline
+     * keeps the moment it was frozen at — and rewritten as version 2.
      */
     private const val BASELINE_VERSION = 2
 
@@ -369,22 +370,39 @@ object Scope {
                 return set
             }
             if (set.isNotEmpty()) {
-                // Pre-multi-user baseline: fold today's every-user enumeration in. An enumeration that
-                // comes back empty is the same transient failure the seed path guards against, so the
-                // old set is returned UNCACHED and the top-up retries on the next call. Nothing is
-                // auto-included meanwhile: resolve() walks the very enumeration that just failed.
-                val live = Packages.allInstalledPackageNames()
-                if (live.isEmpty()) {
+                // Pre-multi-user baseline: fold in the apps the v1 file COULD NOT SEE, and only those
+                // — the packages that exist in some other user and not in the primary one.
+                //
+                // Emphatically NOT today's whole enumeration. The baseline's meaning is "what existed
+                // when TEESimulator first ran", and user 0's part of it is already recorded accurately;
+                // merging user 0's CURRENT list would advance that frame of reference to now, marking
+                // every app installed since the seed as pre-existing and silently dropping it out of
+                // auto-include — on a single-user device too, where this migration has nothing to add.
+                // A package is excluded when the primary user has it for the same reason: the baseline
+                // is keyed by bare name, so folding in a work profile's copy of an app user 0 also
+                // installed after the seed would lose that app just the same.
+                //
+                // An enumeration that comes back empty ENTIRELY is the transient failure the seed path
+                // guards against, so the old set is returned UNCACHED and the top-up retries on the
+                // next call. Nothing is auto-included meanwhile: resolve() walks the very enumeration
+                // that just failed. An empty result with a non-empty enumeration is not a failure — it
+                // is a device with nothing outside user 0, which upgrades to v2 adding nothing.
+                val byUser = Packages.installedPackageNamesByUser()
+                if (byUser.values.all { it.isEmpty() }) {
                     SystemLogger.warning(
                         "Scope: package enumeration empty; deferring the known_packages.json v$version -> " +
                             "v$BASELINE_VERSION top-up (will retry)"
                     )
                     return set
                 }
-                val merged = HashSet(set).apply { addAll(live) }
+                val primary = byUser[0].orEmpty()
+                val secondaryOnly =
+                    byUser.filterKeys { it != 0 }.values.flatten().filterNot { it in primary }.toSet()
+                val merged = HashSet(set).apply { addAll(secondaryOnly) }
                 SystemLogger.info(
-                    "Scope: topped up the v$version baseline with every user's packages — " +
-                        "${set.size} -> ${merged.size} package(s)"
+                    "Scope: topped up the v$version baseline with ${secondaryOnly.size} package(s) that " +
+                        "live outside the primary user — ${set.size} -> ${merged.size} package(s); " +
+                        "user 0's baseline is left at its original frame of reference"
                 )
                 writeBaseline(f, merged)
                 baselineCache = merged
