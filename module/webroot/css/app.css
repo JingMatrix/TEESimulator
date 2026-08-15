@@ -541,6 +541,11 @@ html, body { overscroll-behavior-y: contain; }
 .scope-filters { display: flex; align-self: stretch; max-width: 100%; flex: none; }
 .scope-filters .seg { flex: 1; padding: 8px 6px; white-space: nowrap; min-width: 0; }
 
+/* User filter: the same segmented control, drawn only on a device with more than one Android user.
+ * A user name can be long ("Work profile"), so segs scroll sideways instead of squeezing. */
+.scope-users { display: flex; align-self: stretch; max-width: 100%; flex: none; overflow-x: auto; }
+.scope-users .seg { flex: 1 0 auto; padding: 6px 12px; white-space: nowrap; font-size: 13px; min-height: 36px; }
+
 /* Ops row: the bulk selection verbs on the left, a live selected-count on the right. */
 .scope-ops { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; flex: none; padding: 2px 2px 0; }
 .scope-ops-btns { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
@@ -577,6 +582,10 @@ html, body { overscroll-behavior-y: contain; }
 .scope-name { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
 .scope-pkg { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .scope-pill { font-size: 10px; padding: 2px 8px; }
+/* Which Android user a row's copy of the app lives in. Neutral by default; a work profile is the
+ * one worth picking out, since its apps are the ones a profile most often means to target. */
+.scope-user { font-size: 10px; padding: 2px 8px; background: var(--chip); color: var(--muted); font-weight: 600; }
+.scope-user.managed { color: var(--accent); background: var(--accent-weak); }
 .scope-claimed { color: var(--muted); }
 /* Usage badges: a small accent dot when the app has asked for a key since boot, and a pill with
  * the recorded request count. */

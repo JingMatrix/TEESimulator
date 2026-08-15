@@ -363,9 +363,13 @@ object App {
             val pkg = Packages.packagesForUid(uid).firstOrNull()?.takeIf { it.isNotEmpty() }
                 ?: hint.takeIf { it.isNotEmpty() }
                 ?: continue // no resolvable package: leave the cursor untouched so the count isn't lost
+            // Remembered under the app token, not the bare package: a work profile's copy of an app is
+            // a different caller and deserves its own count, and the token is also what the Scope
+            // picker and config.json spell it as.
+            val token = Scope.entryToken(pkg, Packages.userIdOf(uid))
             // lastBootMs is on CLOCK_BOOTTIME; the same offset (wallNow - bootNowMs) maps it to wall time.
             val lastUsedEpoch = if (lastBootMs > 0) wallNow - (bootNowMs - lastBootMs) else wallNow
-            UsageStore.applyLibSample(uid, pkg, current, lastUsedEpoch)
+            UsageStore.applyLibSample(uid, token, current, lastUsedEpoch)
             recorded++
         }
         SystemLogger.info("usage poll: ${apps.length()} uid(s) reported, $recorded merged")

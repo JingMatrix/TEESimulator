@@ -105,6 +105,32 @@ object Keystore2Service {
     }
 
     /**
+     * Fetch keystore2's stored supplementary attestation info for [tag] (e.g. MODULE_HASH's DER-encoded
+     * module list) via `IKeystoreService.getSupplementaryAttestationInfo`. Returns the raw bytes, or null
+     * if the service is absent, the method is missing (pre-Android-16 keystore2), or keystore2 has not yet
+     * received the info (`INFO_NOT_AVAILABLE`) — logged either way. The method carries no permission gate
+     * in keystore2, so our context is accepted; the bytes are the exact blob keystore2 stores, and their
+     * SHA-256 is the MODULE_HASH tag value.
+     */
+    fun getSupplementaryAttestationInfo(tag: Int): ByteArray? {
+        return try {
+            val svc = connect() ?: return null
+            val method = svc.iface.methods.firstOrNull { it.name == "getSupplementaryAttestationInfo" }
+            if (method == null) {
+                SystemLogger.warning("Keystore2Service: getSupplementaryAttestationInfo absent (pre-v4 keystore2)")
+                return null
+            }
+            method.invoke(svc.service, tag) as? ByteArray
+        } catch (e: Throwable) {
+            val cause = (e as? InvocationTargetException)?.targetException ?: e
+            SystemLogger.warning(
+                "Keystore2Service.getSupplementaryAttestationInfo($tag) failed: ${cause.javaClass.simpleName}: ${cause.message}"
+            )
+            null
+        }
+    }
+
+    /**
      * Ask keystore2 to replace the stored public/attestation certificate ([publicCert], the leaf DER)
      * and its chain ([certificateChain], the DER concatenation of the rest) for the key with keyentry id
      * [keyId], leaving the key blob itself untouched. This is how a pre-existing key's attestation is

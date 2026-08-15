@@ -27,7 +27,7 @@
 
 import { el } from "./dom.js";
 import { t } from "../i18n.js";
-import { UID_RE } from "../domain/schema.js";
+import { UID_RE, splitEntry } from "../domain/schema.js";
 
 export function renderField(descriptor, value, onChange, context = {}) {
   switch (descriptor.type) {
@@ -228,6 +228,9 @@ function scopeWidget(d, value, ctx) {
       const isUid = UID_RE.test(entry);
       const missing = !isUid && installedSet && !installedSet.has(entry);
       const label = isUid ? entry : ((labelMap && labelMap.get && labelMap.get(entry)) || entry);
+      // Two users' copies of one app share a label, so the user rides along on the chip — without
+      // it a work-profile pick and the primary user's are the same word twice.
+      const userId = isUid ? 0 : splitEntry(entry).userId;
       return el("span", {
         class: "chip scope-chip" + (isUid ? " advanced" : "") + (missing ? " warn" : ""),
         title: isUid ? t("scope_advanced_uid_prefix") + entry.slice(4)
@@ -235,6 +238,7 @@ function scopeWidget(d, value, ctx) {
       }, [
         (isUid || missing) ? el("span", { class: "scope-chip-dot", "aria-hidden": "true" }) : null,
         el("span", { class: "chip-text" + (isUid ? " mono" : ""), text: label }),
+        userId ? el("span", { class: "chip-sub", text: t("scope_chip_user_prefix") + userId }) : null,
       ]);
     });
     if (apps.length > SCOPE_PREVIEW_MAX) {

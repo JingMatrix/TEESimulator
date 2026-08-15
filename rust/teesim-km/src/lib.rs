@@ -46,6 +46,27 @@ pub fn is_marked(blob: &[u8]) -> bool {
     blob.starts_with(BLOB_MARKER)
 }
 
+/// Serializes every C-ABI entry that dereferences a TA handle.
+///
+/// The reference `KeyMintTa` keeps mutable state (the in-flight operation table, RNG) and is not
+/// internally synchronized: a TA runs single-threaded in its own secure world. We instead run it
+/// in-process under keystore2's binder thread pool, which dispatches concurrent calls to the same
+/// device, so without this every `&mut *ta` in `capi`/`ffi` would alias across threads (UB). Held
+/// only for the duration of a single call — never across a begin/finish pair — so an open operation
+/// never blocks unrelated ones; the operation table keeps the per-op state between calls.
+///
+/// This is a coarse process-wide lock: it serializes across all TA instances, not just aliasing
+/// accesses to one. That is fine because key operations are infrequent; it could be refined to a
+/// per-instance lock later. Poison from a panic (caught by `capi::call`) is ignored — the guarded
+/// state is the TA's own and stays consistent enough to keep serving.
+static TA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the TA serialization lock; recovers from a poisoned mutex. Hold the returned guard across
+/// any `&mut *ta` / `Ta::process` access, then drop it.
+pub(crate) fn lock_ta() -> std::sync::MutexGuard<'static, ()> {
+    TA_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Assemble the software crypto backend around BoringSSL and the boot-time clock.
 fn crypto_impls() -> crypto::Implementation {
     crypto::Implementation {
@@ -76,11 +97,6 @@ pub struct Ta {
     /// The profile's root of trust (locked/Verified) as a DER `RootOfTrust` SEQUENCE, spliced into a
     /// real leaf's attestation extension in patch mode. Identical to what generation emits.
     patch_rot: Vec<u8>,
-    /// KeyMint HAL versions harvested at each level. The per-request override (see
-    /// `override_attestation_identity`) sets the record's attestation/keymint version to match the
-    /// HAL the request came through, so a generated key claims the real device's version.
-    attest_version_tee: i32,
-    attest_version_strongbox: i32,
     /// Profile OS / vendor / boot security levels. Patch mode writes these into a real leaf's
     /// attestation (see `patch_attestation`) so a patched record reports the profile's — typically
     /// fresh — patch level rather than the device's genuine, often stale, one. Generation feeds the
@@ -206,6 +222,16 @@ impl Ta {
 
         let mut inner = KeyMintTa::new(hw_info, RpcInfo::V3(rpc_info), crypto_impls(), dev);
 
+        // This TA instance is fixed at one security level (a real device runs a separate KeyMint
+        // instance per level). Pin the attestation record's version to the one harvested for that
+        // level so a generated key claims the real HAL's version; there is no per-request override.
+        let attestation_version = if security_level == SecurityLevel::Strongbox {
+            cfg.attest_version_strongbox
+        } else {
+            cfg.attest_version_tee
+        };
+        inner.set_attestation_version(attestation_version);
+
         let verified_boot_state = match cfg.verified_boot_state {
             1 => VerifiedBootState::SelfSigned,
             2 => VerifiedBootState::Unverified,
@@ -244,8 +270,6 @@ impl Ta {
             inner,
             sign_info,
             patch_rot,
-            attest_version_tee: cfg.attest_version_tee,
-            attest_version_strongbox: cfg.attest_version_strongbox,
             os_version: cfg.os_version,
             os_patchlevel: cfg.os_patchlevel,
             vendor_patchlevel: cfg.vendor_patchlevel,

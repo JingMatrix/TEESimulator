@@ -69,7 +69,8 @@ object KeyAdmin {
 
     private const val ATTEST_OID = "1.3.6.1.4.1.11129.2.1.17"
     // A plausible package name for the /icon query, so a caller can't smuggle path/argument junk through
-    // ?pkg= into PackageManager. Same shape ConfigStore validates apps[] package entries with.
+    // ?pkg= into PackageManager. Same shape ConfigStore validates apps[] package entries with (the
+    // user an icon should be looked up in rides in its own ?user= parameter, not in the name).
     private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
     // Upper bound on a request body (bytes). The admin socket is localhost + token-authed, but a bogus
     // Content-Length should still never be trusted as an allocation size.
@@ -408,7 +409,14 @@ object KeyAdmin {
                     JSONObject()
                         .put("id", s.profileId)
                         .put("autoInclude", s.autoInclude)
-                        .put("packages", JSONArray(s.packageNames))
+                        // The entries as written, so a pkg@user target reads as one — packageNames
+                        // alone would show two users' copies of an app as the same line twice.
+                        .put(
+                            "packages",
+                            JSONArray(
+                                s.explicit.filter { it.pkg != null }.map { it.entry }
+                            ),
+                        )
                         .put("explicitUids", JSONArray((s.uids - s.autoUids).sorted()))
                         .put("autoUids", JSONArray(autos))
                 )
@@ -426,13 +434,18 @@ object KeyAdmin {
     }
 
     /**
-     * Every installed app, one entry per uid, for the WebUI's Scope picker. The daemon runs
-     * as root so [Packages.installedAppsByUid] sees all apps; `system` additionally folds in any uid
-     * below the first app uid. Each entry also carries the usage face the picker sorts/badges on:
-     * `installTime`, and (from [UsageStore], reduced over the entry's package names) `freq` (max count),
+     * Every installed app, one entry per uid, for the WebUI's Scope picker. The daemon runs as root so
+     * [Packages.installedAppsByUid] sees all apps in every Android user — an app installed in both the
+     * primary user and a work profile is two entries, with two uids, because it is two callers to
+     * keystore. `system` additionally folds in any privileged uid (its app id below the first app uid,
+     * in whichever user). Each entry also carries the usage face the picker sorts/badges on:
+     * `installTime`, and (from [UsageStore], reduced over the entry's app tokens) `freq` (max count),
      * `lastUsed` (max epoch), `recent` (any package seen this boot). Sorted server-side by label then uid;
      * the client re-sorts per its chosen order. A best-effort usage poll runs first so the freq/recent
      * columns reflect the very latest requests without waiting for the 15s background poll.
+     *
+     * `users` lists the device's users so the picker can label and group by them without inventing
+     * names from uid arithmetic.
      */
     private fun packages(): JSONObject {
         try {
@@ -447,15 +460,19 @@ object KeyAdmin {
             )
         val arr = JSONArray()
         for (e in entries) {
-            val freq = e.packages.maxOfOrNull { UsageStore.freqOf(it) } ?: 0L
-            val lastUsed = e.packages.maxOfOrNull { UsageStore.lastUsedOf(it) } ?: 0L
-            val recent = e.packages.any { UsageStore.isRecent(it) }
+            // Usage is remembered per app token (pkg, or pkg@user outside the primary user), so the
+            // work profile's copy of an app carries its own request count rather than the other's.
+            val tokens = e.packages.map { Scope.entryToken(it, e.userId) }
+            val freq = tokens.maxOfOrNull { UsageStore.freqOf(it) } ?: 0L
+            val lastUsed = tokens.maxOfOrNull { UsageStore.lastUsedOf(it) } ?: 0L
+            val recent = tokens.any { UsageStore.isRecent(it) }
             arr.put(
                 JSONObject()
                     .put("uid", e.uid)
+                    .put("userId", e.userId)
                     .put("packages", JSONArray(e.packages))
                     .put("label", e.label)
-                    .put("system", e.system || e.uid < firstAppUid)
+                    .put("system", e.system || Scope.isPrivilegedUid(e.uid))
                     .put("launchable", e.launchable)
                     .put("enabled", e.enabled)
                     .put("installTime", e.installTime)
@@ -464,10 +481,17 @@ object KeyAdmin {
                     .put("recent", recent)
             )
         }
-        SystemLogger.info("KeyAdmin: /packages -> ${entries.size} uid entr(ies), firstAppUid=$firstAppUid")
+        val users = JSONArray()
+        for (u in Packages.users())
+            users.put(JSONObject().put("id", u.id).put("name", u.name).put("managed", u.managed))
+        SystemLogger.info(
+            "KeyAdmin: /packages -> ${entries.size} uid entr(ies) across ${users.length()} user(s), " +
+                "firstAppUid=$firstAppUid"
+        )
         return JSONObject()
             .put("ok", true)
             .put("firstAppUid", firstAppUid)
+            .put("users", users)
             .put("apps", arr)
     }
 
@@ -495,7 +519,8 @@ object KeyAdmin {
     }
 
     /**
-     * Stream the rendered PNG icon for `?pkg=`. Validates the package shape before touching
+     * Stream the rendered PNG icon for `?pkg=`, looked up in `?user=` (default 0, so an app that only
+     * exists in a work profile still resolves). Validates the package shape before touching
      * PackageManager, answers 404 (as JSON) when the package has no icon or rendering fails, and relies
      * on [Packages.iconPng]'s in-memory cache so a scrolling list of <img> hits stays cheap.
      */
@@ -505,7 +530,12 @@ object KeyAdmin {
             respond(out, 400, JSONObject().put("ok", false).put("error", "bad pkg"))
             return
         }
-        val png = Packages.iconPng(pkg)
+        val user = query["user"]?.toIntOrNull() ?: 0
+        if (user < 0) {
+            respond(out, 400, JSONObject().put("ok", false).put("error", "bad user"))
+            return
+        }
+        val png = Packages.iconPng(pkg, user)
         if (png == null) {
             respond(out, 404, JSONObject().put("ok", false).put("error", "no icon"))
             return

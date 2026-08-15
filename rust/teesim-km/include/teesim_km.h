@@ -115,12 +115,11 @@ void teesim_km_free_buf(uint8_t *ptr, size_t len);
 
 // --- generateKey / importKey -------------------------------------------------
 
-// `security_level` is the level of the real HAL the request came through (0
-// Software, 1 TrustedEnvironment, 2 StrongBox); the attestation record and key
-// characteristics are emitted at that level, overriding the TA's default. A value
-// outside that set keeps the TA's configured default.
+// The attestation record and key characteristics are emitted at this TA instance's fixed security
+// level. Route the request to the TA for the level the request came through (each level has its own
+// instance); there is no per-request override.
 int32_t teesim_km_generate_key(Ta *ta, const KmParam *params, size_t n_params,
-                               int32_t security_level, const uint8_t *ak_blob,
+                               const uint8_t *ak_blob,
                                size_t ak_blob_len, const KmParam *ak_params,
                                size_t ak_n_params, const uint8_t *ak_issuer,
                                size_t ak_issuer_len, TsCreationResult **out);
@@ -133,7 +132,7 @@ int32_t teesim_km_patch_attestation(Ta *ta, const uint8_t *leaf, size_t leaf_len
                                     TsCreationResult **out);
 
 int32_t teesim_km_import_key(Ta *ta, const KmParam *params, size_t n_params,
-                             int32_t security_level, int32_t key_format,
+                             int32_t key_format,
                              const uint8_t *key_data, size_t key_data_len,
                              const uint8_t *ak_blob, size_t ak_blob_len,
                              const KmParam *ak_params, size_t ak_n_params,

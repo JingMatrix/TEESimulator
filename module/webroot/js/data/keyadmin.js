@@ -23,22 +23,26 @@
 //   keyAdmin("keysDbDelete", { ids }) -> { ok, deleted, requested }
 //       remove those keyentry ids from keystore2; the daemon re-verifies each is one of
 //       our marked target-app keys before deleting, so a stray id is a no-op.
-//   keyAdmin("packages")             -> { ok, firstAppUid,
-//                                          apps:[{ uid, packages:[…], label, system,
+//   keyAdmin("packages")             -> { ok, firstAppUid, users:[{ id, name, managed }],
+//                                          apps:[{ uid, userId, packages:[…], label, system,
 //                                                  launchable, enabled, installTime, freq,
 //                                                  lastUsed, recent }] }
 //       the live device app list, ONE entry per uid (packages sharing a uid are collapsed;
 //       `packages` lists them all, sorted). `label` is the best human name, `system` is
-//       true for a framework/system-flagged app or any uid below firstAppUid, `launchable`
-//       whether it has a launcher activity, `enabled` the representative app's state.
-//       firstAppUid is Process.FIRST_APPLICATION_UID (10000). Feeds the Scope picker.
+//       true for a framework/system-flagged app or any privileged uid (app id below
+//       firstAppUid), `launchable` whether it has a launcher activity, `enabled` the
+//       representative app's state. firstAppUid is Process.FIRST_APPLICATION_UID (10000).
+//       `users` lists every Android user, and `userId` says which one an entry was found in:
+//       an app installed in both the primary user and a work profile appears TWICE, under two
+//       uids, because it is two callers to keystore and is targeted separately (as `com.foo`
+//       and `com.foo@10`). Feeds the Scope picker.
 //       The usage columns: `installTime` epoch ms of first install (0 unknown), `freq`
-//       the persistent count of key requests this app has made (max over its package names,
+//       the persistent count of key requests this app has made (max over its app tokens,
 //       0 if none), `lastUsed` epoch ms of the last request (0 if never), `recent` true when
 //       the app has asked for a key since THIS boot. These drive the Scope sort/badges.
 //   keyAdmin("usageClear")           -> { ok, cleared }
 //       wipes the daemon's persisted frequency memory (usage.json). The Scope page's "Clear
-//       usage" button calls this; `cleared` is how many package entries were dropped.
+//       usage" button calls this; `cleared` is how many app entries were dropped.
 //   keyAdmin("inspect", { alias })   -> { ok, alias, cert{…}, attestation:{…}|null }
 //   keyAdmin("delete",  { alias })   -> { ok, deleted }
 //   keyAdmin("logs", { after, max }) -> { ok, lines:[{ seq, level, tag, text }], nextAfter }

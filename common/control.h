@@ -28,6 +28,12 @@ typedef struct {
   size_t verified_boot_key_len;
   const uint8_t *verified_boot_hash;
   size_t verified_boot_hash_len;
+  // The MODULE_HASH the daemon resolved for this device — keystore2's own getSupplementaryAttestationInfo
+  // blob SHA-256'd, or the /apex/apex-info-list.xml reconstruction — to attach as Tag::MODULE_HASH on keys
+  // we mint. NULL/0 when unavailable; the TA emits the tag only for KeyMint v4+ attestations regardless,
+  // so an older-version profile never carries it.
+  const uint8_t *module_hash;
+  size_t module_hash_len;
   bool device_locked;
   int32_t verified_boot_state;
   bool strongbox_available;  // device can produce a real StrongBox-backed key; gates patch at that level
@@ -50,8 +56,18 @@ typedef struct {
   const TsDeviceIds *ids;  // NULL if the profile provisions no device IDs
   const char *const *packages;  // for keystore2 name-match
   int n_packages;
-  const int32_t *uids;  // for keystore1 uid-match (may be shorter than packages)
+  // Parallel to packages[]: the Android user each name is confined to (0 is the primary user, 10+ a
+  // work profile or secondary user). An attestation application id names the package but never the
+  // user, so this is what keeps user 0's copy of an app and a work profile's clone — different
+  // callers, possibly in different profiles — from matching each other's name. NULL means "every
+  // entry is user 0", the shape an older daemon pushed.
+  const int32_t *package_users;
+  const int32_t *uids;  // caller-uid match (may be shorter or longer than packages)
   int n_uids;
+  // Parallel to uids[]: the package name behind each uid, or "" for a raw uid:N / auto-included one.
+  // keystore1 rebuilds an attestation application id from it, since downstream of that hook the
+  // caller's own is already gone. NULL means "no names known".
+  const char *const *uid_packages;
 } TsProfile;
 
 // --- staging API, implemented by each router ---------------------------------

@@ -105,19 +105,26 @@ built once in `Ta::new_ex` from the same boot info generation feeds `kmr-ta`, so
 report an identical one. `Ta` therefore retains a clone of `CertSignInfo` (the batch key
 `kmr-ta` also owns but doesn't expose) alongside the precomputed `patch_rot`.
 
-## Per-request attestation identity
+## Per-level attestation identity
 
-One `Ta` serves both the TEE and StrongBox proxies, so the record's security level and version are
-set per request rather than at construction. Each creation passes the requesting HAL's level;
-`ops.rs::override_attestation_identity` sets `hw_info.security_level` and a raw `attestation_version`
-for that one call and restores them after. The version is stored raw (2/3/4/100/…) so a pre-KeyMint
-device's Keymaster versions survive, and `cert.rs` derives the matching `keyMintVersion` from it
-(Keymaster 4.0 is attestation 3 / keymaster 4, 4.1 is 4 / 41; KeyMint versions are equal). The level
-and version come from the harvest, or are fabricated (TrustedEnvironment and the OS-appropriate
-version) when the device produced no working hardware attestation. The `security_level` /
-`attestation_version` getters and setters this needs are added to `kmr-ta` by
+A real device runs a separate KeyMint instance per security level, so the router builds one `Ta` per
+level (TEE and StrongBox) and routes each request to the instance for the level it arrived on. Each
+instance is fixed at construction: `new_ex` sets `hw_info.security_level` from the config and pins
+`attestation_version` to the version harvested for that level — there is no per-request override, so
+`begin`/`upgrade` read a key's characteristics at the level it was minted at without the router having
+to re-apply anything. The version is stored raw (2/3/4/100/…) so a pre-KeyMint device's Keymaster
+versions survive, and `cert.rs` derives the matching `keyMintVersion` from it (Keymaster 4.0 is
+attestation 3 / keymaster 4, 4.1 is 4 / 41; KeyMint versions are equal). The level and version come
+from the harvest, or are fabricated (TrustedEnvironment and the OS-appropriate version) when the
+device produced no working hardware attestation; a broken StrongBox reuses the TEE version. The
+`set_attestation_version` setter this construction needs is added to `kmr-ta` by
 [`patches/kmr-ta-seclevel.patch`](../patches/kmr-ta-seclevel.patch), applied the same idempotent way
 as the BoringSSL patch below.
+
+Every C-ABI entry that touches a TA handle takes the process-wide `lock_ta()` guard for the duration
+of the call: `kmr-ta` keeps mutable state and is not internally synchronized, but keystore2 drives us
+from a binder thread pool, so this serialization is what keeps concurrent threads from aliasing
+`&mut Ta`.
 
 ## BoringSSL backend
 

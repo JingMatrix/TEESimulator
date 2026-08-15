@@ -181,16 +181,19 @@ it is also ours — as does StrongBox:
 ### Per-level attestation identity
 
 The record's security level and version must match the HAL the request came through: a StrongBox
-key claims StrongBox and that HAL's version, a TEE key the TEE's. One TA serves both proxies, so
-before each creation the router passes the proxy's level to the TA, which overrides
-`hw_info.security_level` and the raw `attestation_version` for that one request
-(`override_attestation_identity`) and restores them after. The versions are harvested from throwaway
-attested keys at each level and carried in the config — or fabricated (TrustedEnvironment and the
-OS-appropriate version) when the device has no working hardware attestation; the `keyMintVersion` is
-then derived from `attestationVersion` in the TA (Keymaster 4.0 is attestation 3 / keymaster 4, 4.1 is
-4 / 41; KeyMint versions are equal). A broken StrongBox reuses the TEE version. Patch mode gets this
-for free — it re-signs the real leaf, whose version fields are
-already the hardware's.
+key claims StrongBox and that HAL's version, a TEE key the TEE's. Each profile builds a separate TA
+per level (`Profile::ta_tee` / `ta_strongbox`, selected by `Profile::TaFor`), mirroring a real
+device's independent per-level KeyMint instances. The proxy routes every request — and every
+operation on one of our blobs (`DefaultTaFor(level_)`) — to the instance for its own level, which is
+fixed at construction, so the level and version are never overridden per request and a key's
+characteristics are always read at the level it was minted at. The versions are harvested from
+throwaway attested keys at each level and carried in the config — or fabricated (TrustedEnvironment
+and the OS-appropriate version) when the device has no working hardware attestation; the
+`keyMintVersion` is then derived from `attestationVersion` in the TA (Keymaster 4.0 is attestation 3 /
+keymaster 4, 4.1 is 4 / 41; KeyMint versions are equal). A broken StrongBox reuses the TEE version.
+Patch mode gets this for free — it re-signs the real leaf, whose version fields are already the
+hardware's. Both instances share the same key-encryption key (it is level- and profile-independent),
+so any of our blobs decrypts under either.
 
 ### Recursion guard
 

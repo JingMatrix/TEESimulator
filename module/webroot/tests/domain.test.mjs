@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 
 import {
   emptyProfile, emptyConfig,
-  PKG_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, UID_RE, APP_ENTRY_RE,
+  PKG_RE, PKG_USER_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, UID_RE, APP_ENTRY_RE,
+  splitEntry, entryToken,
 } from "../js/domain/schema.js";
 import { validateConfig, validateProfile } from "../js/domain/validate.js";
 
@@ -138,6 +139,46 @@ test("a malformed uid token is rejected", () => {
   }
 });
 
+// --- scope: per-user (work profile / secondary user) entries -------------
+test("a pkg@user entry is accepted as an app entry", () => {
+  const r = validateConfig(configWith({ p: validProfile(["com.ok", "com.ok@10", "com.other@11"]) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test("a malformed user suffix is rejected", () => {
+  for (const bad of ["com.ok@", "com.ok@x", "com.ok@ 10", "com.ok@-1", "com.ok@1.0", "com.ok@10@11", "@10"]) {
+    const r = validateConfig(configWith({ p: validProfile([bad]) }));
+    assert.equal(r.ok, false, `expected ${bad} to be rejected`);
+    assert.ok(r.errors.some((e) => e.field === "apps"), `expected an apps error for ${bad}`);
+  }
+});
+
+test("the same package in two users may live in two profiles", () => {
+  // They are two callers with two uids, so this is not the double-claim the router forbids.
+  const r = validateConfig(configWith({ a: validProfile(["com.dual"]), b: validProfile(["com.dual@10"]) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+test("the same pkg@user in two profiles is still a duplicate claim", () => {
+  const r = validateConfig(configWith({ a: validProfile(["com.dual@10"]), b: validProfile(["com.dual@10"]) }));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.field === "apps" && /unique/i.test(e.msg)));
+});
+
+test("splitEntry / entryToken round-trip an entry", () => {
+  assert.deepEqual(splitEntry("com.foo"), { pkg: "com.foo", userId: 0 });
+  assert.deepEqual(splitEntry("com.foo@10"), { pkg: "com.foo", userId: 10 });
+  // A malformed suffix is never split: the whole string stays the package, so a caller sees the
+  // entry validation already rejects rather than a silently truncated name.
+  assert.deepEqual(splitEntry("com.foo@x"), { pkg: "com.foo@x", userId: 0 });
+  assert.equal(entryToken("com.foo", 0), "com.foo");
+  assert.equal(entryToken("com.foo", 10), "com.foo@10");
+  for (const e of ["com.foo", "com.foo@10", "com.foo@0"]) {
+    const { pkg, userId } = splitEntry(e);
+    assert.equal(entryToken(pkg, userId), e === "com.foo@0" ? "com.foo" : e);
+  }
+});
+
 test("autoIncludeNewApps=true makes an empty apps list valid", () => {
   const p = validProfile([]);
   p.autoIncludeNewApps = true;
@@ -174,7 +215,9 @@ test("exactly one profile auto-including new apps is fine", () => {
 const cases = [
   [PKG_RE, ["com.foo", "com.foo.bar", "a_b.c", "A9._"], ["", "com foo", "com;rm -rf", "com/foo", "com-foo"]],
   [UID_RE, ["uid:0", "uid:10123", "uid:2000"], ["", "uid:", "uid:x", "uid: 10", "uid:-1", "uid:10.0", "10123", "com.foo"]],
-  [APP_ENTRY_RE, ["com.foo", "com.foo.bar", "uid:0", "uid:10123"], ["", "uid:", "uid:x", "com foo", "com/foo", "uid:1.0"]],
+  [PKG_USER_RE, ["com.foo@10", "a_b.c@0", "A9._@999"], ["com.foo", "", "com.foo@", "com.foo@x", "@10", "com.foo@1.0", "com.foo@10@11"]],
+  [APP_ENTRY_RE, ["com.foo", "com.foo.bar", "com.foo@10", "com.foo@0", "uid:0", "uid:10123"],
+    ["", "uid:", "uid:x", "com foo", "com/foo", "uid:1.0", "com.foo@", "com.foo@x", "@10", "com.foo@10@11", "uid:10@1"]],
   [PROFILE_RE, ["pixel", "a-b_c", "x".repeat(32)], ["", "x".repeat(33), "has space", "bad!", "dot.name"]],
   [KEYBOX_RE, ["keybox.xml", "a-b_c.1.xml"], ["keybox", "keybox.XML", "../x.xml", "a b.xml", "keybox.xml.bak"]],
   [PATCH_RE, ["today", "no", "harvested", "system_property", "2024-01", "2024-12", "2024-01-15", "2024-12-31", "YYYY-MM", "YYYY-MM-05", "YYYY-MM-DD"], ["2024", "2024-1", "2024-1-1", "yesterday", "", "2024-00", "2024-13", "2024-01-00", "2024-01-32", "2024-13-01", "MM-05", "YYYY-13-01"]],

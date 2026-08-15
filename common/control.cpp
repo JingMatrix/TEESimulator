@@ -142,7 +142,10 @@ struct ProfileStorage {
   std::vector<uint8_t> keybox;
   std::vector<std::string> pkg_strings;
   std::vector<const char *> pkg_ptrs;
+  std::vector<int32_t> pkg_users;
   std::vector<int32_t> uids;
+  std::vector<std::string> uid_pkg_strings;
+  std::vector<const char *> uid_pkg_ptrs;
   std::string brand, device, product, serial, imei, imei2, meid, manufacturer, model;
   TsDeviceIds ids{};
   bool has_ids = false;
@@ -179,11 +182,12 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
   if (const tjson::Value *e = msg.get("epoch")) epoch = static_cast<uint64_t>(e->as_int(0));
 
   // Device-wide boot info.
-  std::vector<uint8_t> vb_key, vb_hash;
+  std::vector<uint8_t> vb_key, vb_hash, module_hash;
   TsBootInfo boot{};
   if (const tjson::Value *bi = msg.get("bootInfo")) {
     if (const tjson::Value *k = bi->get("verifiedBootKey")) Base64Decode(k->as_string(), vb_key);
     if (const tjson::Value *h = bi->get("verifiedBootHash")) Base64Decode(h->as_string(), vb_hash);
+    if (const tjson::Value *m = bi->get("moduleHash")) Base64Decode(m->as_string(), module_hash);
     boot.device_locked = bi->get("deviceLocked") ? bi->get("deviceLocked")->as_bool(true) : true;
     boot.verified_boot_state =
         bi->get("verifiedBootState") ? int32_t(bi->get("verifiedBootState")->as_int(0)) : 0;
@@ -203,6 +207,8 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
   boot.verified_boot_key_len = vb_key.size();
   boot.verified_boot_hash = vb_hash.data();
   boot.verified_boot_hash_len = vb_hash.size();
+  boot.module_hash = module_hash.data();
+  boot.module_hash_len = module_hash.size();
   teesim_cfg_begin(&boot);
 
   const tjson::Value *profiles = msg.get("profiles");
@@ -224,10 +230,26 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       }
       s.pkg_ptrs.reserve(s.pkg_strings.size());
       for (const auto &p : s.pkg_strings) s.pkg_ptrs.push_back(p.c_str());
+      // packageUsers[] is parallel to packages[]; a short (or absent) array leaves the rest at user 0,
+      // which is what a package name meant before per-user targeting existed.
+      if (const tjson::Value *pkg_users = pj.get("packageUsers")) {
+        for (size_t j = 0; j < pkg_users->size(); ++j)
+          s.pkg_users.push_back(static_cast<int32_t>(pkg_users->at(j).as_int(0)));
+      }
+      s.pkg_users.resize(s.pkg_strings.size(), 0);
       if (const tjson::Value *uids = pj.get("uids")) {
         for (size_t j = 0; j < uids->size(); ++j)
           s.uids.push_back(static_cast<int32_t>(uids->at(j).as_int(-1)));
       }
+      // uidPackages[] is parallel to uids[]; "" (and any missing tail) means "this uid has no package
+      // name", which is the honest answer for a raw uid:N or an auto-included app.
+      if (const tjson::Value *uid_pkgs = pj.get("uidPackages")) {
+        for (size_t j = 0; j < uid_pkgs->size(); ++j)
+          s.uid_pkg_strings.push_back(uid_pkgs->at(j).as_string());
+      }
+      s.uid_pkg_strings.resize(s.uids.size());
+      s.uid_pkg_ptrs.reserve(s.uid_pkg_strings.size());
+      for (const auto &p : s.uid_pkg_strings) s.uid_pkg_ptrs.push_back(p.c_str());
       if (const tjson::Value *ids = pj.get("deviceIds")) s.has_ids = FillDeviceIds(*ids, s);
 
       TsProfile tp{};
@@ -245,8 +267,10 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       tp.ids = s.has_ids ? &s.ids : nullptr;
       tp.packages = s.pkg_ptrs.data();
       tp.n_packages = static_cast<int>(s.pkg_ptrs.size());
+      tp.package_users = s.pkg_users.data();
       tp.uids = s.uids.data();
       tp.n_uids = static_cast<int>(s.uids.size());
+      tp.uid_packages = s.uid_pkg_ptrs.data();
 
       if (teesim_cfg_add_profile(&tp)) ++applied;
     }

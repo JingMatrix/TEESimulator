@@ -461,9 +461,9 @@ TsCreationResult* ImportKey(const PendingKey& k, int uid, const std::vector<KmPa
   std::vector<uint8_t> app_id;
   AddRequiredTags(params, uid, app_id, with_attestation);
   TsCreationResult* res = nullptr;
-  // The legacy Keystore HAL path has no wrapped KeyMint HAL to derive a level
-  // from, so -1 keeps the TA's configured default security level.
-  int32_t rc = teesim_km_import_key(ta.get(), params.data(), params.size(), /*security_level=*/-1,
+  // The legacy Keystore HAL path has a single TA per profile at its configured security level; the
+  // attestation is emitted at that level.
+  int32_t rc = teesim_km_import_key(ta.get(), params.data(), params.size(),
                                     KEY_FORMAT_PKCS8, k.pkcs8.data(), k.pkcs8.size(), nullptr, 0,
                                     nullptr, 0, nullptr, 0, &res);
   if (rc != 0 || !res) {
@@ -826,12 +826,16 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   Profile prof;
   prof.id = p->id ? p->id : "";
   prof.ta = WrapTa(ta);
-  // uids[] is aligned 1:1 with packages[]; -1 marks a package that is not installed.
+  // uid_packages[] is aligned 1:1 with uids[] and names the package behind each one, or "" for a raw
+  // uid:N or an auto-included app that no entry names. It is carried on the wire rather than read off
+  // packages[] by index: the two arrays have not lined up since a profile could name an app it does
+  // not (yet) have installed, and pairing them by position hands a uid the wrong package name — which
+  // this hook would then attest under.
   for (int i = 0; i < p->n_uids && p->uids; ++i) {
     if (p->uids[i] < 0) continue;
-    const char* pkg =
-        (i < p->n_packages && p->packages && p->packages[i]) ? p->packages[i] : "";
+    const char* pkg = (p->uid_packages && p->uid_packages[i]) ? p->uid_packages[i] : "";
     prof.uids[p->uids[i]] = pkg;
+    LOGI("cfg:   uid %d -> package '%s'", p->uids[i], pkg);
   }
   g_staging.push_back(std::move(prof));
   return true;

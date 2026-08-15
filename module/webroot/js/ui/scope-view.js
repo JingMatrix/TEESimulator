@@ -10,9 +10,9 @@
 //   renderScope(host, state, actions)
 //     host    the overlay content node (an .editor-host div)
 //     state   { profileName, apps, packages, claimedByOther, firstAppUid,
-//               search, filter, sort, loading, error, iconUrl,
+//               search, filter, userFilter, sort, loading, error, iconUrl,
 //               autoOwner, autoInfo, autoCount, pendingSave }
-//               - apps            the DRAFT entry strings (packages + uid: tokens)
+//               - apps            the DRAFT entry strings (packages, pkg@user names + uid: tokens)
 //               - autoOwner       Map(uid -> profile name) for uids the DAEMON includes automatically
 //                                 (autoIncludeNewApps). These are NEVER in `apps` — config.json does
 //                                 not name them — so this is the only way the picker can know. The
@@ -27,27 +27,34 @@
 // never both selected and auto: pinning an app removes it from the daemon's auto set on the next
 // resolve (Scope.kt drops uids the profile now names explicitly).
 //               - packages        the keyAdmin("packages") result, or null while loading; each
-//                                 row carries uid/packages/label/system/launchable/enabled plus
-//                                 the usage columns installTime/freq/lastUsed/recent
+//                                 row carries uid/userId/packages/label/system/launchable/enabled
+//                                 plus the usage columns installTime/freq/lastUsed/recent, and
+//                                 packages.users lists the device's Android users
 //               - claimedByOther  Map(entry -> owning profile name) for entries already claimed
 //                                 by ANOTHER profile (greyed out and inert here)
-//               - firstAppUid     Process.FIRST_APPLICATION_UID; uids below it warn
+//               - firstAppUid     Process.FIRST_APPLICATION_UID; a uid whose APP id (uid % 100000,
+//                                 so the test holds in a secondary user too) is below it warns
 //               - filter          "recent" | "user" | "system" | "selected" (Recent is default)
+//               - userFilter      an Android user id to show alone, or null for every user
 //               - sort            "freq" | "recent" | "name" | "install"
-//               - iconUrl         fn(pkg) -> a daemon /icon URL string, or null before the admin
-//                                 token is in hand; the row <img> falls back to a letter-avatar
+//               - iconUrl         fn(pkg, userId) -> a daemon /icon URL string, or null before the
+//                                 admin token is in hand; the row <img> falls back to a letter-avatar
 //     actions { onClose (leave — asks to keep changes if any), onDone (commit + leave),
 //               onToggleApp(entry), onSetSearch(text), onSearchSubmit(),
-//               onSetFilter(id), onOpenSort(), onClearUsage(),
+//               onSetFilter(id), onSetUserFilter(id|null), onOpenSort(), onClearUsage(),
 //               onSelectAllVisible(entries), onClearVisible(entries), onInvertVisible(entries) }
 //
-// Selecting a normal app toggles its PACKAGE-NAME entry (the primary, sorted package), never a
+// One app installed in several Android users is several rows — its work-profile copy runs under its
+// own uid and is a separate caller to keystore, so it is targeted separately. A row therefore
+// selects the entry naming ITS user: "com.foo" in the primary user, "com.foo@10" in user 10.
+//
+// Selecting a normal app toggles that PACKAGE-NAME entry (the primary, sorted package), never a
 // uid: token — uid tokens are advanced and only ever added/removed manually, or removed from
 // the pinned "In scope" section here. The three bulk ops act on the CURRENTLY visible rows
 // only: the view computes that set and hands it to the controller as { add, cur } descriptors.
 
 import { el, clear, svgIcon, ICON_SEARCH, ICON_SORT } from "./dom.js";
-import { UID_RE } from "../domain/schema.js";
+import { UID_RE, entryToken, splitEntry } from "../domain/schema.js";
 import { t } from "../i18n.js";
 
 const SEARCH_ID = "scope-search-input";
@@ -79,18 +86,35 @@ function avatarLetter(label, pkg) {
   return /[a-z0-9]/i.test(ch) ? ch.toUpperCase() : "#";
 }
 
+// The apps[] entries that would select this row — one per package it groups, each naming the row's
+// Android user. The first is the primary: what a plain tap adds.
+function rowEntries(row) {
+  return (row.packages || []).map((p) => entryToken(p, row.userId || 0));
+}
+
+// The user a row belongs to, as the picker shows it. `users` is the daemon's list; an id missing
+// from it (a profile removed between two fetches) still gets an honest "user N" rather than nothing.
+function userOf(row, users) {
+  const id = row.userId || 0;
+  const found = (users || []).find((u) => u.id === id);
+  return found || { id, name: id === 0 ? "Owner" : "User " + id, managed: false };
+}
+
 export function renderScope(host, state, actions) {
   const focus = captureFocus(host);
   clear(host);
 
   const {
     profileName, apps = [], packages = null, claimedByOther = new Map(),
-    firstAppUid = 10000, search = "", filter = "recent", sort = "freq",
+    firstAppUid = 10000, search = "", filter = "recent", userFilter = null, sort = "freq",
     loading = false, error = null,
     // Defaulted so an older daemon (no /scope route) renders exactly the previous UI.
     autoOwner = new Map(), autoInfo = null, autoCount = 0, pendingSave = false,
   } = state;
   const iconUrl = typeof state.iconUrl === "function" ? state.iconUrl : () => null;
+  // An older daemon answers /packages without `users`; then every row is user 0 and no user
+  // segmented control is drawn, which is exactly the single-user device's view too.
+  const users = (packages && Array.isArray(packages.users)) ? packages.users : [];
 
   const appsSet = new Set(apps);
   // "In scope automatically, for THIS profile, and not already pinned." A pinned row is selected,
@@ -135,6 +159,21 @@ export function renderScope(host, state, actions) {
       onclick: () => actions.onSetFilter(f.id),
     }, f.label))));
 
+  // ---- user filter: only on a device that HAS more than one user ---------
+  // A work profile roughly doubles the list, and the same app then appears once per user, so the
+  // narrowing control earns its row there — and is absent (identical to the old UI) everywhere else.
+  if (users.length > 1) {
+    const segs = [{ id: null, label: "All users" }].concat(
+      users.map((u) => ({ id: u.id, label: u.name })));
+    body.appendChild(el("div", { class: "segmented scope-users" },
+      segs.map((s) => el("button", {
+        type: "button", class: "seg" + (userFilter === s.id ? " on" : ""),
+        "aria-pressed": userFilter === s.id ? "true" : "false",
+        title: s.id == null ? "Show apps from every Android user" : "Show only user " + s.id,
+        onclick: () => actions.onSetUserFilter(s.id),
+      }, s.label))));
+  }
+
   // ---- loading / error short-circuits ---------------------------------
   if (loading) {
     body.appendChild(el("div", { class: "scope-status" }, [
@@ -149,11 +188,13 @@ export function renderScope(host, state, actions) {
 
   // The installed inventory, for both the pinned "orphan" computation and the main list.
   const installed = (packages && Array.isArray(packages.apps)) ? packages.apps : [];
-  const installedPkgs = new Set();
+  // Entries, not bare package names: "com.foo" is installed only if user 0 has it, and the pinned
+  // section below decides what to show from exactly that distinction.
+  const installedEntries = new Set();
   const installedUids = new Set();
   for (const row of installed) {
     installedUids.add(row.uid);
-    (row.packages || []).forEach((p) => installedPkgs.add(p));
+    rowEntries(row).forEach((e) => installedEntries.add(e));
   }
 
   // The visible rows: search + group filter, then sorted. Computed once so the ops row and the
@@ -163,7 +204,8 @@ export function renderScope(host, state, actions) {
   // scope, so the Selected tab must list it and the float-to-top must lift it.
   const inScope = (row) => isSelected(row, appsSet) || autoMine(row);
   const rows = installed
-    .filter((row) => matchSearch(row, q))
+    .filter((row) => userFilter == null || (row.userId || 0) === userFilter)
+    .filter((row) => matchSearch(row, q, userOf(row, users)))
     .filter((row) => matchFilter(row, filter, inScope(row)))
     // Selected rows always float to the top of every group (and of a search result), with the chosen
     // sort applied within the selected and unselected partitions alike — so what you've picked is
@@ -186,11 +228,13 @@ export function renderScope(host, state, actions) {
   // Clear and Invert have no meaning on them, and Select-all pinning the whole auto set in one tap
   // is never what the gesture was asking for. Only a deliberate per-row tap pins one.
   const visibleEntries = rows
-    .filter((row) => !claimOf(row, claimedByOther) && row.uid >= firstAppUid && !autoOwner.has(row.uid))
+    // The privileged test is on the APP id: user 10's system uid is 1001000, above firstAppUid yet
+    // no less privileged than user 0's 1000.
+    .filter((row) => !claimOf(row, claimedByOther) && row.uid % 100000 >= firstAppUid && !autoOwner.has(row.uid))
     .map((row) => {
-      const pkgs = row.packages || [];
-      const add = pkgs[0] || ("uid:" + row.uid);
-      const cur = pkgs.find((p) => appsSet.has(p)) || (appsSet.has("uid:" + row.uid) ? "uid:" + row.uid : null);
+      const entries = rowEntries(row);
+      const add = entries[0] || ("uid:" + row.uid);
+      const cur = entries.find((e) => appsSet.has(e)) || (appsSet.has("uid:" + row.uid) ? "uid:" + row.uid : null);
       return { add, cur };
     });
 
@@ -233,20 +277,25 @@ export function renderScope(host, state, actions) {
   // with a remove ✕. (Installed selections just show checked in the list.)
   const orphans = apps.filter((entry) => {
     if (UID_RE.test(entry)) return !installedUids.has(Number(entry.slice(4)));
-    return !installedPkgs.has(entry);
+    return !installedEntries.has(entry);
   });
   if (orphans.length) {
     body.appendChild(el("div", { class: "scope-pinned" }, [
       el("div", { class: "scope-section-title", text: t("scope_in_scope") }),
       el("div", { class: "applist" }, orphans.map((entry) => {
         const isUid = UID_RE.test(entry);
+        const { pkg, userId } = splitEntry(entry);
+        // "Not installed" is a per-user answer: the app may well be on the device, just not in the
+        const where = userId ? " " + t("scope_for_user_prefix") + userOf({ userId }, users).name : "";
         return el("span", {
           class: "chip removable scope-chip" + (isUid ? " advanced" : " warn"),
-          title: isUid ? t("scope_advanced_uid_prefix") + entry.slice(4) : entry + " " + t("scope_not_installed_suffix"),
+          title: isUid
+            ? t("scope_advanced_uid_prefix") + entry.slice(4)
+            : pkg + " " + (where ? t("scope_not_installed_where_prefix") + where : t("scope_not_installed_suffix")),
         }, [
           isUid ? el("span", { class: "chip-avatar-uid", "aria-hidden": "true", text: "#" }) : null,
           el("span", { class: "chip-text" + (isUid ? " mono" : ""), text: entry }),
-          el("span", { class: "chip-sub", text: isUid ? t("scope_advanced_uid_chip") : t("scope_not_installed_chip") }),
+          el("span", { class: "chip-sub", text: isUid ? t("scope_advanced_uid_chip") : t("scope_not_installed_chip") + where }),
           el("button", { type: "button", class: "chip-x", "aria-label": t("field_remove") + " " + entry, text: "✕", onclick: () => actions.onToggleApp(entry) }),
         ]);
       })),
@@ -266,7 +315,7 @@ export function renderScope(host, state, actions) {
     } else if (rows.length) {
       const list = el("div", { class: "scope-list" });
       for (const row of rows) {
-        list.appendChild(scopeRow(row, { appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner, profileName }, actions));
+        list.appendChild(scopeRow(row, { appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner, profileName, users, showUser: users.length > 1 }, actions));
       }
       body.appendChild(list);
     }
@@ -295,17 +344,20 @@ function emptyText(filter, total, q) {
   return t("scope_empty_no_match_generic");
 }
 
-// Is this uid-row currently in scope — by any of its package names, or by a uid: token?
+// Is this uid-row currently in scope — by one of its entries (each naming this row's user), or by
+// a uid: token?
 function isSelected(row, appsSet) {
   if (appsSet.has("uid:" + row.uid)) return true;
-  return (row.packages || []).some((p) => appsSet.has(p));
+  return rowEntries(row).some((e) => appsSet.has(e));
 }
 
-function matchSearch(row, q) {
+function matchSearch(row, q, user) {
   if (!q) return true;
   if (row.label && row.label.toLowerCase().includes(q)) return true;
   if (String(row.uid).includes(q)) return true;
-  return (row.packages || []).some((p) => p.toLowerCase().includes(q));
+  // The user is searchable by name and by its entry suffix, so "@10" and "work" both narrow to it.
+  if (user && user.name && user.name.toLowerCase().includes(q)) return true;
+  return rowEntries(row).some((e) => e.toLowerCase().includes(q));
 }
 
 function matchFilter(row, filter, selected) {
@@ -317,9 +369,11 @@ function matchFilter(row, filter, selected) {
   return true;
 }
 
-// Whom does this row belong to elsewhere? Any of its packages or its uid token; null if free.
+// Whom does this row belong to elsewhere? Any of its entries or its uid token; null if free. The
+// entries carry the row's user, so another profile holding the SAME app in a DIFFERENT user does
+// not claim this row — two users' copies are two callers and may legitimately sit apart.
 function claimOf(row, claimedByOther) {
-  for (const p of (row.packages || [])) if (claimedByOther.has(p)) return claimedByOther.get(p);
+  for (const e of rowEntries(row)) if (claimedByOther.has(e)) return claimedByOther.get(e);
   if (claimedByOther.has("uid:" + row.uid)) return claimedByOther.get("uid:" + row.uid);
   return null;
 }
@@ -349,24 +403,31 @@ function byLabel(a, b) {
 // per-app exclusion, so the check is honestly a pin/unpin control whose "off" floor is "still in
 // scope automatically". The title says exactly that, because the pill alone cannot.
 function scopeRow(row, ctx, actions) {
-  const { appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner = new Map(), profileName } = ctx;
+  const {
+    appsSet, claimedByOther, firstAppUid, iconUrl, autoOwner = new Map(), profileName,
+    users = [], showUser = false,
+  } = ctx;
   const pkgs = (row.packages || []).slice();
-  const primary = pkgs[0] || ("uid:" + row.uid);
-  const label = row.label || primary;
+  const entries = rowEntries(row);
+  const primary = entries[0] || ("uid:" + row.uid);
+  const label = row.label || pkgs[0] || primary;
+  const user = userOf(row, users);
 
-  const selectedByPkg = pkgs.find((p) => appsSet.has(p));
+  const selectedByPkg = entries.find((e) => appsSet.has(e));
   const selectedByUid = appsSet.has("uid:" + row.uid);
   const selected = !!selectedByPkg || selectedByUid;
 
   const claimedBy = claimOf(row, claimedByOther);
-  const lowUid = row.uid < firstAppUid;
+  // Asked of the app id, not the raw uid: user 10's system_server is uid 1001000, which is above
+  // firstAppUid yet every bit as privileged as user 0's 1000.
+  const lowUid = row.uid % 100000 < firstAppUid;
 
   // The entry a tap acts on: the package/token that is selected (to remove it) or the primary
   // package (to add it).
   const toggleEntry = selectedByPkg || (selectedByUid ? ("uid:" + row.uid) : primary);
 
-  const pkgLine = pkgs.length
-    ? (pkgs.length === 1 ? pkgs[0] : pkgs[0] + " +" + (pkgs.length - 1))
+  const pkgLine = entries.length
+    ? (entries.length === 1 ? entries[0] : entries[0] + " +" + (entries.length - 1))
     : "uid:" + row.uid;
 
   const autoBy = autoOwner.get(row.uid) || null;
@@ -374,6 +435,14 @@ function scopeRow(row, ctx, actions) {
   const autoOther = !!autoBy && autoBy !== profileName;
 
   const pills = [];
+  // Which user this copy of the app lives in — drawn only where the device actually has more than
+  // one, so a single-user phone keeps the row it always had.
+  if (showUser)
+    pills.push(el("span", {
+      class: "pill scope-user" + (user.managed ? " managed" : ""),
+      title: t("scope_user_title_prefix") + user.id + (user.managed ? t("scope_user_title_work_profile") : ""),
+      text: user.name,
+    }));
   if (lowUid) pills.push(el("span", { class: "pill warn scope-pill", text: t("scope_pill_system_uid") }));
   if (claimedBy) pills.push(el("span", { class: "chip small scope-claimed", text: t("scope_pill_claimed_prefix") + claimedBy }));
   if (autoMine) pills.push(el("span", { class: "pill scope-auto", text: t("scope_pill_auto") }));
@@ -398,7 +467,7 @@ function scopeRow(row, ctx, actions) {
     title,
     onclick: claimedBy ? null : () => actions.onToggleApp(toggleEntry),
   }, [
-    iconEl(row, primary, label, iconUrl),
+    iconEl(row, pkgs[0] || primary, label, iconUrl),
     el("span", { class: "scope-meta" }, [
       el("span", { class: "scope-label" }, [
         el("span", { class: "scope-name", text: label }),
@@ -419,7 +488,9 @@ function iconEl(row, primary, label, iconUrl) {
     class: "scope-avatar", style: "background:" + hashColor(label + "/" + row.uid), text: avatarLetter(row.label, primary),
   });
   const pkg = (row.packages || [])[0];
-  const url = pkg ? iconUrl(pkg) : null;
+  // The user rides along: an app that exists only in a work profile has no record in user 0 for the
+  // daemon to read an icon out of.
+  const url = pkg ? iconUrl(pkg, row.userId || 0) : null;
   if (!url) { wrap.appendChild(avatar()); return wrap; }
   const img = el("img", {
     class: "scope-ico-img", loading: "lazy", decoding: "async", alt: "", src: url,

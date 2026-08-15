@@ -43,26 +43,54 @@ TaPtr WrapTa(::Ta* ta) {
   });
 }
 
-// A configured profile: its TA, the package names routed to it, and whether it patches the real
-// hardware attestation (patch mode) or mints the whole key in the TA (generation mode).
+// The stride between two Android users' uids for the same app (android.os.UserHandle.PER_USER_RANGE).
+// A caller uid is userId * 100000 + appId, so this is what turns one into the other.
+constexpr int32_t kPerUserRange = 100000;
+
+// One package name routed to a profile, and the Android user it is routed in. An attestation
+// application id carries the package but not the user, so without `user_id` a work profile's clone of
+// an app would answer to the primary user's entry and vice versa.
+struct TargetPackage {
+  std::string name;
+  int32_t user_id = 0;
+};
+
+// A configured profile: its per-level TAs, the package names routed to it, and whether it patches the
+// real hardware attestation (patch mode) or mints the whole key in the TA (generation mode).
 struct Profile {
   std::string id;
-  TaPtr ta;
-  std::vector<std::string> packages;
+  // A separate fixed-level TA per security level, mirroring how a real device runs an independent
+  // KeyMint instance per level. Every op routes to the instance for the level it arrived on, so a
+  // key's characteristics are always read at the level the key was minted at.
+  TaPtr ta_tee;
+  TaPtr ta_strongbox;
+  std::vector<TargetPackage> packages;
   std::vector<int32_t> uids;  // resolved caller uids, for requests that carry no app-id to match
   bool patch_mode = false;
+
+  // The TA that serves requests arriving at `level`. Software-level KeyMint is never wrapped, so any
+  // non-StrongBox level maps to the TrustedEnvironment instance.
+  const TaPtr& TaFor(SecurityLevel level) const {
+    return level == SecurityLevel::STRONGBOX ? ta_strongbox : ta_tee;
+  }
 };
 
 // Live routing, swapped atomically by teesim_cfg_commit under g_cfg_mu.
 std::mutex g_cfg_mu;
 std::vector<Profile> g_profiles;
-TaPtr g_default_ta;  // serves ops on our blobs; any profile's TA decrypts them
 bool g_strongbox_ok = false;  // device can patch real StrongBox keys; else StrongBox forces generation
+// The device-wide MODULE_HASH to seed a freshly built TA with, so a generation-mode key carries the
+// tag keystore2 only sends once per boot (and never resends to a TA built afterwards). Preference:
+// the exact bytes keystore2 pushed via setAdditionalAttestationInfo, captured below; the daemon's own
+// computed value (g_stage_module_hash) is only a fallback for when we never saw that one-shot call.
+// Guarded by g_cfg_mu. Empty until either source provides one.
+std::vector<uint8_t> g_module_hash;
 
 // Staging state built up by teesim_cfg_begin/add_profile before the swap.
 std::vector<Profile> g_staging;
 std::vector<uint8_t> g_stage_vb_key;
 std::vector<uint8_t> g_stage_vb_hash;
+std::vector<uint8_t> g_stage_module_hash;  // MODULE_HASH to seed each TA with at creation (may be empty)
 bool g_stage_locked = true;
 int32_t g_stage_vb_state = 0;
 bool g_stage_strongbox_ok = false;
@@ -117,10 +145,17 @@ struct RequestTarget {
   bool patch_mode = false;
 };
 
-RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t caller_uid) {
+RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t caller_uid,
+                                SecurityLevel level) {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   if (g_profiles.empty()) return {};
+  // The Android user the request came from, or -1 when the caller is unknown (no binder transaction
+  // in flight). An unknown user cannot contradict a name match, so it accepts any entry's user.
+  const int32_t caller_user =
+      caller_uid == static_cast<uid_t>(-1) ? -1 : static_cast<int32_t>(caller_uid) / kPerUserRange;
   // Primary match: the ATTESTATION_APPLICATION_ID the app embeds in the request names its package.
+  // The blob names only the package, so the caller's user is what separates two users' copies of one
+  // app — a work profile's Play Store must not pick up the entry written for the primary user's.
   for (const auto& p : params) {
     if (p.tag != Tag::ATTESTATION_APPLICATION_ID) continue;
     if (p.value.getTag() != KeyParameterValue::blob) continue;
@@ -128,7 +163,13 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
     std::string hay(id.begin(), id.end());
     for (const auto& prof : g_profiles) {
       for (const auto& pkg : prof.packages) {
-        if (hay.find(pkg) != std::string::npos) return {prof.ta, prof.patch_mode};
+        if (hay.find(pkg.name) == std::string::npos) continue;
+        if (caller_user >= 0 && pkg.user_id != caller_user) {
+          LOGI("route: '%s' matches profile '%s' but for user %d, not the caller's user %d — skipped",
+               pkg.name.c_str(), prof.id.c_str(), pkg.user_id, caller_user);
+          continue;
+        }
+        return {prof.TaFor(level), prof.patch_mode};
       }
     }
   }
@@ -138,17 +179,21 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
   if (caller_uid != static_cast<uid_t>(-1)) {
     for (const auto& prof : g_profiles) {
       for (int32_t uid : prof.uids) {
-        if (static_cast<uid_t>(uid) == caller_uid) return {prof.ta, prof.patch_mode};
+        if (static_cast<uid_t>(uid) == caller_uid) return {prof.TaFor(level), prof.patch_mode};
       }
     }
   }
   return {};
 }
 
-// The TA used for operations on an existing blob of ours (begin/upgrade/etc.).
-TaPtr DefaultTa() {
+// The TA used for operations on an existing blob of ours (begin/upgrade/etc.), at the level the op
+// arrived on. Any profile's TA can decrypt any of our blobs (the KEK is level- and profile-
+// independent), but the level must match so the reference TA finds the key's characteristics at its
+// own level; the front profile's instance for `level` serves as that default.
+TaPtr DefaultTaFor(SecurityLevel level) {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
-  return g_default_ta;
+  if (g_profiles.empty()) return {};
+  return g_profiles.front().TaFor(level);
 }
 
 // A snapshot of every configured profile's TA, for device-state transitions (earlyBootEnded /
@@ -157,9 +202,26 @@ TaPtr DefaultTa() {
 std::vector<TaPtr> AllProfileTas() {
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   std::vector<TaPtr> tas;
-  tas.reserve(g_profiles.size());
-  for (const auto& p : g_profiles) tas.push_back(p.ta);
+  tas.reserve(g_profiles.size() * 2);
+  for (const auto& p : g_profiles) {
+    if (p.ta_tee) tas.push_back(p.ta_tee);
+    if (p.ta_strongbox) tas.push_back(p.ta_strongbox);
+  }
   return tas;
+}
+
+// Record `hash` on `ta` as Tag::MODULE_HASH so a generation-mode key it mints carries the module
+// hash. No-op for an empty hash. Setting the value a TA already holds is idempotent in the reference
+// TA (a repeat of the same bytes is ignored), so the later keystore2 forward over the same value is
+// harmless; only a genuinely different value is rejected, which this logs.
+void SeedModuleHash(const TaPtr& ta, const std::vector<uint8_t>& hash) {
+  if (hash.empty() || !ta) return;
+  KmParam p{};
+  p.tag = static_cast<uint32_t>(Tag::MODULE_HASH);
+  p.blob = hash.data();
+  p.blob_len = hash.size();
+  int32_t rc = teesim_km_set_additional_attestation_info(ta.get(), &p, 1);
+  if (rc != 0) LOGW("SeedModuleHash: TA rejected (%d)", rc);
 }
 
 // --- AIDL KeyParameter <-> flat KmParam --------------------------------------
@@ -462,7 +524,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                  KeyCreationResult* out) override {
     const uid_t caller_uid = AIBinder_getCallingUid();
     RecordUsage(static_cast<int32_t>(caller_uid));  // every app that asks for a key, for the daemon's usage view
-    RequestTarget t = ProfileForRequest(keyParams, caller_uid);
+    RequestTarget t = ProfileForRequest(keyParams, caller_uid, level_);
     LOGI("generateKey: level=%d, %zu param(s), caller_uid=%d, caller_attest_key=%d, target=%d, "
          "patch_mode=%d, strongbox_ok=%d",
          static_cast<int>(level_), keyParams.size(), static_cast<int>(caller_uid),
@@ -526,7 +588,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
                                const std::vector<uint8_t>& keyData,
                                const std::optional<AttestationKey>& attestationKey,
                                KeyCreationResult* out) override {
-    RequestTarget t = ProfileForRequest(keyParams, AIBinder_getCallingUid());
+    RequestTarget t = ProfileForRequest(keyParams, AIBinder_getCallingUid(), level_);
     TaPtr ta = t.ta;
     if (!ta) {
       if (real_) {
@@ -547,7 +609,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     auto km = ToKmVec(keyParams);
     auto ak = MakeAttestKey(attestationKey);
     TsCreationResult* res = nullptr;
-    int32_t rc = teesim_km_import_key(ta.get(), km.data(), km.size(), static_cast<int32_t>(level_),
+    int32_t rc = teesim_km_import_key(ta.get(), km.data(), km.size(),
                                       static_cast<int32_t>(keyFormat), keyData.data(), keyData.size(),
                                       ak.blob, ak.blob_len, ak.params.data(), ak.params.size(),
                                       ak.issuer, ak.issuer_len, &res);
@@ -570,7 +632,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
-    TaPtr ta = DefaultTa();
+    TaPtr ta = DefaultTaFor(level_);
     if (!ta) return Status(-100);
     auto km = ToKmVec(params);
     TsAuthToken at;
@@ -602,7 +664,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return ndk::ScopedAStatus::ok();
     }
-    TaPtr ta = DefaultTa();
+    TaPtr ta = DefaultTaFor(level_);
     if (!ta) return ndk::ScopedAStatus::ok();
     return Status(teesim_km_delete_key(ta.get(), keyBlob.data(), keyBlob.size()));
   }
@@ -618,7 +680,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
-    TaPtr ta = DefaultTa();
+    TaPtr ta = DefaultTaFor(level_);
     if (!ta) return Status(-100);
     auto km = ToKmVec(upgradeParams);
     uint8_t* buf = nullptr;
@@ -643,7 +705,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
-    TaPtr ta = DefaultTa();
+    TaPtr ta = DefaultTaFor(level_);
     if (!ta) return Status(-100);
     TsCharacteristics* res = nullptr;
     int32_t rc = teesim_km_get_key_characteristics(ta.get(), keyBlob.data(), keyBlob.size(),
@@ -740,9 +802,17 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     return real_ ? real_->sendRootOfTrust(rootOfTrust) : ndk::ScopedAStatus::ok();
   }
   // Record the additional attestation info (e.g. MODULE_HASH on Android 16) on our TAs as well, so a
-  // key we attest carries the same value keystore2 pushes to the real HAL and a verifier that checks
-  // it still validates. Applied to every profile since the info is device-wide; best-effort per TA.
+  // key we attest carries the same value keystore2 pushes to the real HAL and still matches a genuine
+  // device. Applied to every profile since the info is device-wide; best-effort per TA.
   ndk::ScopedAStatus setAdditionalAttestationInfo(const std::vector<KeyParameter>& info) override {
+    // Latch keystore2's MODULE_HASH as the authoritative value to seed TAs built later this boot: it
+    // is the exact bytes the real HAL got, so it matches a genuine device byte-for-byte.
+    for (const auto& p : info) {
+      if (p.tag == Tag::MODULE_HASH && p.value.getTag() == KeyParameterValue::blob) {
+        std::lock_guard<std::mutex> lk(g_cfg_mu);
+        g_module_hash = p.value.get<KeyParameterValue::blob>();
+      }
+    }
     auto km = ToKmVec(info);
     for (const auto& ta : AllProfileTas()) {
       int32_t rc = teesim_km_set_additional_attestation_info(ta.get(), km.data(), km.size());
@@ -828,7 +898,7 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     auto km = ToKmVec(keyParams);
     auto ak = MakeAttestKey(attestationKey);
     TsCreationResult* res = nullptr;
-    int32_t rc = teesim_km_generate_key(ta, km.data(), km.size(), static_cast<int32_t>(level_),
+    int32_t rc = teesim_km_generate_key(ta, km.data(), km.size(),
                                         ak.blob, ak.blob_len, ak.params.data(), ak.params.size(),
                                         ak.issuer, ak.issuer_len, &res);
     if (rc != 0) return Status(rc);
@@ -888,6 +958,7 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
                         boot->verified_boot_key + boot->verified_boot_key_len);
   g_stage_vb_hash.assign(boot->verified_boot_hash,
                          boot->verified_boot_hash + boot->verified_boot_hash_len);
+  g_stage_module_hash.assign(boot->module_hash, boot->module_hash + boot->module_hash_len);
   g_stage_locked = boot->device_locked;
   g_stage_vb_state = boot->verified_boot_state;
   g_stage_strongbox_ok = boot->strongbox_available;
@@ -896,26 +967,55 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
-  ::Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
-                               p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
-                               g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
-                               g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state,
-                               g_stage_attest_version_tee, g_stage_attest_version_strongbox, p->ids);
-  if (!ta) {
+  // A real device runs a separate KeyMint instance per security level; we mirror that with one fixed-
+  // level TA per level. Both are built from the same keybox and boot state, so their key-encryption
+  // keys match and any of our blobs decrypts under either — but each stamps its own level into the
+  // keys it mints, so operations read a key's characteristics at the level it was minted at with no
+  // per-request override. `p->security_level` is retained only for the staged-profile log line.
+  auto buildTa = [&](int32_t level) -> ::Ta* {
+    return teesim_km_init_ex(p->keybox, p->keybox_len, level, p->os_version, p->os_patchlevel,
+                             p->vendor_patchlevel, p->boot_patchlevel, g_stage_vb_key.data(),
+                             g_stage_vb_key.size(), g_stage_vb_hash.data(), g_stage_vb_hash.size(),
+                             g_stage_locked, g_stage_vb_state, g_stage_attest_version_tee,
+                             g_stage_attest_version_strongbox, p->ids);
+  };
+  ::Ta* ta_tee = buildTa(static_cast<int32_t>(SecurityLevel::TRUSTED_ENVIRONMENT));
+  ::Ta* ta_sb = buildTa(static_cast<int32_t>(SecurityLevel::STRONGBOX));
+  if (!ta_tee || !ta_sb) {
     LOGE("keymint: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
+    if (ta_tee) teesim_km_destroy(ta_tee);
+    if (ta_sb) teesim_km_destroy(ta_sb);
     return false;
   }
   Profile prof;
   prof.id = p->id ? p->id : "";
-  prof.ta = WrapTa(ta);
+  prof.ta_tee = WrapTa(ta_tee);
+  prof.ta_strongbox = WrapTa(ta_sb);
   prof.patch_mode = p->mode && std::string(p->mode) == "patch";
+  // Seed both instances with the device-wide MODULE_HASH so a generation-mode key either mints carries
+  // the tag, independent of keystore2's one-shot delivery. Prefer keystore2's captured bytes; fall
+  // back to the daemon's computed value when we never saw that call. The reference TA emits the tag
+  // only for KeyMint v4+ attestations, so seeding an older-version profile is harmless.
+  {
+    std::vector<uint8_t> seed;
+    {
+      std::lock_guard<std::mutex> lk(g_cfg_mu);
+      seed = g_module_hash.empty() ? g_stage_module_hash : g_module_hash;
+    }
+    SeedModuleHash(prof.ta_tee, seed);
+    SeedModuleHash(prof.ta_strongbox, seed);
+  }
   for (int i = 0; i < p->n_packages && p->packages; ++i) {
-    if (p->packages[i]) prof.packages.emplace_back(p->packages[i]);
+    if (!p->packages[i]) continue;
+    // No package_users[] at all means an older daemon that only ever targeted the primary user.
+    prof.packages.push_back({p->packages[i], p->package_users ? p->package_users[i] : 0});
   }
   for (int i = 0; i < p->n_uids && p->uids; ++i) prof.uids.push_back(p->uids[i]);
   LOGI("cfg: staged profile '%s' (mode=%s, security_level=%d, %zu package(s), %zu uid(s))",
        prof.id.c_str(), prof.patch_mode ? "patch" : "generation", p->security_level,
        prof.packages.size(), prof.uids.size());
+  for (const auto& pkg : prof.packages)
+    LOGI("cfg:   package '%s' in user %d", pkg.name.c_str(), pkg.user_id);
   g_staging.push_back(std::move(prof));
   return true;
 }
@@ -924,7 +1024,6 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
   std::lock_guard<std::mutex> lk(g_cfg_mu);
   g_profiles = std::move(g_staging);
   g_staging.clear();
-  g_default_ta = g_profiles.empty() ? nullptr : g_profiles.front().ta;
   g_strongbox_ok = g_stage_strongbox_ok;
   return static_cast<int>(g_profiles.size());
 }
@@ -952,7 +1051,8 @@ extern "C" bool teesim_cfg_resign(const char* profile_id, const uint8_t* leaf, s
     std::lock_guard<std::mutex> lk(g_cfg_mu);
     for (const auto& prof : g_profiles) {
       if (prof.id == profile_id) {
-        ta = prof.ta;
+        // Re-signing is level-independent (same keybox and patched root of trust at either level).
+        ta = prof.ta_tee;
         break;
       }
     }
