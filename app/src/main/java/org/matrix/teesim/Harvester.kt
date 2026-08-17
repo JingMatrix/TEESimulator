@@ -366,48 +366,53 @@ object Harvester {
     }
 
     /**
-     * Cap the attestation/keymaster version we present so it never exceeds the KeyMint AIDL version the
-     * device declares in its VINTF manifest (see [Vintf.keyMintHalVersion]). That number is the ceiling an
-     * integrity checker — and Android's own attestation contract — cross-checks the attested version
-     * against, and one we cannot raise: it is baked into the vendor image. A VTS-compliant device already
-     * satisfies `attestationVersion / 100 <= vintfVersion`, so the clamp is a no-op there; it only bites an
-     * OEM image that ships an older HAL (e.g. `IKeyMintDevice/default@3` on Android 16) while its keys — or
-     * our OS-derived fabrication — claim a newer KeyMint. TEE is recorded as computed overrides so the
-     * WebUI, the config push and the TA all agree; StrongBox is clamped in its own field, which Resolver
-     * reads directly. A version below 400 also makes the TA drop MODULE_HASH, a v4-only tag, keeping the
-     * record self-consistent.
+     * Reconcile the attestation/keymaster version we present with the keystore HAL the device declares in
+     * VINTF ([Vintf.attestationVersionConstraint]). Two constraint kinds, following
+     * VtsAidlKeyMintTargetTest::check_attestation_version and ../Duck-Detector-Refactoring
+     * VintfKeyMintVersionProbe:
+     *
+     *  - An AIDL KeyMint HAL @N is a CEILING (N*100): `attestationVersion / 100 <= N`, so we clamp DOWN
+     *    only when the current value exceeds it (e.g. an image shipping `IKeyMintDevice/default@3` while
+     *    the keys or our fabrication claim a newer KeyMint).
+     *  - A legacy HIDL Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4; AOSP
+     *    system/keymaster): we set it in BOTH directions, since the captured or fabricated value may sit
+     *    either side of the declared HAL.
+     *
+     * TEE is recorded as computed overrides so the WebUI, the config push and the TA agree; StrongBox is
+     * reconciled in its own field, which Resolver reads directly. keymasterVersionFor derives the matching
+     * keymasterVersion, and a resulting version below 400 makes the TA drop MODULE_HASH (a v4-only tag).
      */
     private fun clampAttestationToVintf(r: Record): Record {
         var out = r
 
-        Vintf.keyMintHalVersion("default")?.let { hal ->
-            val ceiling = hal * 100
+        Vintf.attestationVersionConstraint("default")?.let { c ->
             val current = out.effectiveInt("attestationVersion", out.attestationVersion)
-            if (current > ceiling) {
+            if (if (c.exact) current != c.version else current > c.version) {
                 SystemLogger.info(
-                    "Harvest: clamping attestationVersion $current -> $ceiling to match the device's " +
-                        "VINTF-declared KeyMint HAL (IKeyMintDevice/default@$hal); a higher value would " +
-                        "contradict the vendor manifest"
+                    "Harvest: constraining attestationVersion $current -> ${c.version} to the device's " +
+                        "VINTF-declared keystore HAL (${if (c.exact) "Keymaster HIDL, exact match" else "KeyMint AIDL, ceiling"})"
                 )
                 out =
                     out
-                        .withOverride("attestationVersion", ceiling.toString())
-                        .withOverride("keymasterVersion", keymasterVersionFor(ceiling).toString())
+                        .withOverride("attestationVersion", c.version.toString())
+                        .withOverride("keymasterVersion", keymasterVersionFor(c.version).toString())
             }
         }
 
-        // StrongBox declares its own instance version; fall back to the default instance's when the manifest
-        // does not list a separate strongbox HAL (many devices share one KeyMint version across levels).
-        (Vintf.keyMintHalVersion("strongbox") ?: Vintf.keyMintHalVersion("default"))?.let { hal ->
-            val ceiling = hal * 100
-            if (out.strongBoxAttestationVersion > ceiling) {
-                SystemLogger.info(
-                    "Harvest: clamping strongBoxAttestationVersion ${out.strongBoxAttestationVersion} -> " +
-                        "$ceiling to match the device's VINTF-declared KeyMint StrongBox HAL (@$hal)"
-                )
-                out = out.copy(strongBoxAttestationVersion = ceiling)
+        // StrongBox declares its own instance constraint; fall back to the default instance's when the
+        // manifest lists no separate strongbox HAL (many devices share one HAL version across levels).
+        (Vintf.attestationVersionConstraint("strongbox")
+                ?: Vintf.attestationVersionConstraint("default"))
+            ?.let { c ->
+                val current = out.strongBoxAttestationVersion
+                if (if (c.exact) current != c.version else current > c.version) {
+                    SystemLogger.info(
+                        "Harvest: constraining strongBoxAttestationVersion $current -> ${c.version} to the " +
+                            "device's VINTF-declared StrongBox keystore HAL"
+                    )
+                    out = out.copy(strongBoxAttestationVersion = c.version)
+                }
             }
-        }
 
         return out
     }
