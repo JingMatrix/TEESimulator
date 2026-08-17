@@ -9,9 +9,9 @@ import java.io.ByteArrayOutputStream
  * that carries such a leaf is re-signed under its profile's keybox — the same patch the router
  * applies to a freshly generated key — and written back. The write-back mirrors the delete path: it
  * asks keystore2 as the key's OWNER first ([Keystore2Service.updateSubcomponentAsUid], which seteuid's
- * so keystore2 accepts the update), and only a key keystore2 still refuses falls back to a direct
- * database write ([KeystoreDb.updateSubcomponents]). The key blob is never touched, so the real hardware
- * key keeps working; only the certificate the app reads changes.
+ * to the owner in a child), and a key keystore2 refuses falls back to a direct database write
+ * ([KeystoreDb.updateSubcomponents]). The key blob is never touched, so the real hardware key keeps
+ * working; only the certificate the app reads changes.
  *
  * Idempotent and record-less: it re-scans the live keystore each run and re-signs whatever it finds,
  * so a re-run, a keybox swap, or a newly installed app all converge on the next push.
@@ -25,7 +25,7 @@ object ReAttest {
      * delegated leaves to get a patched root of trust. Clearing it forces the app's next attestation to
      * re-create it, which now always mints in the TA (generation).
      *
-     * keystore2 only lets a key's OWNER delete it (KeyPerm::Delete, confirmed in service.rs), so the
+     * keystore2 only lets a key's OWNER delete it (KeyPerm::Delete, AOSP service.rs), so the
      * daemon can't remove another app's key through the API — [KeystoreDb.deleteTargetAttestKeys] falls
      * back to a direct database delete, which removes the row but does NOT evict keystore2's in-memory
      * cache, so the app would keep using the cached key. We therefore restart keystore2 after a purge so

@@ -37,7 +37,7 @@ import org.json.JSONObject
  * only ever remove rows we re-verify as our own target-app keys). Root can read and write the
  * keystore-owned files.
  *
- * Schema (AOSP system/security/keystore2/src/database.rs, confirmed against a live API 37 device):
+ * Schema (AOSP system/security/keystore2/src/database.rs):
  * ```
  *   keyentry(id, key_type, domain, namespace, alias BLOB, state, km_uuid)
  *     domain    Domain::APP = 0  -> namespace is the app uid
@@ -69,7 +69,7 @@ object KeystoreDb {
 
     // keystore2 stores key parameters in `keyparameter(tag, data)`. Tag::PURPOSE is the KeyMint tag
     // enum (TagType.ENUM_REP<<28 | 1) and KeyPurpose::ATTEST_KEY is 7, so a row (PURPOSE, 7) marks an
-    // attestation key. Confirmed against the live DB on-device.
+    // attestation key.
     private const val PURPOSE_TAG = 536870913 // 0x20000001
     private const val ATTEST_KEY_PURPOSE = 7
 
@@ -445,12 +445,12 @@ object KeystoreDb {
      * Fallback for [ReAttest]: write re-rooted certificates straight into keystore2's LIVE database when
      * the owner-as-euid API refused the update. Mirrors [deleteFromDatabase] — same WAL open, busy wait,
      * transaction, and per-id target-app re-check — but it REPLACES the key's stored certificates instead
-     * of removing the key. It reproduces keystore2's own set_blob for a certificate: delete any existing
-     * blobentry of that subcomponent type for the key (and any blobmetadata keyed off it), then insert the
-     * new one — [SUBCOMPONENT_CERT] for the leaf, [SUBCOMPONENT_CERT_CHAIN] for the rest. Unlike a key
-     * blob, keystore2 re-reads a key's certificates from the database on each getKeyEntry, so no keystore2
-     * restart is needed for the swap to take effect. The key blob is never touched. Returns the number of
-     * keys updated; 0 on failure (e.g. SELinux denies writing keystore2's DB).
+     * of removing the key. It reproduces keystore2's own set_blob for a certificate (AOSP
+     * database.rs set_blob_internal): delete any existing blobentry of that subcomponent type for the key
+     * (and any blobmetadata keyed off it), then insert the new one — [SUBCOMPONENT_CERT] for the leaf,
+     * [SUBCOMPONENT_CERT_CHAIN] for the rest. The key blob is never touched. Unlike the delete fallback,
+     * this does not restart keystore2. Returns the number of keys updated; 0 on failure (e.g. SELinux
+     * denies writing keystore2's DB).
      */
     fun updateSubcomponents(targets: Set<Int>, updates: List<CertUpdate>): Int {
         if (!available() || updates.isEmpty() || targets.isEmpty()) return 0
