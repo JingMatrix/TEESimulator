@@ -5,17 +5,21 @@ import java.io.File
 import org.xmlpull.v1.XmlPullParser
 
 /**
- * Reads the KeyMint HAL AIDL interface version the device declares in its VINTF manifest — the `@N`
- * in `android.hardware.security.keymint.IKeyMintDevice/default@N`. An integrity checker (and
- * Android's own attestation contract, VtsAidlKeyMintTargetTest::check_attestation_version)
- * cross-checks the attested `attestationVersion` against this number: `attestationVersion / 100`
- * must not exceed it. It is baked into the vendor image and we cannot raise it, so it is the hard
- * ceiling for the version we may present.
+ * Reads the keystore HAL version the device declares in its VINTF manifest, so the harvest can present
+ * an attestation version consistent with it ([attestationVersionConstraint]). Two HAL families appear:
+ * the modern AIDL KeyMint HAL (`android.hardware.security.keymint.IKeyMintDevice/default@N`), whose `@N`
+ * is a ceiling `attestationVersion / 100` must not exceed (Android's own contract,
+ * VtsAidlKeyMintTargetTest::check_attestation_version), and the legacy HIDL Keymaster HAL
+ * (`android.hardware.keymaster/IKeymasterDevice/default@4.1`), whose version maps 1:1 to an exact
+ * attestation version an integrity checker expects. Neither can be changed — both are baked into the
+ * image — so they bound what we may present.
  *
- * The value is parsed straight from the on-disk manifest fragments, which is exactly what the
- * platform assembles the declaration from; the module runs as root, so the vendor/odm paths are
- * readable. A result (including "not declared") is cached for the process — VINTF cannot change
- * without a reboot.
+ * Values are parsed straight from the on-disk manifest fragments, the same files the platform assembles
+ * the declaration from, across the device (vendor/odm) AND framework (system/system_ext/product)
+ * manifests — a GSI or custom ROM may declare a keystore2 compat HAL framework-side. The module runs as
+ * root, so all paths are readable. Both declaration styles VINTF allows are handled: `<version>` +
+ * `<interface>`, and `<fqname>`. Results (including "not declared") are cached for the process — VINTF
+ * cannot change without a reboot.
  */
 object Vintf {
 
@@ -34,22 +38,60 @@ object Vintf {
     private const val KEYMASTER_HAL = "android.hardware.keymaster"
     private const val KEYMASTER_IFACE = "IKeymasterDevice"
 
-    // Standard AIDL VINTF manifest locations, vendor first (KeyMint is a vendor HAL). The
-    // directories hold
-    // per-HAL fragments; the flat files are the legacy single-manifest form. All are scanned and
-    // the highest
-    // matching version wins, so a fragment declaring the real HAL is found wherever the OEM placed
-    // it.
+    // VINTF manifest locations. The device manifest (vendor/odm) is where a keystore HAL normally lives,
+    // but a GSI or custom ROM can declare the keystore2 compat HAL in a framework-side manifest
+    // (system/system_ext/product) instead — so all are scanned, matching what an integrity checker reads
+    // from the assembled VINTF. Each entry is scanned as a directory of *.xml fragments or as a flat file;
+    // the highest matching version across every file wins, so the real HAL is found wherever the OEM put it.
     private val MANIFEST_PATHS =
         listOf(
             "/vendor/etc/vintf/manifest.xml",
             "/vendor/etc/vintf/manifest",
             "/odm/etc/vintf/manifest.xml",
             "/odm/etc/vintf/manifest",
+            "/system/etc/vintf/manifest.xml",
+            "/system/etc/vintf/manifest",
+            "/system_ext/etc/vintf/manifest.xml",
+            "/system_ext/etc/vintf/manifest",
+            "/product/etc/vintf/manifest.xml",
+            "/product/etc/vintf/manifest",
             "/vendor/manifest.xml",
         )
 
+    // A HIDL fqname, e.g. "@4.1::IKeymasterDevice/default" -> (version, interface, instance).
+    private val HIDL_FQNAME = Regex("^@([0-9]+(?:\\.[0-9]+)?)::([^/]+)/(.+)$")
+    // A HIDL version range, e.g. "4.0-1" -> major 4, minors 0..1.
+    private val HIDL_RANGE = Regex("^([0-9]+)\\.([0-9]+)-([0-9]+)$")
+
     private val cache = HashMap<String, Int?>()
+
+    /** A VINTF-derived bound on the attestation version we may present for a security level: an EXACT
+     *  target (legacy HIDL Keymaster, whose HAL version maps 1:1 to an attestation version) or a CEILING
+     *  we must not exceed (AIDL KeyMint @N -> N*100). */
+    data class AttestationConstraint(val version: Int, val exact: Boolean)
+
+    private val constraintCache = HashMap<String, AttestationConstraint?>()
+
+    /**
+     * The attestation-version constraint the device's declared keystore HAL imposes for [instance]: an
+     * AIDL KeyMint HAL @N is a ceiling of N*100 that a higher attestation would contradict; a legacy HIDL
+     * Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4) an integrity checker cross-checks
+     * for equality. Prefers KeyMint when both are somehow present. Null when neither is declared. This is
+     * the single source [Harvester.clampAttestationToVintf] reconciles the presented version against.
+     */
+    @Synchronized
+    fun attestationVersionConstraint(instance: String = "default"): AttestationConstraint? {
+        if (constraintCache.containsKey(instance)) return constraintCache[instance]
+        val c =
+            keyMintHalVersion(instance)?.let { AttestationConstraint(it * 100, exact = false) }
+                ?: keymasterHalAttestationVersion(instance)?.let { AttestationConstraint(it, exact = true) }
+        constraintCache[instance] = c
+        SystemLogger.info(
+            "Vintf: attestation-version constraint for '$instance' = " +
+                "${c?.version ?: "unknown"} (exact=${c?.exact ?: false})"
+        )
+        return c
+    }
 
     /**
      * The declared KeyMint AIDL version for [instance] (e.g. 3 for `IKeyMintDevice/default@3`), or
@@ -146,11 +188,30 @@ object Vintf {
             else -> null
         }
 
+    /** Expand a HIDL version token to concrete versions: "4.1" -> ["4.1"]; the range form "4.0-1"
+     *  (major.minorFirst-minorLast, as a manifest may abbreviate 4.0 and 4.1) -> ["4.0", "4.1"]. */
+    private fun expandHidlVersions(version: String): List<String> {
+        val m = HIDL_RANGE.matchEntire(version.trim()) ?: return listOf(version.trim())
+        val major = m.groupValues[1]
+        return (m.groupValues[2].toInt()..m.groupValues[3].toInt()).map { "$major.$it" }
+    }
+
+    /** The version from a Keymaster `<fqname>` like "@4.1::IKeymasterDevice/default" — but only when it
+     *  names [instance] on IKeymasterDevice; null otherwise. HIDL fqnames bind version and instance
+     *  together, so a strongbox fqname never contributes to the default instance. */
+    private fun keymasterFqnameVersion(fqname: String, instance: String): String? {
+        val m = HIDL_FQNAME.matchEntire(fqname.trim()) ?: return null
+        val (version, iface, inst) = m.destructured
+        return version.takeIf { iface == KEYMASTER_IFACE && inst == instance }
+    }
+
     /**
      * The highest Keymaster `IKeymasterDevice/[instance]` HIDL version declared in one manifest file, as
-     * its attestationVersion equivalent, or null. Mirrors [versionIn] but for a `format="hidl"` block:
-     * the `<version>` is a dotted HIDL version (mapped by [keymasterAttestationVersion]) and the instance
-     * is named the classic way — `<interface><name>IKeymasterDevice</name><instance>default</instance>`.
+     * its attestationVersion equivalent, or null. Handles both declaration styles VINTF allows in a
+     * `format="hidl"` block: the classic `<version>` + `<interface><name>IKeymasterDevice</name>
+     * <instance>default</instance>` form (versions apply to every instance the interface lists), and the
+     * `<fqname>@4.1::IKeymasterDevice/default</fqname>` form (version bound to one instance). HIDL version
+     * ranges ("4.0-1") are expanded before mapping.
      */
     private fun keymasterVersionIn(file: File, instance: String): Int? {
         var best: Int? = null
@@ -161,7 +222,8 @@ object Vintf {
             var inHal = false
             var isHidl = false
             var halName: String? = null
-            val attestVersions = ArrayList<Int>()
+            val versions = ArrayList<String>() // raw <version> tokens (may be ranges)
+            val fqnames = ArrayList<String>()
             var instanceMatched = false
             var ifaceName: String? = null
 
@@ -174,7 +236,8 @@ object Vintf {
                             inHal = true
                             isHidl = "hidl".equals(parser.getAttributeValue(null, "format"), true)
                             halName = null
-                            attestVersions.clear()
+                            versions.clear()
+                            fqnames.clear()
                             instanceMatched = false
                             ifaceName = null
                         }
@@ -185,16 +248,25 @@ object Vintf {
                                 if (depth <= 3) halName = halName ?: text else ifaceName = text
                             }
                         "version" ->
-                            if (inHal && depth <= 3)
-                                keymasterAttestationVersion(readText(parser))?.let { attestVersions.add(it) }
+                            if (inHal && depth <= 3) readText(parser).let { if (it.isNotEmpty()) versions.add(it) }
                         "instance" ->
                             if (inHal && KEYMASTER_IFACE == ifaceName && readText(parser) == instance) {
                                 instanceMatched = true
                             }
+                        "fqname" -> if (inHal) readText(parser).let { if (it.isNotEmpty()) fqnames.add(it) }
                     }
                 } else if (event == XmlPullParser.END_TAG && parser.name == "hal") {
-                    if (inHal && isHidl && halName == KEYMASTER_HAL && instanceMatched) {
-                        attestVersions.maxOrNull()?.let { v -> best = maxOf(best ?: v, v) }
+                    if (inHal && isHidl && halName == KEYMASTER_HAL) {
+                        // Versions bound to the requested instance: the <version>+<interface> form when the
+                        // interface exposed this instance, plus any <fqname> that names it directly.
+                        val bound = ArrayList<String>()
+                        if (instanceMatched) bound.addAll(versions)
+                        for (fq in fqnames) keymasterFqnameVersion(fq, instance)?.let(bound::add)
+                        bound
+                            .flatMap(::expandHidlVersions)
+                            .mapNotNull(::keymasterAttestationVersion)
+                            .maxOrNull()
+                            ?.let { v -> best = maxOf(best ?: v, v) }
                     }
                     inHal = false
                 }
