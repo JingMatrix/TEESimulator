@@ -529,16 +529,13 @@ object Harvester {
     private const val TELEPHONY_WAIT_MS = 15_000L
 
     /**
-     * Fill in the device ids that device-properties attestation does not carry — IMEI, MEID, serial — so
-     * the reference TA's ID check passes when an app requests the device's true values.
+     * Fill in the device ids a leaf without device-id attestation does not carry — IMEI, MEID, serial.
      *
-     * The bare app_process never initialized the telephony framework (so `TelephonyManager.getImei()`
-     * hits a null service registerer), and `getImei()`/`getImeiForSlot()` additionally enforce a
-     * "package belongs to caller uid" check we can't satisfy as root (uid 0). So we go straight to the
-     * `IPhoneSubInfo` binder and use the legacy `getDeviceId*` calls, which return the real IMEI
-     * regardless of the calling package — confirmed on-device. The serial is read from the `ro.serialno`
-     * property: `Build.getSerial()` enforces the same "package belongs to caller uid" check, which we
-     * can never satisfy as root (uid 0), so it only ever fails here.
+     * The bare app_process does not initialize the telephony framework (so `TelephonyManager.getImei()`
+     * hits a null service registerer), and `getImei()`/`getImeiForSlot()` enforce a "package belongs to
+     * caller uid" check the daemon (uid 0) does not pass. So we call the `IPhoneSubInfo` binder's legacy
+     * `getDeviceId*` methods, which are not package-scoped. The serial is read from the `ro.serialno`
+     * property, since `Build.getSerial()` applies the same package check.
      */
     private fun supplementDeviceIds(r: Record): Record {
         // The harvest runs very early at boot, when telephony (the modem/RIL) usually isn't up yet, so
