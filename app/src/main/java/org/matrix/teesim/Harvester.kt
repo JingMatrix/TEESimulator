@@ -566,10 +566,9 @@ object Harvester {
         // brand/device/product/manufacturer/model come from the attested leaf when the device did ID
         // attestation. A device that did NOT (a plain attestation, or a TEE that refused it) leaves them
         // blank — and then the profile would present an empty id, which the reference TA's ID check
-        // rejects against an app requesting the device's true brand. Fill each blank one from the
-        // android.os.Build field the framework itself fills ATTESTATION_ID_* from (resolved from the
-        // ro.product.* system properties), as a SUPPLEMENT override; a real capture is left untouched, and
-        // the user can still spoof any of them per-profile.
+        // rejects against an app requesting the device's true brand. Fill each blank one from the SAME
+        // source the framework fills ATTESTATION_ID_* from (see [devicePropId]), as a SUPPLEMENT override;
+        // a real capture is left untouched, and the user can still spoof any of them per-profile.
         val supplemented = ArrayList<String>()
         for (field in DEVICE_PROP_IDS) {
             if (out.effective(field).isNotBlank()) continue // attested, or already supplemented
@@ -587,17 +586,46 @@ object Harvester {
         return out
     }
 
-    /** The device-property id [field] as the framework reads it for ID attestation — the android.os.Build
-     *  field, which resolves from the ro.product.* system properties. Blank for an unknown field. */
-    private fun devicePropId(field: String): String =
+    // android.os.Build.UNKNOWN, the sentinel getString returns for an unset property.
+    private const val BUILD_UNKNOWN = "unknown"
+
+    /** The property base name AOSP's Build.getVendorDeviceIdProperty uses for each attestation id
+     *  (PRODUCT is backed by "name"); null for a field with no such mapping. */
+    private fun attestIdBase(field: String): String? =
         when (field) {
-            "brand" -> Build.BRAND
-            "device" -> Build.DEVICE
-            "product" -> Build.PRODUCT
-            "manufacturer" -> Build.MANUFACTURER
-            "model" -> Build.MODEL
-            else -> ""
-        }.orEmpty().trim()
+            "brand" -> "brand"
+            "device" -> "device"
+            "product" -> "name"
+            "manufacturer" -> "manufacturer"
+            "model" -> "model"
+            else -> null
+        }
+
+    /**
+     * The device-property id [field] resolved EXACTLY as keystore fills ATTESTATION_ID_* — so a
+     * supplemented value equals what the calling app's request carries (a plain android.os.Build read is
+     * NOT the same source, and diverges on a ROM that ships attestation-specific ids). Mirrors
+     * AndroidKeyStoreKeyPairGeneratorSpi, which reads Build.<X>_FOR_ATTESTATION with a fallback, and
+     * Build.getVendorDeviceIdProperty behind it:
+     *   ro.product.<base>_for_attestation  (unless "unknown")
+     *     → else ro.product.vendor.<base>   (unless empty/"unknown")
+     *     → else ro.product.<base>          (the plain Build value)
+     * A ROM that sets *_for_attestation overrides (e.g. LineageOS, sapphire vs sapphiren) then yields the
+     * id the caller attests, not the raw ro.product.* value a normal Build read resolves. Blank when the
+     * whole chain is unset/unknown, so nothing garbage is supplemented.
+     */
+    private fun devicePropId(field: String): String {
+        val base = attestIdBase(field) ?: return ""
+        val forAttestation =
+            DeviceProps.prop("ro.product.${base}_for_attestation", BUILD_UNKNOWN).let {
+                if (it == BUILD_UNKNOWN) DeviceProps.prop("ro.product.vendor.$base", BUILD_UNKNOWN) else it
+            }
+        val resolved =
+            if (forAttestation.isBlank() || forAttestation == BUILD_UNKNOWN)
+                DeviceProps.prop("ro.product.$base", "")
+            else forAttestation
+        return resolved.trim().let { if (it == BUILD_UNKNOWN) "" else it }
+    }
 
     /**
      * Wait (bounded) for telephony to return the primary IMEI. IPhoneSubInfo registers early, but the
