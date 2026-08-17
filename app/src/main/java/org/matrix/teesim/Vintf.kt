@@ -7,19 +7,16 @@ import org.xmlpull.v1.XmlPullParser
 /**
  * Reads the keystore HAL version the device declares in its VINTF manifest, so the harvest can present
  * an attestation version consistent with it ([attestationVersionConstraint]). Two HAL families appear:
- * the modern AIDL KeyMint HAL (`android.hardware.security.keymint.IKeyMintDevice/default@N`), whose `@N`
- * is a ceiling `attestationVersion / 100` must not exceed (Android's own contract,
- * VtsAidlKeyMintTargetTest::check_attestation_version), and the legacy HIDL Keymaster HAL
- * (`android.hardware.keymaster/IKeymasterDevice/default@4.1`), whose version maps 1:1 to an exact
- * attestation version an integrity checker expects. Neither can be changed — both are baked into the
- * image — so they bound what we may present.
+ * the AIDL KeyMint HAL (`android.hardware.security.keymint.IKeyMintDevice/default@N`), where
+ * `attestationVersion / 100` must not exceed `N` (VtsAidlKeyMintTargetTest::check_attestation_version),
+ * and the legacy HIDL Keymaster HAL (`android.hardware.keymaster/IKeymasterDevice/default@X.Y`), whose
+ * version maps to an attestation version (AOSP system/keymaster version_to_attestation_version).
  *
- * Values are parsed straight from the on-disk manifest fragments, the same files the platform assembles
- * the declaration from, across the device (vendor/odm) AND framework (system/system_ext/product)
- * manifests — a GSI or custom ROM may declare a keystore2 compat HAL framework-side. The module runs as
- * root, so all paths are readable. Both declaration styles VINTF allows are handled: `<version>` +
- * `<interface>`, and `<fqname>`. Results (including "not declared") are cached for the process — VINTF
- * cannot change without a reboot.
+ * Values are parsed from the on-disk manifest fragments. The scanned locations and the parsing (device
+ * vendor/odm AND framework system/system_ext/product manifests; the `<version>` + `<interface>` form,
+ * the `<fqname>` form, and HIDL version ranges) follow the reference detector's manifest reader
+ * (../Duck-Detector-Refactoring VintfKeyMintVersionProbe). The module runs as root, so all paths are
+ * readable. Results (including "not declared") are cached for the process.
  */
 object Vintf {
 
@@ -30,19 +27,15 @@ object Vintf {
     private const val KEYMINT_HAL = "android.hardware.security.keymint"
     private const val KEYMINT_IFACE = "IKeyMintDevice"
 
-    // The legacy Keymaster HIDL HAL. A pre-KeyMint device (Keymaster 3.0/4.0/4.1), or a 12+ device whose
-    // vendor still ships the Keymaster HAL behind keystore2's compat shim, declares this instead of the
-    // AIDL KeyMint HAL, with a dotted HIDL version like 4.1. An integrity checker maps that version to the
-    // attestation/keymaster versions a real device of that HAL reports (AOSP system/keymaster
-    // version_to_attestation_version / version_to_keymaster_version) and cross-checks the attested pair.
+    // The legacy Keymaster HIDL HAL, declared with a dotted HIDL version (e.g. 4.1). AOSP system/keymaster
+    // version_to_attestation_version / version_to_keymaster_version map that version to the attestation and
+    // keymaster versions.
     private const val KEYMASTER_HAL = "android.hardware.keymaster"
     private const val KEYMASTER_IFACE = "IKeymasterDevice"
 
-    // VINTF manifest locations. The device manifest (vendor/odm) is where a keystore HAL normally lives,
-    // but a GSI or custom ROM can declare the keystore2 compat HAL in a framework-side manifest
-    // (system/system_ext/product) instead — so all are scanned, matching what an integrity checker reads
-    // from the assembled VINTF. Each entry is scanned as a directory of *.xml fragments or as a flat file;
-    // the highest matching version across every file wins, so the real HAL is found wherever the OEM put it.
+    // VINTF manifest locations to scan: the device (vendor/odm) and framework (system/system_ext/product)
+    // manifests, matching ../Duck-Detector-Refactoring VintfKeyMintVersionProbe. Each entry is scanned as a
+    // directory of *.xml fragments or as a flat file; the highest matching version across every file wins.
     private val MANIFEST_PATHS =
         listOf(
             "/vendor/etc/vintf/manifest.xml",
@@ -74,10 +67,11 @@ object Vintf {
 
     /**
      * The attestation-version constraint the device's declared keystore HAL imposes for [instance]: an
-     * AIDL KeyMint HAL @N is a ceiling of N*100 that a higher attestation would contradict; a legacy HIDL
-     * Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4) an integrity checker cross-checks
-     * for equality. Prefers KeyMint when both are somehow present. Null when neither is declared. This is
-     * the single source [Harvester.clampAttestationToVintf] reconciles the presented version against.
+     * AIDL KeyMint HAL @N gives a ceiling of N*100 (exact=false); a legacy HIDL Keymaster HAL gives an
+     * exact target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4; AOSP system/keymaster). Prefers KeyMint when both are
+     * declared. Null when neither is declared. [Harvester.clampAttestationToVintf] reconciles the presented
+     * version against it. The ceiling-vs-exact treatment follows ../Duck-Detector-Refactoring
+     * VintfKeyMintVersionProbe (KeyMint compared as an upper bound, HIDL Keymaster as equality).
      */
     @Synchronized
     fun attestationVersionConstraint(instance: String = "default"): AttestationConstraint? {
@@ -118,12 +112,10 @@ object Vintf {
     }
 
     /**
-     * The `attestationVersion` a real device of the legacy Keymaster HIDL HAL declared for [instance]
-     * reports — 1 for `@2.0`, 2 for `@3.0`, 3 for `@4.0`, 4 for `@4.1` (AOSP system/keymaster
+     * The attestation version for the legacy Keymaster HIDL HAL version declared for [instance] — 1 for
+     * `@2.0`, 2 for `@3.0`, 3 for `@4.0`, 4 for `@4.1` (AOSP system/keymaster
      * `version_to_attestation_version`) — or null when no manifest declares a Keymaster HAL for that
-     * instance (a KeyMint device, or one whose manifest we could not read). Cached per instance, keyed
-     * apart from [keyMintHalVersion]'s cache entries. This is the value the harvest aligns the presented
-     * attestation to on a device that ships no KeyMint HAL.
+     * instance. Cached per instance, keyed apart from [keyMintHalVersion]'s cache entries.
      */
     @Synchronized
     fun keymasterHalAttestationVersion(instance: String = "default"): Int? {

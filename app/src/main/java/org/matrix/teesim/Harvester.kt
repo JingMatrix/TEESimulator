@@ -367,21 +367,20 @@ object Harvester {
 
     /**
      * Reconcile the attestation/keymaster version we present with the keystore HAL the device declares in
-     * its VINTF manifest ([Vintf.attestationVersionConstraint]) — the number an integrity checker, and
-     * Android's own attestation contract, cross-checks the attested version against, and one we cannot
-     * change: it is baked into the image. Two HAL families impose two kinds of constraint:
+     * VINTF ([Vintf.attestationVersionConstraint]). Two constraint kinds, following
+     * VtsAidlKeyMintTargetTest::check_attestation_version and ../Duck-Detector-Refactoring
+     * VintfKeyMintVersionProbe:
      *
-     *  - An AIDL KeyMint HAL @N is a CEILING (N*100): a VTS-compliant device already satisfies
-     *    `attestationVersion / 100 <= N`, so this is a no-op there; it only bites an OEM image that ships
-     *    an older HAL (e.g. `IKeyMintDevice/default@3` on Android 16) while its keys — or our OS-derived
-     *    fabrication — claim a newer KeyMint, and we clamp DOWN.
-     *  - A legacy HIDL Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4): a checker maps
-     *    the HAL version to the attestation version and expects equality, so we move to it in BOTH
-     *    directions — the captured or fabricated value may sit either side of the declared HAL.
+     *  - An AIDL KeyMint HAL @N is a CEILING (N*100): `attestationVersion / 100 <= N`, so we clamp DOWN
+     *    only when the current value exceeds it (e.g. an image shipping `IKeyMintDevice/default@3` while
+     *    the keys or our fabrication claim a newer KeyMint).
+     *  - A legacy HIDL Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4; AOSP
+     *    system/keymaster): we set it in BOTH directions, since the captured or fabricated value may sit
+     *    either side of the declared HAL.
      *
-     * TEE is recorded as computed overrides so the WebUI, the config push and the TA all agree; StrongBox
-     * is reconciled in its own field, which Resolver reads directly. A resulting version below 400 also
-     * makes the TA drop MODULE_HASH, a v4-only tag, keeping the record self-consistent.
+     * TEE is recorded as computed overrides so the WebUI, the config push and the TA agree; StrongBox is
+     * reconciled in its own field, which Resolver reads directly. keymasterVersionFor derives the matching
+     * keymasterVersion, and a resulting version below 400 makes the TA drop MODULE_HASH (a v4-only tag).
      */
     private fun clampAttestationToVintf(r: Record): Record {
         var out = r
