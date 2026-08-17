@@ -142,18 +142,19 @@ object Resolver {
         }
 
         // Device IDs: an explicit profile value overrides; otherwise fall back to the harvest baseline —
-        // the real captured id, or (for serial/imei/meid, which the leaf never attests) the value read
+        // the real captured id, or (for serial/imei/meid, which the leaf never attests, and for
+        // brand/device/product/manufacturer/model on a device that did no ID attestation) the value read
         // from the OS at harvest, exposed via effective(). Omitted when neither is set (declines that id).
         val ids = JSONObject()
-        putId(ids, "brand", p.brand, harvest.brand)
-        putId(ids, "device", p.device, harvest.device)
-        putId(ids, "product", p.product, harvest.product)
+        putId(ids, "brand", p.brand, harvest.effective("brand"))
+        putId(ids, "device", p.device, harvest.effective("device"))
+        putId(ids, "product", p.product, harvest.effective("product"))
         putId(ids, "serial", p.serial, harvest.effective("serial"))
         putId(ids, "imei", p.imei, harvest.effective("imei"))
         putId(ids, "imei2", p.imei2, harvest.effective("imei2"))
         putId(ids, "meid", p.meid, harvest.effective("meid"))
-        putId(ids, "manufacturer", p.manufacturer, harvest.manufacturer)
-        putId(ids, "model", p.model, harvest.model)
+        putId(ids, "manufacturer", p.manufacturer, harvest.effective("manufacturer"))
+        putId(ids, "model", p.model, harvest.effective("model"))
         if (ids.length() > 0) o.put("deviceIds", ids)
 
         // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[] (caller-uid

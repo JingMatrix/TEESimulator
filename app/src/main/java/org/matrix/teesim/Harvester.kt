@@ -106,9 +106,14 @@ object Harvester {
         val userEdited: Boolean = false,
     )
 
-    /** Device ids the leaf omits but we read from the OS. Shown for transparency but NOT editable here —
-     *  spoofing an id is a per-profile concern (Resolver.resolveProfile lets a profile override each). */
-    private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid")
+    /** Device ids we may read from the OS when the attested leaf did not carry them, presented as
+     *  SUPPLEMENT overrides. Shown for transparency but NOT editable here — spoofing an id is a
+     *  per-profile concern (Resolver.resolveProfile lets a profile override each). serial/imei/imei2/meid
+     *  are never carried by device-properties attestation; brand/device/product/manufacturer/model
+     *  ([DEVICE_PROP_IDS]) usually are, so those are supplemented only on a device that produced no ID
+     *  attestation at all (a plain attestation, or a TEE that refused it). */
+    private val DEVICE_PROP_IDS = setOf("brand", "device", "product", "manufacturer", "model")
+    private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid") + DEVICE_PROP_IDS
     /** Level/version values we synthesize on a device with no working hardware — editable. */
     private val SYNTHESIZED_FIELDS =
         setOf(
@@ -225,6 +230,11 @@ object Harvester {
 
         private fun capturedString(field: String): String =
             when (field) {
+                "brand" -> brand
+                "device" -> device
+                "product" -> product
+                "manufacturer" -> manufacturer
+                "model" -> model
                 "serial" -> serial
                 "imei" -> imei
                 "imei2" -> imei2
@@ -552,8 +562,42 @@ object Harvester {
         if (r.imei2.isBlank() && imei2.isNotBlank()) out = out.withOverride("imei2", imei2)
         if (r.meid.isBlank() && meid.isNotBlank()) out = out.withOverride("meid", meid)
         if (r.serial.isBlank() && serial.isNotBlank()) out = out.withOverride("serial", serial)
+
+        // brand/device/product/manufacturer/model come from the attested leaf when the device did ID
+        // attestation. A device that did NOT (a plain attestation, or a TEE that refused it) leaves them
+        // blank — and then the profile would present an empty id, which the reference TA's ID check
+        // rejects against an app requesting the device's true brand. Fill each blank one from the
+        // android.os.Build field the framework itself fills ATTESTATION_ID_* from (resolved from the
+        // ro.product.* system properties), as a SUPPLEMENT override; a real capture is left untouched, and
+        // the user can still spoof any of them per-profile.
+        val supplemented = ArrayList<String>()
+        for (field in DEVICE_PROP_IDS) {
+            if (out.effective(field).isNotBlank()) continue // attested, or already supplemented
+            val value = devicePropId(field)
+            if (value.isNotBlank()) {
+                out = out.withOverride(field, value)
+                supplemented.add("$field='$value'")
+            }
+        }
+        if (supplemented.isNotEmpty())
+            SystemLogger.info(
+                "Harvest: device ids not attested; supplemented from system properties: " +
+                    supplemented.joinToString(" ")
+            )
         return out
     }
+
+    /** The device-property id [field] as the framework reads it for ID attestation — the android.os.Build
+     *  field, which resolves from the ro.product.* system properties. Blank for an unknown field. */
+    private fun devicePropId(field: String): String =
+        when (field) {
+            "brand" -> Build.BRAND
+            "device" -> Build.DEVICE
+            "product" -> Build.PRODUCT
+            "manufacturer" -> Build.MANUFACTURER
+            "model" -> Build.MODEL
+            else -> ""
+        }.orEmpty().trim()
 
     /**
      * Wait (bounded) for telephony to return the primary IMEI. IPhoneSubInfo registers early, but the
