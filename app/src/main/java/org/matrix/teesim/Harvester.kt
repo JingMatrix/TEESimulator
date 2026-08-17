@@ -380,32 +380,36 @@ object Harvester {
     private fun clampAttestationToVintf(r: Record): Record {
         var out = r
 
-        Vintf.keyMintHalVersion("default")?.let { hal ->
-            val ceiling = hal * 100
+        Vintf.attestationVersionConstraint("default")?.let { constraint ->
+            val required = constraint.version
             val current = out.effectiveInt("attestationVersion", out.attestationVersion)
-            if (current > ceiling) {
+            if ((constraint.exact && current != required) || current > required) {
                 SystemLogger.info(
-                    "Harvest: clamping attestationVersion $current -> $ceiling to match the device's " +
-                        "VINTF-declared KeyMint HAL (IKeyMintDevice/default@$hal); a higher value would " +
-                        "contradict the vendor manifest"
+                    "Harvest: constraining attestationVersion $current -> $required to match the device's " +
+                        "VINTF-declared KeyMint/Keymaster HAL; the attestation record must agree with " +
+                        "the vendor manifest"
                 )
                 out =
                     out
-                        .withOverride("attestationVersion", ceiling.toString())
-                        .withOverride("keymasterVersion", keymasterVersionFor(ceiling).toString())
+                        .withOverride("attestationVersion", required.toString())
+                        .withOverride("keymasterVersion", keymasterVersionFor(required).toString())
             }
         }
 
         // StrongBox declares its own instance version; fall back to the default instance's when the manifest
         // does not list a separate strongbox HAL (many devices share one KeyMint version across levels).
-        (Vintf.keyMintHalVersion("strongbox") ?: Vintf.keyMintHalVersion("default"))?.let { hal ->
-            val ceiling = hal * 100
-            if (out.strongBoxAttestationVersion > ceiling) {
+        (Vintf.attestationVersionConstraint("strongbox")
+            ?: Vintf.attestationVersionConstraint("default"))?.let { constraint ->
+            val required = constraint.version
+            if (
+                (constraint.exact && out.strongBoxAttestationVersion != required) ||
+                    out.strongBoxAttestationVersion > required
+            ) {
                 SystemLogger.info(
                     "Harvest: clamping strongBoxAttestationVersion ${out.strongBoxAttestationVersion} -> " +
-                        "$ceiling to match the device's VINTF-declared KeyMint StrongBox HAL (@$hal)"
+                        "$required to match the device's VINTF-declared KeyMint/Keymaster StrongBox HAL"
                 )
-                out = out.copy(strongBoxAttestationVersion = ceiling)
+                out = out.copy(strongBoxAttestationVersion = required)
             }
         }
 
