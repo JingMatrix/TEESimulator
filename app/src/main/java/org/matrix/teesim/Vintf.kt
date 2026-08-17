@@ -26,6 +26,14 @@ object Vintf {
     private const val KEYMINT_HAL = "android.hardware.security.keymint"
     private const val KEYMINT_IFACE = "IKeyMintDevice"
 
+    // The legacy Keymaster HIDL HAL. A pre-KeyMint device (Keymaster 3.0/4.0/4.1), or a 12+ device whose
+    // vendor still ships the Keymaster HAL behind keystore2's compat shim, declares this instead of the
+    // AIDL KeyMint HAL, with a dotted HIDL version like 4.1. An integrity checker maps that version to the
+    // attestation/keymaster versions a real device of that HAL reports (AOSP system/keymaster
+    // version_to_attestation_version / version_to_keymaster_version) and cross-checks the attested pair.
+    private const val KEYMASTER_HAL = "android.hardware.keymaster"
+    private const val KEYMASTER_IFACE = "IKeymasterDevice"
+
     // Standard AIDL VINTF manifest locations, vendor first (KeyMint is a vendor HAL). The
     // directories hold
     // per-HAL fragments; the flat files are the legacy single-manifest form. All are scanned and
@@ -67,21 +75,130 @@ object Vintf {
         return v
     }
 
+    /**
+     * The `attestationVersion` a real device of the legacy Keymaster HIDL HAL declared for [instance]
+     * reports — 1 for `@2.0`, 2 for `@3.0`, 3 for `@4.0`, 4 for `@4.1` (AOSP system/keymaster
+     * `version_to_attestation_version`) — or null when no manifest declares a Keymaster HAL for that
+     * instance (a KeyMint device, or one whose manifest we could not read). Cached per instance, keyed
+     * apart from [keyMintHalVersion]'s cache entries. This is the value the harvest aligns the presented
+     * attestation to on a device that ships no KeyMint HAL.
+     */
+    @Synchronized
+    fun keymasterHalAttestationVersion(instance: String = "default"): Int? {
+        val key = "km-hidl:$instance"
+        if (cache.containsKey(key)) return cache[key]
+        val v = runCatching { scanKeymaster(instance) }
+            .getOrElse {
+                SystemLogger.info(
+                    "Vintf: Keymaster manifest scan failed: ${it.javaClass.simpleName}: ${it.message}"
+                )
+                null
+            }
+        cache[key] = v
+        SystemLogger.info(
+            "Vintf: declared Keymaster HAL attestationVersion for instance '$instance' = ${v ?: "unknown"}"
+        )
+        return v
+    }
+
+    /** Every candidate VINTF manifest file: each flat manifest that exists, plus every .xml fragment in
+     *  a manifest directory. Shared by the KeyMint and Keymaster scans. */
+    private fun manifestFiles(): List<File> {
+        val out = ArrayList<File>()
+        for (path in MANIFEST_PATHS) {
+            val f = File(path)
+            when {
+                !f.exists() -> {}
+                f.isDirectory ->
+                    f.listFiles { file -> file.isFile && file.name.endsWith(".xml") }?.let(out::addAll)
+                else -> out.add(f)
+            }
+        }
+        return out
+    }
+
     /** The highest KeyMint version declared for [instance] across every candidate manifest file. */
     private fun scan(instance: String): Int? {
         var best: Int? = null
-        for (path in MANIFEST_PATHS) {
-            val f = File(path)
-            val files =
-                when {
-                    !f.exists() -> emptyList()
-                    f.isDirectory ->
-                        f.listFiles { file -> file.isFile && file.name.endsWith(".xml") }?.toList()
-                            ?: emptyList()
-                    else -> listOf(f)
+        for (file in manifestFiles()) {
+            versionIn(file, instance)?.let { v -> best = maxOf(best ?: v, v) }
+        }
+        return best
+    }
+
+    /** The highest Keymaster HIDL attestation version declared for [instance] across every manifest. */
+    private fun scanKeymaster(instance: String): Int? {
+        var best: Int? = null
+        for (file in manifestFiles()) {
+            keymasterVersionIn(file, instance)?.let { v -> best = maxOf(best ?: v, v) }
+        }
+        return best
+    }
+
+    /** The `IKeymasterDevice@N` HIDL version, as its attestationVersion equivalent: 2.0->1, 3.0->2,
+     *  4.0->3, 4.1->4 (AOSP system/keymaster). Null for an unknown/absent version string. */
+    private fun keymasterAttestationVersion(dotted: String): Int? =
+        when (dotted.trim()) {
+            "2.0" -> 1
+            "3.0" -> 2
+            "4.0" -> 3
+            "4.1" -> 4
+            else -> null
+        }
+
+    /**
+     * The highest Keymaster `IKeymasterDevice/[instance]` HIDL version declared in one manifest file, as
+     * its attestationVersion equivalent, or null. Mirrors [versionIn] but for a `format="hidl"` block:
+     * the `<version>` is a dotted HIDL version (mapped by [keymasterAttestationVersion]) and the instance
+     * is named the classic way — `<interface><name>IKeymasterDevice</name><instance>default</instance>`.
+     */
+    private fun keymasterVersionIn(file: File, instance: String): Int? {
+        var best: Int? = null
+        file.inputStream().use { input ->
+            val parser = Xml.newPullParser()
+            parser.setInput(input, null)
+
+            var inHal = false
+            var isHidl = false
+            var halName: String? = null
+            val attestVersions = ArrayList<Int>()
+            var instanceMatched = false
+            var ifaceName: String? = null
+
+            var event = parser.eventType
+            while (event != XmlPullParser.END_DOCUMENT) {
+                if (event == XmlPullParser.START_TAG) {
+                    val depth = parser.depth
+                    when (parser.name) {
+                        "hal" -> {
+                            inHal = true
+                            isHidl = "hidl".equals(parser.getAttributeValue(null, "format"), true)
+                            halName = null
+                            attestVersions.clear()
+                            instanceMatched = false
+                            ifaceName = null
+                        }
+                        "interface" -> if (inHal) ifaceName = null
+                        "name" ->
+                            if (inHal) {
+                                val text = readText(parser)
+                                if (depth <= 3) halName = halName ?: text else ifaceName = text
+                            }
+                        "version" ->
+                            if (inHal && depth <= 3)
+                                keymasterAttestationVersion(readText(parser))?.let { attestVersions.add(it) }
+                        "instance" ->
+                            if (inHal && KEYMASTER_IFACE == ifaceName && readText(parser) == instance) {
+                                instanceMatched = true
+                            }
+                    }
+                } else if (event == XmlPullParser.END_TAG && parser.name == "hal") {
+                    if (inHal && isHidl && halName == KEYMASTER_HAL && instanceMatched) {
+                        attestVersions.maxOrNull()?.let { v -> best = maxOf(best ?: v, v) }
+                    }
+                    inHal = false
                 }
-            for (file in files) {
-                versionIn(file, instance)?.let { v -> best = maxOf(best ?: v, v) }
+                event = parser.next()
             }
         }
         return best
