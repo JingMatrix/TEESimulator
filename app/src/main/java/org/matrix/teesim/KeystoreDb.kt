@@ -1,5 +1,6 @@
 package org.matrix.teesim
 
+import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import java.io.ByteArrayInputStream
@@ -60,6 +61,11 @@ object KeystoreDb {
 
     // The KeyMint attestation extension OID; a leaf carrying it has attestation content to re-root.
     private const val ATTEST_EXT_OID = "1.3.6.1.4.1.11129.2.1.17"
+
+    // keystore2's SubComponentType (database.rs): the blobentry.subcomponent_type of a key's leaf
+    // certificate and of the rest of its chain. KEY_BLOB is 0; these two are what re-rooting rewrites.
+    private const val SUBCOMPONENT_CERT = 1 // the leaf certificate
+    private const val SUBCOMPONENT_CERT_CHAIN = 2 // the rest of the chain
 
     // keystore2 stores key parameters in `keyparameter(tag, data)`. Tag::PURPOSE is the KeyMint tag
     // enum (TagType.ENUM_REP<<28 | 1) and KeyPurpose::ATTEST_KEY is 7, so a row (PURPOSE, 7) marks an
@@ -429,6 +435,85 @@ object KeystoreDb {
             } catch (_: Throwable) {}
         }
         return deleted
+    }
+
+    /** One pre-existing key's re-rooted certificates: its keyentry id, the leaf DER, and the DER
+     *  concatenation of the rest of the chain (empty when the leaf is the whole chain). */
+    data class CertUpdate(val id: Long, val leaf: ByteArray, val chain: ByteArray)
+
+    /**
+     * Fallback for [ReAttest]: write re-rooted certificates straight into keystore2's LIVE database when
+     * the owner-as-euid API refused the update. Mirrors [deleteFromDatabase] — same WAL open, busy wait,
+     * transaction, and per-id target-app re-check — but it REPLACES the key's stored certificates instead
+     * of removing the key. It reproduces keystore2's own set_blob for a certificate: delete any existing
+     * blobentry of that subcomponent type for the key (and any blobmetadata keyed off it), then insert the
+     * new one — [SUBCOMPONENT_CERT] for the leaf, [SUBCOMPONENT_CERT_CHAIN] for the rest. Unlike a key
+     * blob, keystore2 re-reads a key's certificates from the database on each getKeyEntry, so no keystore2
+     * restart is needed for the swap to take effect. The key blob is never touched. Returns the number of
+     * keys updated; 0 on failure (e.g. SELinux denies writing keystore2's DB).
+     */
+    fun updateSubcomponents(targets: Set<Int>, updates: List<CertUpdate>): Int {
+        if (!available() || updates.isEmpty() || targets.isEmpty()) return 0
+        val src = File(KEYSTORE2_DB)
+        if (!src.isFile) return 0
+
+        var db: SQLiteDatabase? = null
+        var updated = 0
+        try {
+            db =
+                SQLiteDatabase.openDatabase(
+                    src.absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING,
+                )
+            db.rawQuery("PRAGMA busy_timeout=4000", null).use { it.moveToNext() }
+            if (!tableExists(db, "blobentry")) return 0
+            val hasBlobMeta = tableExists(db, "blobmetadata")
+
+            db.beginTransactionNonExclusive()
+            try {
+                for (u in updates) {
+                    if (!isTargetKey(db, u.id, targets)) continue
+                    // Clear the key's existing leaf + chain blobs (and any blobmetadata keyed off them),
+                    // then insert the re-rooted pair — exactly what keystore2's set_blob does for a cert.
+                    if (hasBlobMeta) {
+                        db.execSQL(
+                            "DELETE FROM blobmetadata WHERE blobentryid IN " +
+                                "(SELECT id FROM blobentry WHERE keyentryid=? " +
+                                "AND subcomponent_type IN ($SUBCOMPONENT_CERT, $SUBCOMPONENT_CERT_CHAIN))",
+                            arrayOf(u.id),
+                        )
+                    }
+                    db.delete(
+                        "blobentry",
+                        "keyentryid=? AND subcomponent_type IN ($SUBCOMPONENT_CERT, $SUBCOMPONENT_CERT_CHAIN)",
+                        arrayOf(u.id.toString()),
+                    )
+                    db.insert("blobentry", null, ContentValues().apply {
+                        put("subcomponent_type", SUBCOMPONENT_CERT)
+                        put("keyentryid", u.id)
+                        put("blob", u.leaf)
+                    })
+                    db.insert("blobentry", null, ContentValues().apply {
+                        put("subcomponent_type", SUBCOMPONENT_CERT_CHAIN)
+                        put("keyentryid", u.id)
+                        put("blob", u.chain)
+                    })
+                    updated++
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            SystemLogger.info("KeystoreDb: direct database write re-rooted $updated of ${updates.size} key(s)")
+        } catch (e: Throwable) {
+            SystemLogger.warning("KeystoreDb.updateSubcomponents failed (SELinux may deny writing keystore2's DB)", e)
+        } finally {
+            try {
+                db?.close()
+            } catch (_: Throwable) {}
+        }
+        return updated
     }
 
     /**

@@ -7,9 +7,11 @@ import java.io.ByteArrayOutputStream
  * covered (or under a previous keybox) still carries the real hardware attestation — an unlocked
  * root of trust rooted in the device's real attestation key. For each target app, every stored key
  * that carries such a leaf is re-signed under its profile's keybox — the same patch the router
- * applies to a freshly generated key — and written back with [Keystore2Service.updateSubcomponent].
- * The key blob is never touched, so the real hardware key keeps working; only the certificate the app
- * reads changes.
+ * applies to a freshly generated key — and written back. The write-back mirrors the delete path: it
+ * asks keystore2 as the key's OWNER first ([Keystore2Service.updateSubcomponentAsUid], which seteuid's
+ * so keystore2 accepts the update), and only a key keystore2 still refuses falls back to a direct
+ * database write ([KeystoreDb.updateSubcomponents]). The key blob is never touched, so the real hardware
+ * key keeps working; only the certificate the app reads changes.
  *
  * Idempotent and record-less: it re-scans the live keystore each run and re-signs whatever it finds,
  * so a re-run, a keybox swap, or a newly installed app all converge on the next push.
@@ -72,6 +74,7 @@ object ReAttest {
         if (keys.isEmpty()) return
 
         var done = 0
+        val dbFallback = ArrayList<KeystoreDb.CertUpdate>()
         for (key in keys) {
             val profileId = uidToProfile[key.uid] ?: continue
             val chain =
@@ -84,12 +87,25 @@ object ReAttest {
             // keystore2 stores the leaf (CERT) and the rest of the chain (CERT_CHAIN) separately.
             val leaf = chain[0]
             val rest = concatFrom(chain, 1)
-            if (Keystore2Service.updateSubcomponent(key.id, leaf, rest)) {
+            // Try the keystore2 API first, as the key's OWNER (the helper seteuid's): keystore2 gates the
+            // update on the caller's effective uid, so re-rooting another app's key means asking as that
+            // app. Whatever the API refuses falls back to a direct database write — the same
+            // API-first / DB-fallback shape the delete path uses.
+            if (Keystore2Service.updateSubcomponentAsUid(key.id, key.uid, leaf, rest) == 0) {
                 done++
                 SystemLogger.info(
                     "re-attest: key id=${key.id} uid=${key.uid} profile=$profileId re-rooted (${chain.size}-cert chain)"
                 )
+            } else {
+                dbFallback.add(KeystoreDb.CertUpdate(key.id, leaf, rest))
             }
+        }
+        if (dbFallback.isNotEmpty()) {
+            SystemLogger.warning(
+                "re-attest: keystore2 refused the owner update for ${dbFallback.size} key(s); " +
+                    "falling back to a direct database write"
+            )
+            done += KeystoreDb.updateSubcomponents(uidToProfile.keys, dbFallback)
         }
         SystemLogger.info("re-attest: re-rooted $done of ${keys.size} pre-existing target key(s) to the keybox")
     }
