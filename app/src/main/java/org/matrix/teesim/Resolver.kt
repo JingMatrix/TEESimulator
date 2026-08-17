@@ -142,9 +142,9 @@ object Resolver {
         }
 
         // Device IDs: an explicit profile value overrides; otherwise fall back to the harvest baseline —
-        // the real captured id, or (for serial/imei/meid, which the leaf never attests, and for
-        // brand/device/product/manufacturer/model on a device that did no ID attestation) the value read
-        // from the OS at harvest, exposed via effective(). Omitted when neither is set (declines that id).
+        // the real captured id, else the value read from the OS at harvest (serial/imei/meid, and
+        // brand/device/product/manufacturer/model when the leaf carried none), exposed via effective().
+        // Omitted when neither is set (declines that id).
         val ids = JSONObject()
         putId(ids, "brand", p.brand, harvest.effective("brand"))
         putId(ids, "device", p.device, harvest.effective("device"))

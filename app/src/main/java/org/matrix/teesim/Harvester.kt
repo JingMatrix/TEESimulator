@@ -109,9 +109,8 @@ object Harvester {
     /** Device ids we may read from the OS when the attested leaf did not carry them, presented as
      *  SUPPLEMENT overrides. Shown for transparency but NOT editable here — spoofing an id is a
      *  per-profile concern (Resolver.resolveProfile lets a profile override each). serial/imei/imei2/meid
-     *  are never carried by device-properties attestation; brand/device/product/manufacturer/model
-     *  ([DEVICE_PROP_IDS]) usually are, so those are supplemented only on a device that produced no ID
-     *  attestation at all (a plain attestation, or a TEE that refused it). */
+     *  are read from telephony/props; brand/device/product/manufacturer/model ([DEVICE_PROP_IDS]) are
+     *  supplemented only when the leaf carried none, via [devicePropId]. */
     private val DEVICE_PROP_IDS = setOf("brand", "device", "product", "manufacturer", "model")
     private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid") + DEVICE_PROP_IDS
     /** Level/version values we synthesize on a device with no working hardware — editable. */
@@ -563,12 +562,11 @@ object Harvester {
         if (r.meid.isBlank() && meid.isNotBlank()) out = out.withOverride("meid", meid)
         if (r.serial.isBlank() && serial.isNotBlank()) out = out.withOverride("serial", serial)
 
-        // brand/device/product/manufacturer/model come from the attested leaf when the device did ID
-        // attestation. A device that did NOT (a plain attestation, or a TEE that refused it) leaves them
-        // blank — and then the profile would present an empty id, which the reference TA's ID check
-        // rejects against an app requesting the device's true brand. Fill each blank one from the SAME
-        // source the framework fills ATTESTATION_ID_* from (see [devicePropId]), as a SUPPLEMENT override;
-        // a real capture is left untouched, and the user can still spoof any of them per-profile.
+        // brand/device/product/manufacturer/model are captured from the attested leaf when it carries
+        // them; a leaf that carried no device ids leaves them blank, and then the profile presents an
+        // empty id. Fill each blank one from the same source the framework fills ATTESTATION_ID_* from
+        // (see [devicePropId]), as a SUPPLEMENT override; a real capture is left untouched, and the user
+        // can still spoof any of them per-profile.
         val supplemented = ArrayList<String>()
         for (field in DEVICE_PROP_IDS) {
             if (out.effective(field).isNotBlank()) continue // attested, or already supplemented
@@ -602,17 +600,15 @@ object Harvester {
         }
 
     /**
-     * The device-property id [field] resolved EXACTLY as keystore fills ATTESTATION_ID_* — so a
-     * supplemented value equals what the calling app's request carries (a plain android.os.Build read is
-     * NOT the same source, and diverges on a ROM that ships attestation-specific ids). Mirrors
-     * AndroidKeyStoreKeyPairGeneratorSpi, which reads Build.<X>_FOR_ATTESTATION with a fallback, and
-     * Build.getVendorDeviceIdProperty behind it:
+     * The device-property id [field], resolved the way the framework resolves ATTESTATION_ID_*. Source:
+     * AOSP AndroidKeyStoreKeyPairGeneratorSpi reads Build.<X>_FOR_ATTESTATION (falling back to Build.<X>),
+     * and android.os.Build.getVendorDeviceIdProperty backs the _FOR_ATTESTATION fields as:
      *   ro.product.<base>_for_attestation  (unless "unknown")
      *     → else ro.product.vendor.<base>   (unless empty/"unknown")
      *     → else ro.product.<base>          (the plain Build value)
-     * A ROM that sets *_for_attestation overrides (e.g. LineageOS, sapphire vs sapphiren) then yields the
-     * id the caller attests, not the raw ro.product.* value a normal Build read resolves. Blank when the
-     * whole chain is unset/unknown, so nothing garbage is supplemented.
+     * where <base> is brand/device/name(product)/manufacturer/model. This reads the same properties
+     * directly rather than the hidden Build.<X>_FOR_ATTESTATION fields. Blank when the whole chain is
+     * unset/unknown.
      */
     private fun devicePropId(field: String): String {
         val base = attestIdBase(field) ?: return ""
