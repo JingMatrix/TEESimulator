@@ -10,6 +10,7 @@
 //   actions = { toggle(name, on) }
 
 import { el, clear } from "./dom.js";
+import { t } from "../i18n.js";
 
 export function renderRkpSection(host, state, actions) {
   clear(host);
@@ -17,7 +18,7 @@ export function renderRkpSection(host, state, actions) {
   if (!rows.length) return; // no RKP properties on this device => no section
 
   host.appendChild(el("div", { class: "panel-head" }, [
-    el("h1", { class: "panel-title", text: "Remote Key Provision" }),
+    el("h1", { class: "panel-title", text: t("rkp_title") }),
   ]));
 
   // These knobs almost never need touching: the module already handles remote provisioning so the
@@ -25,11 +26,8 @@ export function renderRkpSection(host, state, actions) {
   // attestation explicitly fails — hence the calm, informational tone rather than an alarm.
   if (rows.some((r) => r.on)) {
     host.appendChild(el("div", { class: "card" }, [el("div", { class: "banner" }, [
-      el("div", { text: "You usually don't need to change these." }),
-      el("div", { class: "muted small", text:
-        "The module handles remote provisioning while these stay on. Only if a device explicitly fails " +
-        "keybox attestation — a rare case — should you toggle them all off to force keystore2 onto the " +
-        "keybox." }),
+      el("div", { text: t("rkp_banner_title") }),
+      el("div", { class: "muted small", text: t("rkp_banner_sub") }),
     ])]));
   }
 

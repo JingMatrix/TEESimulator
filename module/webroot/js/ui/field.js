@@ -26,6 +26,7 @@
 // case below.
 
 import { el } from "./dom.js";
+import { t } from "../i18n.js";
 import { UID_RE, splitEntry } from "../domain/schema.js";
 
 export function renderField(descriptor, value, onChange, context = {}) {
@@ -123,13 +124,13 @@ function keyboxWidget(d, value, onChange, ctx) {
   if (value && !files.includes(value)) files.push(value);
   if (files.length === 0) {
     return el("select", { id: ctx.id, class: "input", disabled: true },
-      [el("option", { text: "no keybox files found" })]);
+      [el("option", { text: t("field_no_keybox_files") })]);
   }
   return el("select", {
     id: ctx.id, class: "input",
     onchange: (e) => onChange(d.path, e.target.value),
   }, files.map((f) =>
-    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)") })));
+    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " " + t("field_missing")) })));
 }
 
 function applistWidget(d, value, ctx) {
@@ -137,10 +138,10 @@ function applistWidget(d, value, ctx) {
   const chips = el("div", { class: "applist" }, apps.length
     ? apps.map((pkg) => el("span", { class: "chip removable" }, [
         el("span", { class: "chip-text", text: pkg }),
-        el("button", { type: "button", class: "chip-x", "aria-label": "Remove " + pkg, text: "✕",
+        el("button", { type: "button", class: "chip-x", "aria-label": t("field_remove") + " " + pkg, text: "✕",
           onclick: () => ctx.removeApp(pkg) }),
       ]))
-    : [el("span", { class: "muted small", text: "No apps yet." })]);
+    : [el("span", { class: "muted small", text: t("field_no_apps") })]);
 
   const input = el("input", {
     id: ctx.id, class: "input", type: "text", placeholder: "com.example.app",
@@ -155,7 +156,7 @@ function applistWidget(d, value, ctx) {
   };
   input.addEventListener("input", () => input.classList.toggle("invalid", input.value.trim() !== "" && !d.re.test(input.value.trim())));
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
-  const add = el("button", { type: "button", class: "btn", text: "Add", onclick: submit });
+  const add = el("button", { type: "button", class: "btn", text: t("btn_add"), onclick: submit });
 
   return el("div", {}, [chips, el("div", { class: "add-row" }, [input, add])]);
 }
@@ -182,7 +183,7 @@ function toggleField(d, value, onChange, ctx) {
     input,
     el("span", { class: "switch-track", "aria-hidden": "true" }, [el("span", { class: "switch-thumb" })]),
   ]);
-  const sub = locked ? "Used by profile “" + ctx.autoTakenBy + "”" : d.help;
+  const sub = locked ? t("field_used_by_prefix") + ctx.autoTakenBy + t("field_used_by_suffix") : d.help;
   return el("div", { class: "field toggle-field" }, [
     el("div", { class: "toggle-row" }, [
       el("label", { class: "toggle-main", for: ctx.id }, [
@@ -212,11 +213,11 @@ function scopeWidget(d, value, ctx) {
   // auto-includes. Add the daemon's auto count beside it — otherwise this face says "2 apps" for a
   // profile being attested for eleven.
   const autoCount = Number(ctx.autoCount) || 0;
-  const countText = (apps.length ? apps.length + (apps.length === 1 ? " app" : " apps") : "No apps") +
-    (autoCount ? " · " + autoCount + " auto" : "");
+  const countText = (apps.length ? apps.length + " " + (apps.length === 1 ? t("cfg_app") : t("cfg_apps")) : t("field_no_apps")) +
+    (autoCount ? " · " + autoCount + " " + t("cfg_auto") : "");
   const header = el("div", { class: "scope-field-head" }, [
     el("span", { class: "scope-field-count", text: countText }),
-    el("button", { id: ctx.id, type: "button", class: "btn primary small", text: "Configure scope →", onclick: () => ctx.openScope && ctx.openScope() }),
+    el("button", { id: ctx.id, type: "button", class: "btn primary small", text: t("btn_configure_scope"), onclick: () => ctx.openScope && ctx.openScope() }),
   ]);
 
   const kids = [header];
@@ -232,16 +233,16 @@ function scopeWidget(d, value, ctx) {
       const userId = isUid ? 0 : splitEntry(entry).userId;
       return el("span", {
         class: "chip scope-chip" + (isUid ? " advanced" : "") + (missing ? " warn" : ""),
-        title: isUid ? "Advanced: targets caller uid " + entry.slice(4)
-          : missing ? entry + " is not installed (a name-match applies if it installs later)" : entry,
+        title: isUid ? t("scope_advanced_uid_prefix") + entry.slice(4)
+          : missing ? entry + " " + t("scope_not_installed_suffix") : entry,
       }, [
         (isUid || missing) ? el("span", { class: "scope-chip-dot", "aria-hidden": "true" }) : null,
         el("span", { class: "chip-text" + (isUid ? " mono" : ""), text: label }),
-        userId ? el("span", { class: "chip-sub", text: "user " + userId }) : null,
+        userId ? el("span", { class: "chip-sub", text: t("scope_chip_user_prefix") + userId }) : null,
       ]);
     });
     if (apps.length > SCOPE_PREVIEW_MAX) {
-      chips.push(el("span", { class: "chip scope-chip more", text: "+" + (apps.length - SCOPE_PREVIEW_MAX) + " more" }));
+      chips.push(el("span", { class: "chip scope-chip more", text: "+" + (apps.length - SCOPE_PREVIEW_MAX) + " " + t("scope_more") }));
     }
     kids.push(el("div", { class: "applist scope-preview" }, chips));
   }
@@ -250,10 +251,10 @@ function scopeWidget(d, value, ctx) {
   // the common case, and it is exactly the one where apps[] alone misleads. Worded from the live
   // count so it stops claiming apps are added "automatically" when there are none.
   if (ctx.autoInclude) {
-    kids.push(el("span", { class: "muted small", text: autoCount
-      ? "Auto-include on — " + autoCount + (autoCount === 1 ? " app" : " apps") + " installed since TEESimulator started " +
-        (autoCount === 1 ? "is" : "are") + " also in scope."
-      : "Auto-include on — no new apps in scope yet." }));
+    const autoText = autoCount
+      ? t("scope_auto_include_count_prefix") + autoCount + " " + (autoCount === 1 ? t("cfg_app") : t("cfg_apps")) + t("scope_auto_include_count_suffix")
+      : t("scope_auto_include_none");
+    kids.push(el("span", { class: "muted small", text: autoText }));
   }
 
   return el("div", { class: "scope-field" }, kids);

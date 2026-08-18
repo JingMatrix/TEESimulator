@@ -9,6 +9,7 @@
 // inject markup.
 
 import { el, clear } from "./dom.js";
+import { t } from "../i18n.js";
 
 const LEVEL_CLASS = { V: "lv-v", D: "lv-d", I: "lv-i", W: "lv-w", E: "lv-e", F: "lv-f" };
 const LEVEL_RANK = { V: 0, D: 1, I: 2, W: 3, E: 4, F: 5 };
@@ -48,17 +49,17 @@ export function renderLogs(mount, state, actions) {
     clear(mount);
     shell = el("div", { class: "logs" }, [
       el("div", { class: "panel-head logs-head" }, [
-        el("h1", { class: "panel-title", text: "Logs" }),
+        el("h1", { class: "panel-title", text: t("log_title") }),
         el("div", { class: "logs-tools" }, [
-          el("button", { class: "btn small ghost", "data-act": "filter", type: "button" }, "Filter"),
-          el("button", { class: "btn small ghost", "data-act": "pause", type: "button" }, "Pause"),
-          el("button", { class: "btn small ghost", "data-act": "save", type: "button" }, "Save"),
+          el("button", { class: "btn small ghost", "data-act": "filter", type: "button" }, t("log_filter")),
+          el("button", { class: "btn small ghost", "data-act": "pause", type: "button" }, t("log_pause")),
+          el("button", { class: "btn small ghost", "data-act": "save", type: "button" }, t("log_save")),
         ]),
       ]),
       el("span", { class: "logs-msg", "data-role": "msg" }, ""),
       el("pre", { class: "logs-pane", tabindex: "0" }),
       el("div", { class: "logs-fabs" }, [
-        el("button", { class: "logs-fab", type: "button", "data-scroll": "top", "aria-label": "Scroll to top" }, [
+        el("button", { class: "logs-fab", type: "button", "data-scroll": "top", "aria-label": t("log_scroll_top") }, [
           el("span", { class: "fab-chevron up", "aria-hidden": "true" }),
         ]),
         el("button", { class: "logs-fab", type: "button", "data-scroll": "bottom", "aria-label": "Scroll to bottom" }, [
@@ -82,14 +83,14 @@ export function renderLogs(mount, state, actions) {
   const filter = state.filter || {};
   const filterBtn = shell.querySelector('[data-act="filter"]');
   filterBtn.classList.toggle("active", !!state.filterActive);
-  filterBtn.textContent = state.filterActive ? "Filter •" : "Filter";
+  filterBtn.textContent = state.filterActive ? t("log_filter_active") : t("log_filter");
 
   const pauseBtn = shell.querySelector('[data-act="pause"]');
-  pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+  pauseBtn.textContent = state.paused ? t("log_resume") : t("log_pause");
   pauseBtn.classList.toggle("active", state.paused);
 
   const msg = shell.querySelector('[data-role="msg"]');
-  msg.textContent = state.reachable ? "" : "daemon unreachable" + (state.error ? " — " + state.error : "");
+  msg.textContent = state.reachable ? "" : t("log_daemon_unreachable") + (state.error ? " — " + state.error : "");
   msg.classList.toggle("off", !state.reachable);
   msg.hidden = state.reachable;
 
@@ -146,7 +147,7 @@ export function renderLogFilters(state, actions) {
     levels.map((lv) => el("button", {
       type: "button", class: "seg" + (lv === (filter.minLevel || "V") ? " on" : ""),
       "aria-pressed": lv === (filter.minLevel || "V") ? "true" : "false",
-      text: lv === "V" ? "All" : lv, onclick: () => actions.setLevel(lv),
+      text: lv === "V" ? t("log_level_all") : lv, onclick: () => actions.setLevel(lv),
     })));
 
   // Tag chips: one per distinct tag seen in the buffer. Toggling a chip selects or
@@ -161,7 +162,7 @@ export function renderLogFilters(state, actions) {
           onclick: () => actions.toggleTag(t),
         });
       }))
-    : el("span", { class: "muted small", text: "No tags seen yet." });
+    : el("span", { class: "muted small", text: t("log_no_tags") });
 
   // Uncontrolled input: keystrokes update the controller's filter and re-render the
   // pane behind the sheet, but do NOT rebuild the sheet, so the caret stays put.
@@ -173,15 +174,15 @@ export function renderLogFilters(state, actions) {
 
   return el("div", {}, [
     el("div", { class: "sheet-head" }, [
-      el("h2", { text: "Filter logs" }),
-      el("button", { class: "iconbtn", type: "button", "aria-label": "Close", onclick: () => actions.close() }, [
+      el("h2", { text: t("log_filter_title") }),
+      el("button", { class: "iconbtn", type: "button", "aria-label": t("btn_close"), onclick: () => actions.close() }, [
         el("span", { class: "x-mark", "aria-hidden": "true" }),
       ]),
     ]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Minimum level" }), seg]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Tags" }), tagChips]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Message contains" }), textInput]),
-    el("button", { class: "btn ghost block sheet-submit", type: "button", text: "Reset filters", onclick: () => actions.reset() }),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("log_min_level") }), seg]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("log_tags") }), tagChips]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("log_message_contains") }), textInput]),
+    el("button", { class: "btn ghost block sheet-submit", type: "button", text: t("log_reset_filters"), onclick: () => actions.reset() }),
   ]);
 }
 
@@ -204,15 +205,15 @@ export function renderSaveSheet(state, actions) {
   });
   return el("div", {}, [
     el("div", { class: "sheet-head" }, [
-      el("h2", { text: "Save logs" }),
-      el("button", { class: "iconbtn", type: "button", "aria-label": "Close", onclick: () => actions.close() }, [
+      el("h2", { text: t("log_save_title") }),
+      el("button", { class: "iconbtn", type: "button", "aria-label": t("btn_close"), onclick: () => actions.close() }, [
         el("span", { class: "x-mark", "aria-hidden": "true" }),
       ]),
     ]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Folder" }), dirInput]),
-    el("div", { class: "field" }, [el("span", { class: "field-label", text: "Filename" }), nameInput]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("log_folder") }), dirInput]),
+    el("div", { class: "field" }, [el("span", { class: "field-label", text: t("log_filename") }), nameInput]),
     el("button", {
-      class: "btn primary block sheet-submit", type: "button", text: "Save",
+      class: "btn primary block sheet-submit", type: "button", text: t("btn_save"),
       onclick: () => actions.save(dirInput.value, nameInput.value),
     }),
   ]);

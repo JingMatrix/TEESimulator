@@ -232,3 +232,23 @@ for (const [re, good, bad] of cases) {
     for (const b of bad) assert.equal(re.test(b), false, `expected ${re} to reject ${JSON.stringify(b)}`);
   });
 }
+
+// --- i18n dictionary key parity ------------------------------------------
+import { dictionaries } from "../js/i18n.js";
+
+test("all i18n dictionaries (en, zh-TW, zh-CN) have identical keys", () => {
+  const enKeys = Object.keys(dictionaries["en"]).sort();
+  const twKeys = Object.keys(dictionaries["zh-TW"]).sort();
+  const cnKeys = Object.keys(dictionaries["zh-CN"]).sort();
+
+  const missingInTw = enKeys.filter((k) => !dictionaries["zh-TW"].hasOwnProperty(k));
+  const extraInTw = twKeys.filter((k) => !dictionaries["en"].hasOwnProperty(k));
+  const missingInCn = enKeys.filter((k) => !dictionaries["zh-CN"].hasOwnProperty(k));
+  const extraInCn = cnKeys.filter((k) => !dictionaries["en"].hasOwnProperty(k));
+
+  assert.deepEqual(missingInTw, [], `Keys in 'en' missing in 'zh-TW': ${missingInTw.join(", ")}`);
+  assert.deepEqual(extraInTw, [], `Keys in 'zh-TW' missing in 'en': ${extraInTw.join(", ")}`);
+  assert.deepEqual(missingInCn, [], `Keys in 'en' missing in 'zh-CN': ${missingInCn.join(", ")}`);
+  assert.deepEqual(extraInCn, [], `Keys in 'zh-CN' missing in 'en': ${extraInCn.join(", ")}`);
+});
+

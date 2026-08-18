@@ -18,17 +18,19 @@
 
 import { el, clear, disclosure } from "./dom.js";
 import { renderMarkdown } from "./markdown.js";
+import { t, setLanguage, getLanguage } from "../i18n.js";
 
 export function renderSystem(mount, state, actions) {
   clear(mount);
   const { status = null, update = null, probed = false,
           variant = "release", installing = false, installError = null, notesOpen = false } = state;
 
-  mount.appendChild(el("div", { class: "panel-head" }, [el("h1", { class: "panel-title", text: "System" })]));
+  mount.appendChild(el("div", { class: "panel-head" }, [el("h1", { class: "panel-title", text: t("sys_title") })]));
 
   mount.appendChild(tag(healthCard(status), "health"));
   mount.appendChild(tag(harvestCard(status, actions), "harvest"));
   mount.appendChild(tag(updateCard({ update, probed, variant, installing, installError, notesOpen }, actions), "update"));
+  mount.appendChild(languageCard());
 }
 
 // Patch ONLY the health + harvest cards from a fresh status snapshot, leaving the
@@ -58,27 +60,27 @@ function tag(card, name) {
 // --- daemon health -------------------------------------------------------
 function healthCard(status) {
   if (!status) {
-    return el("div", { class: "card" }, [el("h2", { text: "Daemon health" }), el("p", { class: "muted", text: "Reading status…" })]);
+    return el("div", { class: "card" }, [el("h2", { text: t("sys_daemon_health") }), el("p", { class: "muted", text: t("sys_reading_status") })]);
   }
   const dot = (cls) => el("span", { class: "dot " + cls });
   // Interceptor: attached is ok; the daemon up but nothing attached yet is a
   // degraded (amber) state, not a hard failure.
   const interceptorDot = status.hookActive ? "ok" : (status.daemonRunning ? "warn" : "off");
-  const interceptorText = status.hookActive ? "active" : (status.daemonRunning ? "not attached" : "inactive");
+  const interceptorText = status.hookActive ? t("sys_active") : (status.daemonRunning ? t("sys_not_attached") : t("sys_inactive"));
 
   const card = el("div", { class: "card" }, [
-    el("h2", { text: "Daemon health" }),
-    row("Daemon", el("span", { class: "status" }, [dot(status.daemonRunning ? "ok" : "off"), status.daemonRunning ? "running" : "stopped"])),
+    el("h2", { text: t("sys_daemon_health") }),
+    row("Daemon", el("span", { class: "status" }, [dot(status.daemonRunning ? "ok" : "off"), status.daemonRunning ? t("sys_running") : t("sys_stopped")])),
     row("Interceptor", el("span", { class: "status" }, [dot(interceptorDot), interceptorText])),
     row("Hook", el("span", { class: "chips" }, [
-      el("span", { class: "chip", text: status.hook || "unknown" }),
+      el("span", { class: "chip", text: status.hook || t("sys_unknown") }),
       status.api ? el("span", { class: "chip", text: "API " + status.api }) : null,
     ])),
   ]);
   if (status.reachable === false) {
     card.appendChild(el("div", { class: "banner" }, [
-      el("div", { text: "Daemon status endpoint unreachable." }),
-      el("div", { class: "muted small", text: status.error || "The daemon isn't responding on 127.0.0.1:8790 yet." }),
+      el("div", { text: t("sys_daemon_unreachable_title") }),
+      el("div", { class: "muted small", text: status.error || t("sys_daemon_unreachable_desc") }),
     ]));
   }
   return card;
@@ -103,9 +105,9 @@ let harvestMode = "tee";
 
 function harvestCard(status, actions = {}) {
   const h = status && status.harvest;
-  const card = el("div", { class: "card" }, [el("h2", { text: "Harvest" })]);
+  const card = el("div", { class: "card" }, [el("h2", { text: t("sys_harvest") })]);
   if (!status) { card.appendChild(el("p", { class: "muted", text: "—" })); return card; }
-  if (!h) { card.appendChild(el("p", { class: "muted", text: "No harvest record yet." })); return card; }
+  if (!h) { card.appendChild(el("p", { class: "muted", text: t("sys_no_harvest_data") })); return card; }
 
   const failed = !!h.harvestFailed;
   // overrides: { field: { value, source, editable, userEdited } }. `value` is the machine form (level
@@ -143,13 +145,13 @@ function harvestCard(status, actions = {}) {
     capturedBox.replaceChildren();
     const sb = harvestMode === "strongbox";
     if (failed) {
-      capturedBox.appendChild(el("div", { class: "muted small", text: "No key was attestable (common on certain models after unlocking the bootloader), so nothing was captured — every value below is synthesized." }));
+      capturedBox.appendChild(el("div", { class: "muted small", text: t("sys_no_attestable_key") }));
       return;
     }
     if (sb && !sbAvailable) {
-      capturedBox.appendChild(el("div", { class: "muted small", text: "StrongBox has no working hardware on this device; keys requested at StrongBox are generated (not patched) at the TEE version." }));
+      capturedBox.appendChild(el("div", { class: "muted small", text: t("sys_no_strongbox") }));
     }
-    capturedBox.appendChild(el("h3", { text: "Captured" }));
+    capturedBox.appendChild(el("h3", { text: t("sys_captured") }));
     const rows = el("div", { class: "kv-list" });
     // Show ONLY genuinely captured values. A field the leaf did not carry (null/undefined/empty) gets no
     // row at all — never a "—" or any other placeholder. Every value passed here is the raw capture. A
@@ -198,7 +200,7 @@ function overridesGroup(overrides, actions) {
   );
   if (!fields.length) return null;
   const box = el("div");
-  box.appendChild(el("h3", { text: "Fabricated" }));
+  box.appendChild(el("h3", { text: t("sys_fabricated") }));
   const rows = el("div", { class: "kv-list" });
   for (const field of fields) rows.appendChild(overrideRow(field, overrides[field], actions));
   box.appendChild(rows);
@@ -213,12 +215,20 @@ const ORDER = [
   "serial", "imei", "imei2", "meid",
 ];
 
-const SOURCE_LABEL = { required: "required", supplement: "supplement", synthesized: "synthesized" };
+function getSourceLabel(src) {
+  switch (src) {
+    case "required": return t("sys_source_required");
+    case "supplement": return t("sys_source_supplement");
+    case "synthesized": return t("sys_source_synthesized");
+    default: return src || "";
+  }
+}
+
 const HEX_FIELDS = new Set(["verifiedBootKey", "verifiedBootHash", "moduleHash"]);
 
 function overrideRow(field, o, actions) {
-  const badge = el("span", { class: "badge badge-" + (o.source || "required"), text: SOURCE_LABEL[o.source] || o.source || "" });
-  const edited = o.userEdited ? el("span", { class: "badge badge-edited", text: "edited" }) : null;
+  const badge = el("span", { class: "badge badge-" + (o.source || "required"), text: getSourceLabel(o.source) });
+  const edited = o.userEdited ? el("span", { class: "badge badge-edited", text: t("sys_edited") }) : null;
   const label = el("span", { class: "kv-label" }, [field, badge, edited]);
 
   if (!o.editable) {
@@ -231,9 +241,9 @@ function overrideRow(field, o, actions) {
   const save = el("button", {
     class: "btn small", type: "button",
     onclick: () => actions.onSaveOverride && actions.onSaveOverride(field, String(input.value).trim()),
-  }, "Save");
+  }, t("btn_save"));
   const reset = o.userEdited
-    ? el("button", { class: "linklike small", type: "button", onclick: () => actions.onResetOverride && actions.onResetOverride(field) }, "reset")
+    ? el("button", { class: "linklike small", type: "button", onclick: () => actions.onResetOverride && actions.onResetOverride(field) }, t("btn_reset"))
     : null;
   return el("div", { class: "kv kv-stack" }, [label, el("div", { class: "ov-edit" }, [input, save, reset])]);
 }
@@ -251,7 +261,7 @@ function editorFor(field, value) {
   }
   if (HEX_FIELDS.has(field)) {
     return el("input", { class: "ov-input mono", type: "text", value: value || "", maxlength: "64",
-      spellcheck: "false", autocapitalize: "none", placeholder: "64 hex chars" });
+      spellcheck: "false", autocapitalize: "none", placeholder: t("sys_64_hex_chars") });
   }
   return el("input", { class: "ov-input", type: "number", inputmode: "numeric", value: value || "" });
 }
@@ -283,7 +293,7 @@ function kvRow(label, val, replaced) {
 function hexRow(rows, label, b64, replaced) {
   const hex = b64 ? b64ToHex(b64) : null;
   const allZero = hex != null && hex.length > 0 && /^0+$/.test(hex);
-  const flag = allZero ? el("span", { class: "chip warn small", text: "all zero" }) : null;
+  const flag = allZero ? el("span", { class: "chip warn small", text: t("sys_all_zero") }) : null;
   rows.appendChild(el("div", { class: "kv kv-stack" + (replaced ? " kv-replaced" : "") }, [
     el("span", { class: "kv-label" }, [label, flag]),
     el("span", { class: "mono kv-hex", text: hex || "—" }),
@@ -308,58 +318,58 @@ function fmtTime(ms) {
 // --- canary updater ------------------------------------------------------
 function updateCard(s, actions) {
   const { update, probed, variant, installing, installError, notesOpen } = s;
-  const card = el("div", { class: "card" }, [el("h2", { text: "Update" })]);
+  const card = el("div", { class: "card" }, [el("h2", { text: t("sys_update") })]);
 
   // Probe hasn't resolved, or the daemon was unreachable: say so, no controls.
   if (!update) {
-    card.appendChild(el("p", { class: "muted", text: probed ? "Update status unavailable — daemon unreachable." : "Checking for updates…" }));
+    card.appendChild(el("p", { class: "muted", text: probed ? t("sys_update_unavailable") : t("sys_checking_updates") }));
     return card;
   }
 
-  const installed = update.installedVersion || (update.currentCode ? "build " + update.currentCode : "unknown");
-  card.appendChild(row("Installed", el("span", { class: "mono small", text: installed })));
+  const installed = update.installedVersion || (update.currentCode ? t("sys_build") + " " + update.currentCode : t("sys_unknown"));
+  card.appendChild(row(t("sys_installed"), el("span", { class: "mono small", text: installed })));
 
   const latest = update.latest;
   if (!latest) {
-    card.appendChild(el("p", { class: "muted small", text: "No canary release has been published yet." }));
+    card.appendChild(el("p", { class: "muted small", text: t("sys_no_canary") }));
     return card;
   }
 
   if (!update.updateAvailable) {
-    card.appendChild(el("div", { class: "status" }, [el("span", { class: "dot ok" }), el("span", { text: "On the latest canary." })]));
+    card.appendChild(el("div", { class: "status" }, [el("span", { class: "dot ok" }), el("span", { text: t("sys_latest_canary") })]));
     return card;
   }
 
   // An update is available: headline pill, what's-new disclosure, variant + Install.
   card.appendChild(el("div", { class: "update-head" }, [
-    el("span", { class: "pill warn", text: "Update available" }),
+    el("span", { class: "pill warn", text: t("sys_update_avail") }),
     el("span", { class: "mono small", text: "canary-" + (latest.code || "?") }),
   ]));
   if (latest.name) card.appendChild(el("div", { class: "small", text: latest.name }));
 
-  card.appendChild(disclosure("What's new", whatsNew(latest), {
+  card.appendChild(disclosure(t("sys_whats_new"), whatsNew(latest), {
     open: notesOpen, onToggle: actions.onToggleNotes, id: "sys-notes",
   }));
 
   // Variant picker (which asset to flash) + the one primary action on this screen.
   card.appendChild(el("div", { class: "field" }, [
-    el("span", { class: "field-label", text: "Build variant" }),
+    el("span", { class: "field-label", text: t("sys_build_variant") }),
     segmented(variant, ["release", "debug"], actions.onSelectVariant, installing),
   ]));
 
   card.appendChild(el("div", { class: "update-actions" }, [
     installing
-      ? el("span", { class: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { class: "muted small", text: "Downloading & flashing…" })])
-      : el("span", { class: "muted small", text: "Flashes " + variant + " over the current module, then reboot to apply." }),
+      ? el("span", { class: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { class: "muted small", text: t("sys_downloading") })])
+      : el("span", { class: "muted small", text: t("sys_flashes_variant") }),
     el("button", {
-      class: "btn primary", text: installing ? "Installing…" : "Install",
+      class: "btn primary", text: installing ? t("sys_installing") : t("sys_install"),
       disabled: installing, onclick: () => actions.onInstall(),
     }),
   ]));
 
   if (installError) {
     card.appendChild(el("div", { class: "banner error" }, [
-      el("div", { text: "Install failed" }),
+      el("div", { text: t("sys_install_failed") }),
       el("div", { class: "muted small", text: installError }),
     ]));
   }
@@ -378,20 +388,20 @@ function whatsNew(latest) {
       target: "_blank", rel: "noreferrer", text: "commit " + String(latest.commit).slice(0, 7) }));
   }
   if (latest.htmlUrl) {
-    links.push(el("a", { class: "linklike small", href: latest.htmlUrl, target: "_blank", rel: "noreferrer", text: "release page ↗" }));
+    links.push(el("a", { class: "linklike small", href: latest.htmlUrl, target: "_blank", rel: "noreferrer", text: t("sys_release_page") }));
   }
   if (links.length) nodes.push(el("div", { class: "update-links" }, links));
   if (latest.notes) nodes.push(el("div", { class: "notes small md" }, renderMarkdown(latest.notes)));
   const assets = Array.isArray(latest.assets) ? latest.assets : [];
   if (assets.length) {
-    nodes.push(el("div", { class: "muted small", text: "Assets" }));
+    nodes.push(el("div", { class: "muted small", text: t("sys_assets") }));
     nodes.push(el("ul", { class: "asset-list" }, assets.map((a) =>
       el("li", { class: "asset-row" }, [
         el("span", { class: "mono small", text: a.name || "(unnamed)" }),
         el("span", { class: "muted small", text: humanSize(a.size) }),
       ]))));
   }
-  if (!nodes.length) nodes.push(el("p", { class: "muted small", text: "No release notes." }));
+  if (!nodes.length) nodes.push(el("p", { class: "muted small", text: t("sys_no_release_notes") }));
   return nodes;
 }
 
@@ -424,4 +434,15 @@ function named(state) {
   const names = ["Verified", "SelfSigned", "Unverified", "Failed"];
   if (state == null) return null;
   return typeof state === "number" && names[state] ? names[state] : String(state);
+}
+
+
+function languageCard() {
+  const lang = getLanguage();
+  return el("div", { class: "card" }, [
+    el("h2", { text: t("settings_language") }),
+    el("div", { class: "field" }, [
+      segmented(lang, ["en", "zh-TW", "zh-CN"], setLanguage)
+    ])
+  ]);
 }

@@ -18,6 +18,7 @@ import { create as createKeyboxes } from "./controllers/keybox-controller.js";
 import { create as createKeys } from "./controllers/keyadmin-controller.js";
 import { create as createSystem } from "./controllers/system-controller.js";
 import { create as createLogs } from "./controllers/logs-controller.js";
+import { translateDOM, t } from "./i18n.js";
 
 // --- global diagnostics (inspect via Chrome DevTools, chrome://inspect) ---
 // Surface every uncaught error and rejected promise, so a failure anywhere in the WebUI
@@ -42,7 +43,8 @@ function setHealth(status) {
   const ok = !!(status && status.reachable);
   dot.classList.toggle("ok", ok);
   dot.classList.toggle("off", !ok);
-  label.textContent = ok ? "running" : "unreachable";
+  label.removeAttribute("data-i18n");
+  label.textContent = ok ? t("sys_running") : t("sys_stopped");
 }
 
 function setBadge(on) {
@@ -101,4 +103,5 @@ document.addEventListener("teesim:navigate", (e) => {
 controllers.system.boot();
 
 // Default destination.
+translateDOM();
 show("config");

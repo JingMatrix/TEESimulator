@@ -55,17 +55,18 @@
 
 import { el, clear, svgIcon, ICON_SEARCH, ICON_SORT } from "./dom.js";
 import { UID_RE, entryToken, splitEntry } from "../domain/schema.js";
+import { t } from "../i18n.js";
 
 const SEARCH_ID = "scope-search-input";
 
-// Recent is first and default: the apps that have asked for a key since this boot are what a
-// user most likely wants to target. The rest split into user apps, system, and current picks.
-const FILTERS = [
-  { id: "recent", label: "Recent" },
-  { id: "user", label: "User" },
-  { id: "system", label: "System" },
-  { id: "selected", label: "Selected" },
-];
+function getFilters() {
+  return [
+    { id: "recent", label: t("scope_filter_recent") },
+    { id: "user", label: t("scope_filter_user") },
+    { id: "system", label: t("scope_filter_system") },
+    { id: "selected", label: t("scope_filter_selected") },
+  ];
+}
 
 // A stable, pleasant avatar colour from any string: a tiny rolling hash into a hue, with fixed
 // saturation/lightness so white avatar text always reads. This is the one place a literal colour
@@ -122,10 +123,10 @@ export function renderScope(host, state, actions) {
 
   // ---- header ----------------------------------------------------------
   host.appendChild(el("div", { class: "drill-head" }, [
-    el("button", { class: "iconbtn", type: "button", "aria-label": "Back to profile", onclick: () => actions.onClose() }, [
+    el("button", { class: "iconbtn", type: "button", "aria-label": t("scope_back_to_profile"), onclick: () => actions.onClose() }, [
       el("span", { class: "chevron-left", "aria-hidden": "true" }),
     ]),
-    el("h1", { class: "drill-title", text: "Scope — " + profileName, tabindex: "-1" }),
+    el("h1", { class: "drill-title", text: t("scope_title") + " — " + profileName, tabindex: "-1" }),
   ]));
 
   const body = el("div", { class: "drill-body" });
@@ -133,18 +134,18 @@ export function renderScope(host, state, actions) {
   // ---- search row: a leading search-icon button inside the field, a trailing sort button ----
   const searchInput = el("input", {
     id: SEARCH_ID, class: "input scope-search-input", type: "search", value: search,
-    placeholder: "Search apps, packages, users, or uid…",
+    placeholder: t("scope_search_placeholder"),
     autocapitalize: "off", autocorrect: "off", spellcheck: "false",
     oninput: (e) => actions.onSetSearch(e.target.value),
     onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); actions.onSearchSubmit(); } },
   });
   body.appendChild(el("div", { class: "scope-search" }, [
     el("div", { class: "scope-search-field" }, [
-      el("button", { type: "button", class: "scope-search-btn", "aria-label": "Search", onclick: () => actions.onSearchSubmit() }, [
+      el("button", { type: "button", class: "scope-search-btn", "aria-label": t("scope_search"), onclick: () => actions.onSearchSubmit() }, [
         svgIcon(ICON_SEARCH, { size: 18 }),
       ]),
       searchInput,
-      el("button", { type: "button", class: "scope-sort-btn", "aria-label": "Sort order", onclick: () => actions.onOpenSort() }, [
+      el("button", { type: "button", class: "scope-sort-btn", "aria-label": t("scope_sort_order"), onclick: () => actions.onOpenSort() }, [
         svgIcon(ICON_SORT, { size: 18 }),
       ]),
     ]),
@@ -152,7 +153,7 @@ export function renderScope(host, state, actions) {
 
   // ---- group filter: full-width segmented, each seg spanning evenly -----
   body.appendChild(el("div", { class: "segmented scope-filters" },
-    FILTERS.map((f) => el("button", {
+    getFilters().map((f) => el("button", {
       type: "button", class: "seg" + (filter === f.id ? " on" : ""),
       "aria-pressed": filter === f.id ? "true" : "false",
       onclick: () => actions.onSetFilter(f.id),
@@ -176,11 +177,11 @@ export function renderScope(host, state, actions) {
   // ---- loading / error short-circuits ---------------------------------
   if (loading) {
     body.appendChild(el("div", { class: "scope-status" }, [
-      el("span", { class: "spinner" }), el("span", { class: "muted", text: "Reading installed apps…" }),
+      el("span", { class: "spinner" }), el("span", { class: "muted", text: t("scope_reading_apps") }),
     ]));
   } else if (error) {
     body.appendChild(el("div", { class: "banner error" }, [
-      el("div", { text: "Could not read the device app list" }),
+      el("div", { text: t("scope_read_apps_error") }),
       el("div", { class: "muted small", text: String(error) }),
     ]));
   }
@@ -242,14 +243,14 @@ export function renderScope(host, state, actions) {
     const selectedCount = apps.length;
     const ops = el("div", { class: "scope-ops" }, [
       el("div", { class: "scope-ops-btns" }, [
-        el("button", { type: "button", class: "linklike", text: "Select all", onclick: () => actions.onSelectAllVisible(visibleEntries) }),
-        el("button", { type: "button", class: "linklike", text: "Clear", onclick: () => actions.onClearVisible(visibleEntries) }),
-        el("button", { type: "button", class: "linklike", text: "Invert", onclick: () => actions.onInvertVisible(visibleEntries) }),
+        el("button", { type: "button", class: "linklike", text: t("scope_select_all"), onclick: () => actions.onSelectAllVisible(visibleEntries) }),
+        el("button", { type: "button", class: "linklike", text: t("scope_clear"), onclick: () => actions.onClearVisible(visibleEntries) }),
+        el("button", { type: "button", class: "linklike", text: t("scope_invert"), onclick: () => actions.onInvertVisible(visibleEntries) }),
         filter === "recent"
-          ? el("button", { type: "button", class: "linklike danger", text: "Clear usage", onclick: () => actions.onClearUsage() })
+          ? el("button", { type: "button", class: "linklike danger", text: t("scope_clear_usage"), onclick: () => actions.onClearUsage() })
           : null,
       ]),
-      el("span", { class: "muted small", text: selectedCount + " selected" + (autoMineShown ? " · " + autoMineShown + " auto" : "") }),
+      el("span", { class: "muted small", text: selectedCount + " " + t("scope_selected_count") + (autoMineShown ? " · " + autoMineShown + " " + t("cfg_auto") : "") }),
     ]);
     body.appendChild(ops);
 
@@ -257,15 +258,15 @@ export function renderScope(host, state, actions) {
     // than deriving anything: an unseeded baseline means the fail-safe in Scope.resolve is holding
     // auto-include back, which is otherwise visible only in logcat.
     const note = autoInfo && autoInfo.baselineReady === false
-      ? "Auto-include is idle until the package baseline is seeded."
+      ? t("scope_auto_idle_baseline")
       : autoCount || autoMineShown
-        ? "Auto-include is on — dashed apps are in scope automatically. Tap one to pin it here."
+        ? t("scope_auto_on_dashed_hint")
         : null;
     if (note) {
       const kids = [el("span", { text: note })];
       // The draft has diverged from what the daemon resolved, so the dashed set on screen is one
       // save behind. Say so rather than re-deriving the rule to predict it.
-      if (pendingSave) kids.push(el("span", { class: "muted", text: " Auto-include updates when you save." }));
+      if (pendingSave) kids.push(el("span", { class: "muted", text: " " + t("scope_auto_updates_on_save") }));
       body.appendChild(el("p", { class: "muted small scope-auto-note" }, kids));
     }
   }
@@ -280,23 +281,22 @@ export function renderScope(host, state, actions) {
   });
   if (orphans.length) {
     body.appendChild(el("div", { class: "scope-pinned" }, [
-      el("div", { class: "scope-section-title", text: "In scope" }),
+      el("div", { class: "scope-section-title", text: t("scope_in_scope") }),
       el("div", { class: "applist" }, orphans.map((entry) => {
         const isUid = UID_RE.test(entry);
         const { pkg, userId } = splitEntry(entry);
         // "Not installed" is a per-user answer: the app may well be on the device, just not in the
-        // user this entry names, and saying so is the difference between a typo and a stale target.
-        const where = userId ? " for " + userOf({ userId }, users).name : "";
+        const where = userId ? " " + t("scope_for_user_prefix") + userOf({ userId }, users).name : "";
         return el("span", {
           class: "chip removable scope-chip" + (isUid ? " advanced" : " warn"),
           title: isUid
-            ? "Advanced: targets caller uid " + entry.slice(4)
-            : pkg + " is not installed" + (where || " on this device"),
+            ? t("scope_advanced_uid_prefix") + entry.slice(4)
+            : pkg + " " + (where ? t("scope_not_installed_where_prefix") + where : t("scope_not_installed_suffix")),
         }, [
           isUid ? el("span", { class: "chip-avatar-uid", "aria-hidden": "true", text: "#" }) : null,
           el("span", { class: "chip-text" + (isUid ? " mono" : ""), text: entry }),
-          el("span", { class: "chip-sub", text: isUid ? "advanced uid" : "not installed" + where }),
-          el("button", { type: "button", class: "chip-x", "aria-label": "Remove " + entry, text: "✕", onclick: () => actions.onToggleApp(entry) }),
+          el("span", { class: "chip-sub", text: isUid ? t("scope_advanced_uid_chip") : t("scope_not_installed_chip") + where }),
+          el("button", { type: "button", class: "chip-x", "aria-label": t("field_remove") + " " + entry, text: "✕", onclick: () => actions.onToggleApp(entry) }),
         ]);
       })),
     ]));
@@ -327,9 +327,9 @@ export function renderScope(host, state, actions) {
   host.appendChild(el("div", { class: "drill-foot" }, [
     el("span", { class: "status" }, [
       el("span", { class: "dot ok" }),
-      el("span", { class: "muted small", text: apps.length + " selected" + (autoMineShown ? " · " + autoMineShown + " auto" : "") }),
+      el("span", { class: "muted small", text: apps.length + " " + t("scope_selected_count") + (autoMineShown ? " · " + autoMineShown + " " + t("cfg_auto") : "") }),
     ]),
-    el("button", { class: "btn primary", text: "Done", onclick: () => actions.onDone() }),
+    el("button", { class: "btn primary", text: t("btn_done"), onclick: () => actions.onDone() }),
   ]));
 
   restoreFocus(focus);
@@ -337,11 +337,11 @@ export function renderScope(host, state, actions) {
 
 // The empty-list line, worded for the active group so it never reads as an error.
 function emptyText(filter, total, q) {
-  if (!total) return "No apps found on the device.";
-  if (q) return "No apps match “" + q + "”.";
-  if (filter === "recent") return "No app has requested a key since boot yet.";
-  if (filter === "selected") return "Nothing in scope yet — tap an app to add it.";
-  return "No apps match.";
+  if (!total) return t("scope_empty_no_apps");
+  if (q) return t("scope_empty_no_match_prefix") + q + t("scope_empty_no_match_suffix");
+  if (filter === "recent") return t("scope_empty_no_recent");
+  if (filter === "selected") return t("scope_empty_no_selected");
+  return t("scope_empty_no_match_generic");
 }
 
 // Is this uid-row currently in scope — by one of its entries (each naming this row's user), or by
@@ -440,25 +440,24 @@ function scopeRow(row, ctx, actions) {
   if (showUser)
     pills.push(el("span", {
       class: "pill scope-user" + (user.managed ? " managed" : ""),
-      title: "Installed for user " + user.id + (user.managed ? " (work profile)" : ""),
+      title: t("scope_user_title_prefix") + user.id + (user.managed ? t("scope_user_title_work_profile") : ""),
       text: user.name,
     }));
-  if (lowUid) pills.push(el("span", { class: "pill warn scope-pill", text: "system uid" }));
-  if (claimedBy) pills.push(el("span", { class: "chip small scope-claimed", text: "in " + claimedBy }));
-  if (autoMine) pills.push(el("span", { class: "pill scope-auto", text: "auto" }));
-  if (autoOther) pills.push(el("span", { class: "chip small scope-claimed", text: "auto in " + autoBy }));
-  if (row.recent) pills.push(el("span", { class: "scope-recent-dot", title: "Requested a key since boot", "aria-label": "recent" }));
-  if (row.freq > 0) pills.push(el("span", { class: "scope-freq", title: row.freq + " key requests recorded", text: fmtFreq(row.freq) }));
+  if (lowUid) pills.push(el("span", { class: "pill warn scope-pill", text: t("scope_pill_system_uid") }));
+  if (claimedBy) pills.push(el("span", { class: "chip small scope-claimed", text: t("scope_pill_claimed_prefix") + claimedBy }));
+  if (autoMine) pills.push(el("span", { class: "pill scope-auto", text: t("scope_pill_auto") }));
+  if (autoOther) pills.push(el("span", { class: "chip small scope-claimed", text: t("scope_pill_auto_in_prefix") + autoBy }));
+  if (row.recent) pills.push(el("span", { class: "scope-recent-dot", title: t("scope_recent_title"), "aria-label": "recent" }));
+  if (row.freq > 0) pills.push(el("span", { class: "scope-freq", title: row.freq + " " + t("scope_freq_title_suffix"), text: fmtFreq(row.freq) }));
 
   const cls = "scope-row" + (selected ? " selected" : autoMine ? " auto" : "") + (claimedBy ? " claimed" : "");
 
   // Only an explicit claim by another profile disables a row. An auto row — mine or another's —
   // stays tappable: Scope.resolve excludes explicitly-named uids from auto-include, so an explicit
   // pick legally beats auto and the UI must not forbid what the daemon permits.
-  const title = claimedBy ? "Already targeted by profile " + claimedBy
-    : autoMine ? "In scope automatically — tap to pin it to " + profileName +
-      ". To exclude it, turn off Auto-include new apps."
-    : autoOther ? "Auto-included by profile " + autoBy + " — tap to pin it here instead."
+  const title = claimedBy ? t("scope_already_targeted_prefix") + claimedBy
+    : autoMine ? t("scope_auto_mine_title_prefix") + profileName + t("scope_auto_mine_title_suffix")
+    : autoOther ? t("scope_auto_other_title_prefix") + autoBy + t("scope_auto_other_title_suffix")
     : label;
 
   return el("button", {
@@ -474,7 +473,7 @@ function scopeRow(row, ctx, actions) {
         el("span", { class: "scope-name", text: label }),
         ...pills,
       ]),
-      el("span", { class: "scope-pkg mono", text: pkgLine + "  ·  uid " + row.uid + (row.enabled === false ? "  ·  disabled" : "") }),
+      el("span", { class: "scope-pkg mono", text: pkgLine + "  ·  uid " + row.uid + (row.enabled === false ? "  ·  " + t("scope_disabled_suffix") : "") }),
     ]),
     el("span", { class: "scope-check" + (selected ? " on" : autoMine ? " auto" : ""), "aria-hidden": "true" }),
   ]);
