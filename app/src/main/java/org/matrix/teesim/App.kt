@@ -44,26 +44,48 @@ object App {
     // without blocking the config path across the multi-second fetch.
     private val usagePollLock = Any()
 
-    // The delete-helper child body (see main): keystore2 only lets a key's OWNER delete it, and only the
-    // owner's delete evicts keystore2's in-memory cache (a direct database delete does not). binder tells
-    // keystore2 the sender's EFFECTIVE uid, so we seteuid to the owner and then delete — our real uid
-    // stays root, and this is a throwaway process anyway. Exit code: 0 deleted, 1 keystore2 refused,
-    // 2 could-not-seteuid (so the parent falls back to a direct database delete + keystore2 restart).
+    // Shared body of the owner-scoped helper children the daemon spawns (see main). keystore2 authorizes
+    // an owner-only operation on a key by the caller's EFFECTIVE uid, so we seteuid to the key's owner and
+    // then run [action] against keystore2 as that app. Our real uid stays root and this is a throwaway
+    // process, so the euid drop is never reverted. [label] only names the caller in the log. Exit code:
+    // 0 success, 1 keystore2 refused (or [action] threw), 2 could-not-seteuid — the parent falls back to
+    // a direct database write on anything non-zero.
     @Suppress("DEPRECATION") // Os.seteuid is deprecated but is the only way to set the binder-reported euid
-    private fun runDeleteHelper(uid: Int, keyId: Long): Int {
+    private fun runAsOwner(label: String, uid: Int, action: () -> Boolean): Int {
         if (uid < 0) return 2
         try {
             android.system.Os.seteuid(uid)
         } catch (e: Throwable) {
-            SystemLogger.warning("delete-helper: seteuid($uid) failed: ${e.javaClass.simpleName}: ${e.message}")
+            SystemLogger.warning("$label: seteuid($uid) failed: ${e.javaClass.simpleName}: ${e.message}")
             return 2
         }
         return try {
-            if (Keystore2Service.deleteKeyById(keyId)) 0 else 1
+            if (action()) 0 else 1
         } catch (e: Throwable) {
-            SystemLogger.warning("delete-helper: deleteKeyById($keyId) as euid=$uid failed", e)
+            SystemLogger.warning("$label: keystore2 call as euid=$uid failed", e)
             1
         }
+    }
+
+    // The delete-helper child body (see main): delete the key as its owner — only the owner's delete
+    // evicts keystore2's in-memory cache (a direct database delete does not).
+    private fun runDeleteHelper(uid: Int, keyId: Long): Int =
+        runAsOwner("delete-helper", uid) { Keystore2Service.deleteKeyById(keyId) }
+
+    // The resign-helper child body (see main): swap the key's stored certificates as its owner. The leaf
+    // and the rest of the chain are read (as root) from the two files the parent wrote, BEFORE dropping
+    // to the owner uid; an unreadable file is reported as a refusal so the parent takes the DB fallback.
+    private fun runResignHelper(uid: Int, keyId: Long, leafPath: String, chainPath: String): Int {
+        val leaf: ByteArray
+        val chain: ByteArray
+        try {
+            leaf = java.io.File(leafPath).readBytes()
+            chain = java.io.File(chainPath).readBytes()
+        } catch (e: Throwable) {
+            SystemLogger.warning("resign-helper: reading cert files failed: ${e.javaClass.simpleName}: ${e.message}")
+            return 1
+        }
+        return runAsOwner("resign-helper", uid) { Keystore2Service.updateSubcomponent(keyId, leaf, chain) }
     }
 
     @JvmStatic
@@ -72,6 +94,18 @@ object App {
         // runDeleteHelper). Runs before any daemon setup and exits with the outcome as its code.
         if (args.size == 3 && args[0] == "del") {
             kotlin.system.exitProcess(runDeleteHelper(args[1].toIntOrNull() ?: -1, args[2].toLongOrNull() ?: 0L))
+        }
+        // Resign-helper mode (a child spawned to re-root one pre-existing key's certificates as its
+        // owning app — see runResignHelper). Same throwaway-child pattern as "del".
+        if (args.size == 5 && args[0] == "resign") {
+            kotlin.system.exitProcess(
+                runResignHelper(
+                    args[1].toIntOrNull() ?: -1,
+                    args[2].toLongOrNull() ?: 0L,
+                    args[3],
+                    args[4],
+                )
+            )
         }
         SystemLogger.info("TEESimulator control daemon starting")
         try {

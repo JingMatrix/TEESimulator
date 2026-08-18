@@ -75,34 +75,43 @@ object Keystore2Service {
     }
 
     /**
-     * Delete keyentry [keyId] as its owning app [uid]. keystore2 only lets a key's owner delete it (and
-     * only that evicts its cache), so we cannot remove another app's key directly — we spawn a child
-     * app_process that seteuid's to [uid] before calling keystore2 (binder reports the effective uid).
-     * The child runs as root first, so it can read our dex; App.main handles the "del" arguments. Returns
-     * the child's exit code: 0 deleted, 1 keystore2 refused, 2 could-not-seteuid, -1 could-not-spawn.
+     * Run one owner-only keystore2 operation on keyentry [keyId] as its owning app [uid]. keystore2
+     * authorizes such operations (delete, cert update) by the caller's EFFECTIVE uid, and only the owner
+     * qualifies, so the daemon cannot act on another app's key directly. Instead we spawn a throwaway
+     * app_process that re-executes [App] with subcommand [op]: it seteuid's to [uid] and calls keystore2
+     * as that app (binder reports the effective uid). The child runs as root first, so it can read our
+     * dex; [App.main] parses `op uid keyId [extraArgs…]`. Returns the child's exit code: 0 done,
+     * 1 keystore2 refused, 2 could-not-seteuid, -1 could-not-spawn.
      */
-    fun deleteKeyByIdAsUid(keyId: Long, uid: Int): Int {
+    private fun spawnOwnerOp(op: String, uid: Int, keyId: Long, extraArgs: List<String> = emptyList()): Int {
         return try {
             val cp = System.getProperty("java.class.path")
             if (cp.isNullOrEmpty()) return -1
             val cmd = listOf(
                 "/system/bin/app_process", "-Djava.class.path=$cp", "/",
-                "--nice-name=teesim-del", "org.matrix.teesim.App", "del", uid.toString(), keyId.toString(),
-            )
+                "--nice-name=teesim-$op", "org.matrix.teesim.App", op, uid.toString(), keyId.toString(),
+            ) + extraArgs
             val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
             val out = p.inputStream.bufferedReader().readText().trim()
             p.waitFor()
             val code = p.exitValue()
             SystemLogger.info(
-                "deleteKeyByIdAsUid(keyId=$keyId, uid=$uid): child exit $code" +
+                "spawnOwnerOp('$op', keyId=$keyId, uid=$uid): child exit $code" +
                     if (out.isEmpty()) "" else " | ${out.takeLast(180)}"
             )
             code
         } catch (e: Throwable) {
-            SystemLogger.warning("deleteKeyByIdAsUid(keyId=$keyId, uid=$uid) spawn failed", e)
+            SystemLogger.warning("spawnOwnerOp('$op', keyId=$keyId, uid=$uid) spawn failed", e)
             -1
         }
     }
+
+    /**
+     * Delete keyentry [keyId] as its owning app [uid] — the owner-scoped delete (see [spawnOwnerOp]).
+     * Only the owner's delete evicts keystore2's cache, so a direct database delete is the caller's
+     * fallback. Returns 0 deleted, 1 keystore2 refused, 2 could-not-seteuid, -1 could-not-spawn.
+     */
+    fun deleteKeyByIdAsUid(keyId: Long, uid: Int): Int = spawnOwnerOp("del", uid, keyId)
 
     /**
      * Fetch keystore2's stored supplementary attestation info for [tag] (e.g. MODULE_HASH's DER-encoded
@@ -156,6 +165,33 @@ object Keystore2Service {
                 "Keystore2Service.updateSubcomponent($keyId) failed: ${cause.javaClass.simpleName}: ${cause.message}"
             )
             false
+        }
+    }
+
+    /**
+     * Re-root keyentry [keyId]'s stored certificates as its owning app [uid] — the owner-scoped cert
+     * update (see [spawnOwnerOp]). The leaf and the rest of the chain go to the child through two
+     * short-lived files under [Const.DATA_DIR] (argv can't carry DER cleanly), which the child reads as
+     * root before it drops to [uid]. Returns 0 updated, 1 keystore2 refused (or the certs were
+     * unreadable), 2 could-not-seteuid, -1 could-not-spawn — the caller falls back to a direct database
+     * write on any non-zero result.
+     */
+    fun updateSubcomponentAsUid(keyId: Long, uid: Int, leaf: ByteArray, chain: ByteArray): Int {
+        val dir = java.io.File(Const.DATA_DIR, ".resign").apply { mkdirs() }
+        val leafFile = java.io.File(dir, "$keyId.leaf")
+        val chainFile = java.io.File(dir, "$keyId.chain")
+        return try {
+            leafFile.writeBytes(leaf)
+            chainFile.writeBytes(chain)
+            spawnOwnerOp("resign", uid, keyId, listOf(leafFile.absolutePath, chainFile.absolutePath))
+        } catch (e: Throwable) {
+            SystemLogger.warning(
+                "updateSubcomponentAsUid(keyId=$keyId, uid=$uid) failed: ${e.javaClass.simpleName}: ${e.message}"
+            )
+            -1
+        } finally {
+            try { leafFile.delete() } catch (_: Throwable) {}
+            try { chainFile.delete() } catch (_: Throwable) {}
         }
     }
 

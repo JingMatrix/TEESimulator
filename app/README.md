@@ -100,8 +100,10 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
    from the keystore2 database (**`KeystoreDb.attestedKeys`**, skipping our own keys and any leaf
    already rooted in the live keybox), asks the lib to re-sign each under the profile's keybox over
    a `resign` request on the same socket (the same patch the router applies to a fresh key), and
-   writes the patched chain back with **`Keystore2Service.updateSubcomponent`** — the key blob is
-   never touched, so the real hardware key keeps signing; only the certificate the app reads changes.
+   writes the patched chain back — as the key's **owner** first (**`updateSubcomponentAsUid`** seteuid's
+   so keystore2 accepts it), falling back to a direct database write (**`KeystoreDb.updateSubcomponents`**)
+   for anything keystore2 still refuses, mirroring the delete path. The key blob is never touched, so the
+   real hardware key keeps signing; only the certificate the app reads changes.
    Record-less and idempotent: it re-scans each run, so a keybox swap or a newly installed app
    self-heals on the next push.
 

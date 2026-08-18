@@ -106,9 +106,13 @@ object Harvester {
         val userEdited: Boolean = false,
     )
 
-    /** Device ids the leaf omits but we read from the OS. Shown for transparency but NOT editable here —
-     *  spoofing an id is a per-profile concern (Resolver.resolveProfile lets a profile override each). */
-    private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid")
+    /** Device ids we may read from the OS when the attested leaf did not carry them, presented as
+     *  SUPPLEMENT overrides. Shown for transparency but NOT editable here — spoofing an id is a
+     *  per-profile concern (Resolver.resolveProfile lets a profile override each). serial/imei/imei2/meid
+     *  are read from telephony/props; brand/device/product/manufacturer/model ([DEVICE_PROP_IDS]) are
+     *  supplemented only when the leaf carried none, via [devicePropId]. */
+    private val DEVICE_PROP_IDS = setOf("brand", "device", "product", "manufacturer", "model")
+    private val SUPPLEMENT_IDS = setOf("serial", "imei", "imei2", "meid") + DEVICE_PROP_IDS
     /** Level/version values we synthesize on a device with no working hardware — editable. */
     private val SYNTHESIZED_FIELDS =
         setOf(
@@ -225,6 +229,11 @@ object Harvester {
 
         private fun capturedString(field: String): String =
             when (field) {
+                "brand" -> brand
+                "device" -> device
+                "product" -> product
+                "manufacturer" -> manufacturer
+                "model" -> model
                 "serial" -> serial
                 "imei" -> imei
                 "imei2" -> imei2
@@ -366,48 +375,53 @@ object Harvester {
     }
 
     /**
-     * Cap the attestation/keymaster version we present so it never exceeds the KeyMint AIDL version the
-     * device declares in its VINTF manifest (see [Vintf.keyMintHalVersion]). That number is the ceiling an
-     * integrity checker — and Android's own attestation contract — cross-checks the attested version
-     * against, and one we cannot raise: it is baked into the vendor image. A VTS-compliant device already
-     * satisfies `attestationVersion / 100 <= vintfVersion`, so the clamp is a no-op there; it only bites an
-     * OEM image that ships an older HAL (e.g. `IKeyMintDevice/default@3` on Android 16) while its keys — or
-     * our OS-derived fabrication — claim a newer KeyMint. TEE is recorded as computed overrides so the
-     * WebUI, the config push and the TA all agree; StrongBox is clamped in its own field, which Resolver
-     * reads directly. A version below 400 also makes the TA drop MODULE_HASH, a v4-only tag, keeping the
-     * record self-consistent.
+     * Reconcile the attestation/keymaster version we present with the keystore HAL the device declares in
+     * VINTF ([Vintf.attestationVersionConstraint]). Two constraint kinds, following
+     * VtsAidlKeyMintTargetTest::check_attestation_version and ../Duck-Detector-Refactoring
+     * VintfKeyMintVersionProbe:
+     *
+     *  - An AIDL KeyMint HAL @N is a CEILING (N*100): `attestationVersion / 100 <= N`, so we clamp DOWN
+     *    only when the current value exceeds it (e.g. an image shipping `IKeyMintDevice/default@3` while
+     *    the keys or our fabrication claim a newer KeyMint).
+     *  - A legacy HIDL Keymaster HAL is an EXACT target (@3.0 -> 2, @4.0 -> 3, @4.1 -> 4; AOSP
+     *    system/keymaster): we set it in BOTH directions, since the captured or fabricated value may sit
+     *    either side of the declared HAL.
+     *
+     * TEE is recorded as computed overrides so the WebUI, the config push and the TA agree; StrongBox is
+     * reconciled in its own field, which Resolver reads directly. keymasterVersionFor derives the matching
+     * keymasterVersion, and a resulting version below 400 makes the TA drop MODULE_HASH (a v4-only tag).
      */
     private fun clampAttestationToVintf(r: Record): Record {
         var out = r
 
-        Vintf.keyMintHalVersion("default")?.let { hal ->
-            val ceiling = hal * 100
+        Vintf.attestationVersionConstraint("default")?.let { c ->
             val current = out.effectiveInt("attestationVersion", out.attestationVersion)
-            if (current > ceiling) {
+            if (if (c.exact) current != c.version else current > c.version) {
                 SystemLogger.info(
-                    "Harvest: clamping attestationVersion $current -> $ceiling to match the device's " +
-                        "VINTF-declared KeyMint HAL (IKeyMintDevice/default@$hal); a higher value would " +
-                        "contradict the vendor manifest"
+                    "Harvest: constraining attestationVersion $current -> ${c.version} to the device's " +
+                        "VINTF-declared keystore HAL (${if (c.exact) "Keymaster HIDL, exact match" else "KeyMint AIDL, ceiling"})"
                 )
                 out =
                     out
-                        .withOverride("attestationVersion", ceiling.toString())
-                        .withOverride("keymasterVersion", keymasterVersionFor(ceiling).toString())
+                        .withOverride("attestationVersion", c.version.toString())
+                        .withOverride("keymasterVersion", keymasterVersionFor(c.version).toString())
             }
         }
 
-        // StrongBox declares its own instance version; fall back to the default instance's when the manifest
-        // does not list a separate strongbox HAL (many devices share one KeyMint version across levels).
-        (Vintf.keyMintHalVersion("strongbox") ?: Vintf.keyMintHalVersion("default"))?.let { hal ->
-            val ceiling = hal * 100
-            if (out.strongBoxAttestationVersion > ceiling) {
-                SystemLogger.info(
-                    "Harvest: clamping strongBoxAttestationVersion ${out.strongBoxAttestationVersion} -> " +
-                        "$ceiling to match the device's VINTF-declared KeyMint StrongBox HAL (@$hal)"
-                )
-                out = out.copy(strongBoxAttestationVersion = ceiling)
+        // StrongBox declares its own instance constraint; fall back to the default instance's when the
+        // manifest lists no separate strongbox HAL (many devices share one HAL version across levels).
+        (Vintf.attestationVersionConstraint("strongbox")
+                ?: Vintf.attestationVersionConstraint("default"))
+            ?.let { c ->
+                val current = out.strongBoxAttestationVersion
+                if (if (c.exact) current != c.version else current > c.version) {
+                    SystemLogger.info(
+                        "Harvest: constraining strongBoxAttestationVersion $current -> ${c.version} to the " +
+                            "device's VINTF-declared StrongBox keystore HAL"
+                    )
+                    out = out.copy(strongBoxAttestationVersion = c.version)
+                }
             }
-        }
 
         return out
     }
@@ -515,16 +529,13 @@ object Harvester {
     private const val TELEPHONY_WAIT_MS = 15_000L
 
     /**
-     * Fill in the device ids that device-properties attestation does not carry — IMEI, MEID, serial — so
-     * the reference TA's ID check passes when an app requests the device's true values.
+     * Fill in the device ids a leaf without device-id attestation does not carry — IMEI, MEID, serial.
      *
-     * The bare app_process never initialized the telephony framework (so `TelephonyManager.getImei()`
-     * hits a null service registerer), and `getImei()`/`getImeiForSlot()` additionally enforce a
-     * "package belongs to caller uid" check we can't satisfy as root (uid 0). So we go straight to the
-     * `IPhoneSubInfo` binder and use the legacy `getDeviceId*` calls, which return the real IMEI
-     * regardless of the calling package — confirmed on-device. The serial is read from the `ro.serialno`
-     * property: `Build.getSerial()` enforces the same "package belongs to caller uid" check, which we
-     * can never satisfy as root (uid 0), so it only ever fails here.
+     * The bare app_process does not initialize the telephony framework (so `TelephonyManager.getImei()`
+     * hits a null service registerer), and `getImei()`/`getImeiForSlot()` enforce a "package belongs to
+     * caller uid" check the daemon (uid 0) does not pass. So we call the `IPhoneSubInfo` binder's legacy
+     * `getDeviceId*` methods, which are not package-scoped. The serial is read from the `ro.serialno`
+     * property, since `Build.getSerial()` applies the same package check.
      */
     private fun supplementDeviceIds(r: Record): Record {
         // The harvest runs very early at boot, when telephony (the modem/RIL) usually isn't up yet, so
@@ -547,7 +558,66 @@ object Harvester {
         if (r.imei2.isBlank() && imei2.isNotBlank()) out = out.withOverride("imei2", imei2)
         if (r.meid.isBlank() && meid.isNotBlank()) out = out.withOverride("meid", meid)
         if (r.serial.isBlank() && serial.isNotBlank()) out = out.withOverride("serial", serial)
+
+        // brand/device/product/manufacturer/model are captured from the attested leaf when it carries
+        // them; a leaf that carried no device ids leaves them blank, and then the profile presents an
+        // empty id. Fill each blank one from the same source the framework fills ATTESTATION_ID_* from
+        // (see [devicePropId]), as a SUPPLEMENT override; a real capture is left untouched, and the user
+        // can still spoof any of them per-profile.
+        val supplemented = ArrayList<String>()
+        for (field in DEVICE_PROP_IDS) {
+            if (out.effective(field).isNotBlank()) continue // attested, or already supplemented
+            val value = devicePropId(field)
+            if (value.isNotBlank()) {
+                out = out.withOverride(field, value)
+                supplemented.add("$field='$value'")
+            }
+        }
+        if (supplemented.isNotEmpty())
+            SystemLogger.info(
+                "Harvest: device ids not attested; supplemented from system properties: " +
+                    supplemented.joinToString(" ")
+            )
         return out
+    }
+
+    // android.os.Build.UNKNOWN, the sentinel getString returns for an unset property.
+    private const val BUILD_UNKNOWN = "unknown"
+
+    /** The property base name AOSP's Build.getVendorDeviceIdProperty uses for each attestation id
+     *  (PRODUCT is backed by "name"); null for a field with no such mapping. */
+    private fun attestIdBase(field: String): String? =
+        when (field) {
+            "brand" -> "brand"
+            "device" -> "device"
+            "product" -> "name"
+            "manufacturer" -> "manufacturer"
+            "model" -> "model"
+            else -> null
+        }
+
+    /**
+     * The device-property id [field], resolved the way the framework resolves ATTESTATION_ID_*. Source:
+     * AOSP AndroidKeyStoreKeyPairGeneratorSpi reads Build.<X>_FOR_ATTESTATION (falling back to Build.<X>),
+     * and android.os.Build.getVendorDeviceIdProperty backs the _FOR_ATTESTATION fields as:
+     *   ro.product.<base>_for_attestation  (unless "unknown")
+     *     → else ro.product.vendor.<base>   (unless empty/"unknown")
+     *     → else ro.product.<base>          (the plain Build value)
+     * where <base> is brand/device/name(product)/manufacturer/model. This reads the same properties
+     * directly rather than the hidden Build.<X>_FOR_ATTESTATION fields. Blank when the whole chain is
+     * unset/unknown.
+     */
+    private fun devicePropId(field: String): String {
+        val base = attestIdBase(field) ?: return ""
+        val forAttestation =
+            DeviceProps.prop("ro.product.${base}_for_attestation", BUILD_UNKNOWN).let {
+                if (it == BUILD_UNKNOWN) DeviceProps.prop("ro.product.vendor.$base", BUILD_UNKNOWN) else it
+            }
+        val resolved =
+            if (forAttestation.isBlank() || forAttestation == BUILD_UNKNOWN)
+                DeviceProps.prop("ro.product.$base", "")
+            else forAttestation
+        return resolved.trim().let { if (it == BUILD_UNKNOWN) "" else it }
     }
 
     /**
