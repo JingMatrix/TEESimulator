@@ -7,6 +7,7 @@ import android.content.pm.IPackageManager
 import android.content.pm.PackageManager
 import android.content.pm.ParceledListSlice
 import android.content.pm.ResolveInfo
+import android.content.pm.UserInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
@@ -18,6 +19,7 @@ import android.os.ServiceManager
 import android.util.LruCache
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Package-name to uid resolution, across every Android user on the device. The public
@@ -104,9 +106,9 @@ object Packages {
 
     /**
      * The user list from IUserManager, or null when the service is unreachable or its aidl does not
-     * match. getUsers grew its excludePartial/excludePreCreated arguments in Android 11, so the
-     * three-argument form is tried first on R+ and the Android 10 one-argument form is the retry;
-     * a ROM that reshuffled the interface lands on NoSuchMethodError and we fall back to disk.
+     * match. getUsers is version-specific (see [getUsersForThisSdk]); a ROM that reshuffled or dropped
+     * the interface leaves us with no compatible overload and we fall back to disk. Such a mismatch is
+     * expected on OEM builds, so it is noted in a single line rather than a stack trace.
      */
     private fun usersFromService(): List<UserEntry>? {
         val binder =
@@ -131,21 +133,22 @@ object Packages {
             }
         val infos =
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) um.getUsers(true, true, true)
-                else um.getUsers(true)
+                getUsersForThisSdk(um)
             } catch (e: Throwable) {
-                // NoSuchMethodError on an aidl mismatch, SecurityException if a ROM tightened the
-                // check beyond the platform's uid-0 waiver. Either way: try the other arity, then disk.
-                SystemLogger.warning("Packages: getUsers failed (${e.javaClass.simpleName}); retrying the legacy arity", e)
-                try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) um.getUsers(true)
-                    else um.getUsers(true, true, true)
-                } catch (e2: Throwable) {
-                    SystemLogger.warning("Packages: getUsers unavailable on this ROM", e2)
-                    return null
-                }
+                // NoSuchMethodError on an aidl mismatch, SecurityException if a ROM tightened the check
+                // beyond the platform's uid-0 waiver — both expected on OEM ROMs and both covered by the
+                // on-disk fallback, so log one line (no backtrace) and read /data/system/users.
+                val cause = (e as? InvocationTargetException)?.targetException ?: e
+                SystemLogger.info(
+                    "Packages: getUsers unavailable on this ROM (${cause.javaClass.simpleName}); reading /data/system/users"
+                )
+                return null
             }
-        if (infos == null || infos.isEmpty()) {
+        if (infos == null) {
+            SystemLogger.info("Packages: no compatible getUsers overload; reading /data/system/users")
+            return null
+        }
+        if (infos.isEmpty()) {
             SystemLogger.warning("Packages: getUsers returned nothing; falling back to /data/system/users")
             return null
         }
@@ -158,6 +161,35 @@ object Packages {
                 null
             }
         }
+    }
+
+    /**
+     * Invoke IUserManager.getUsers with the overload the device actually declares. AOSP's signature is
+     * SDK-specific — Android 10 has `getUsers(boolean excludeDying)`, Android 11+ has
+     * `getUsers(boolean excludePartial, boolean excludeDying, boolean excludePreCreated)` (verified on
+     * cs.android.com) — and OEM ROMs sometimes drop or reshuffle it. So instead of hard-coding one arity
+     * and catching a NoSuchMethodError, we reflect over the live interface, pick the all-boolean getUsers
+     * whose arity matches this SDK (any available one otherwise), and call it with every flag set (the
+     * broadest enumeration, matching what both AOSP arities mean by all-true). Returns null when the ROM
+     * declares no such overload, so the caller falls back to reading /data/system/users. Any exception the
+     * call itself throws propagates to the caller, which logs it in one line.
+     */
+    private fun getUsersForThisSdk(um: IUserManager): List<UserInfo>? {
+        val candidates =
+            um.javaClass.methods.filter { m ->
+                m.name == "getUsers" &&
+                    List::class.java.isAssignableFrom(m.returnType) &&
+                    m.parameterTypes.isNotEmpty() &&
+                    m.parameterTypes.all { it == java.lang.Boolean.TYPE }
+            }
+        if (candidates.isEmpty()) return null
+        val preferredArity = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) 3 else 1
+        val method =
+            candidates.firstOrNull { it.parameterTypes.size == preferredArity }
+                ?: candidates.minByOrNull { it.parameterTypes.size }!!
+        val allTrue = Array<Any>(method.parameterTypes.size) { true }
+        @Suppress("UNCHECKED_CAST")
+        return method.invoke(um, *allTrue) as? List<UserInfo>
     }
 
     // /data/system/users/<id>/ is one directory per user and <id>.xml its record; the daemon is root,
