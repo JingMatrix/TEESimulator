@@ -243,7 +243,8 @@ export const dictionaries = {
     "kb_verdict_unknown_title": "Unknown root",
     "kb_verdict_unknown_sub": "Chain does not root in a recognized attestation authority",
 
-    // --- System Overrides ---
+    "kb_add": "Import",
+    "sys_update_flashed": "Module updated successfully. Please reboot to apply.",
     "sys_edited": "edited",
     "sys_source_required": "required",
     "sys_source_supplement": "supplement",
@@ -564,7 +565,8 @@ export const dictionaries = {
     "kb_verdict_unknown_title": "未知的根證書",
     "kb_verdict_unknown_sub": "證書鏈未根植於已知的認證機構",
 
-    // --- System Overrides ---
+    "kb_add": "匯入",
+    "sys_update_flashed": "模組更新成功，請重新開機以套用變更。",
     "sys_edited": "已編輯",
     "sys_source_required": "必要",
     "sys_source_supplement": "補充",
@@ -885,7 +887,8 @@ export const dictionaries = {
     "kb_verdict_unknown_title": "未知的根证书",
     "kb_verdict_unknown_sub": "证书链未根植于已知的认证机构",
 
-    // --- System Overrides ---
+    "kb_add": "导入",
+    "sys_update_flashed": "模块更新成功，请重启以应用更改。",
     "sys_edited": "已编辑",
     "sys_source_required": "必要",
     "sys_source_supplement": "补充",

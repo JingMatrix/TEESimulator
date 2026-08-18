@@ -21,15 +21,17 @@ import { t } from "../i18n.js";
 // Groups render top to bottom. `fold: true` collapses the group behind a disclosure so
 // the editor stays concise — only the essentials (keybox, operation mode, apps) are open,
 // with the patch/OS levels and the many device-identity fields tucked away until needed.
-const GROUPS = [
-  { id: "attestation", title: t("cfg_group_attestation") },
-  { id: "levels", title: t("cfg_group_levels"), fold: true },
-  {
-    id: "identity", title: t("cfg_group_identity"), fold: true,
-    note: t("cfg_identity_note"),
-  },
-  { id: "apps", title: t("cfg_group_apps") },
-];
+function getGroups() {
+  return [
+    { id: "attestation", title: t("cfg_group_attestation") },
+    { id: "levels", title: t("cfg_group_levels"), fold: true },
+    {
+      id: "identity", title: t("cfg_group_identity"), fold: true,
+      note: t("cfg_identity_note"),
+    },
+    { id: "apps", title: t("cfg_group_apps") },
+  ];
+}
 
 const fieldId = (profile, key) => `f__${profile}__${key}`;
 const renameId = (profile) => `rn__${profile}`;
@@ -224,7 +226,7 @@ export function renderProfileEditor(host, state, actions) {
     return fieldEl;
   };
 
-  for (const group of GROUPS) {
+  for (const group of getGroups()) {
     const groupFields = FIELDS.filter((f) => f.group === group.id);
     if (!groupFields.length) continue;
 
