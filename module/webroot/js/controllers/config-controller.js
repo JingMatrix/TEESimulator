@@ -11,7 +11,7 @@
 
 import { load as ioLoad, save as ioSave, listKeyboxes } from "../data/config-io.js";
 import { getStatus } from "../data/status.js";
-import { keyAdmin, API_BASE, adminToken } from "../data/keyadmin.js";
+import { keyAdmin, iconDataUrl } from "../data/keyadmin.js";
 import { validateConfig } from "../domain/validate.js";
 import { emptyProfile, emptyConfig, FIELDS, PROFILE_RE, entryToken } from "../domain/schema.js";
 import { setPath, getPath } from "../domain/path.js";
@@ -72,7 +72,6 @@ export function create(mount) {
   // so this is fetched only when one may have happened — never on the Scope page's 9s poll.
   let resolvedCache = null;
   let resolvedFetchGen = 0;  // same stale-reply guard as scopeFetchGen, on its own channel
-  let iconToken = null;      // the admin token, prefetched so /icon URLs build synchronously
   let scopePullBound = false; // pull-to-refresh listeners attached to scopeHost yet?
 
   function revalidate() {
@@ -256,17 +255,14 @@ export function create(mount) {
   }
 
   // ---- scope drill-in lifecycle (opens on top of the editor) ------------
-  // A URL for the daemon's /icon route. The admin token is prefetched into `iconToken` on open,
-  // so this builds synchronously (a browser <img> cannot set the token header, so it rides the
-  // query, exactly like the log-download route). Null until the token is in hand — the row then
-  // shows a letter-avatar instead.
+  // The icon for a scope row. There is no fetchable /icon URL any more — the daemon is reached over a
+  // root-only unix socket — so this returns a Promise of a self-contained data: URL (or null when the
+  // app has no icon), which the scope view loads lazily as rows scroll into view.
   // `userId` says which Android user to look the package up in: an app installed only in a work
   // profile has no record in user 0 for the daemon to read an icon from.
   function iconUrl(pkg, userId) {
-    if (!iconToken || !pkg) return null;
-    return API_BASE + "/icon?pkg=" + encodeURIComponent(pkg) +
-      "&user=" + encodeURIComponent(userId || 0) +
-      "&token=" + encodeURIComponent(iconToken);
+    if (!pkg) return null;
+    return iconDataUrl(pkg, userId || 0);
   }
 
   function renderScopeView() {
@@ -369,9 +365,6 @@ export function create(mount) {
     scopePullBound = false;
     scopeHost = el("div", { class: "editor-host" });
     scopeOverlay = openOverlay(scopeHost, { variant: "panel", label: "Scope", onClose: onScopeClosed });
-
-    // Prefetch the admin token so /icon URLs build synchronously as rows render.
-    adminToken().then((t) => { iconToken = t || null; if (scoping === name) renderScopeView(); }).catch(() => {});
 
     // Rescan, then fetch the live app list. Always the spinner path, cache or not: the point is that
     // what the user first sees is post-rescan.

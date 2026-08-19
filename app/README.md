@@ -126,7 +126,7 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
 The root-manager WebUI talks to the daemon over a tiny loopback HTTP endpoint, since the daemon
 has a real `Context` and root that the webview alone does not:
 
-- **`KeyAdmin`** — HTTP/1.1 on `127.0.0.1:8790`, gated by a random token in a root-only file
+- **`KeyAdmin`** — HTTP/1.1 over a root-only filesystem unix socket (`/data/adb/teesim/admin.sock`), gated by a random token in a root-only file
   (`admin.token`). It serves the WebUI's status, key, keybox, logs, and canary routes, plus the
   **Scope** app-picker's routes: **`GET /packages`** (the installed-app list collapsed by uid — label,
   packages, system / launchable / enabled, install time, plus per-app request frequency, last-used, and

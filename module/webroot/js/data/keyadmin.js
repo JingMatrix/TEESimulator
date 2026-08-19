@@ -73,12 +73,18 @@
 // call throws (or the daemon's own { ok:false, error } is surfaced) so the UI can
 // show it rather than silently degrade.
 //
-// data/* may import bridge/shell.js — that is the only bridge dependency here, and
-// only to read the root-only token file once.
-import { readFile } from "../bridge/shell.js";
+// data/* may import bridge/shell.js — the one bridge dependency here. This seam uses it to read the
+// root-only token, and to run the teesim-uds client (staging a request body through a temp file when
+// one is needed) since the daemon is now reached over a unix socket rather than a fetchable URL.
+import { readFile, run, writeFileAtomic, deleteFile, DIR } from "../bridge/shell.js";
 
-const BASE = "http://127.0.0.1:8790";
-const TOKEN_FILE = "/data/adb/teesim/admin.token";
+// The daemon serves its admin endpoint on a root-only FILESYSTEM unix socket (see KeyAdmin.kt), not a
+// loopback TCP port — so no other app can reach or even observe it. A WebView cannot fetch() a unix
+// socket, so this seam does not fetch at all: it drives the shipped `teesim-uds` client through the
+// root-exec bridge, which connects to the socket as root and speaks the same HTTP the daemon parses.
+const SOCK = DIR + "/admin.sock";
+const HELPER = DIR + "/teesim-uds";
+const TOKEN_FILE = DIR + "/admin.token";
 
 // The admin token gates every request. It is a root-only file, so we read it once
 // through the bridge (the single path that has root) and memoize it for the life
@@ -95,58 +101,62 @@ function getToken() {
   return tokenPromise;
 }
 
-// A daemon download is reached by a browser navigation, which cannot carry the
-// X-Teesim-Token header, so the log-download route authenticates with a ?token= query
-// param. These two exports keep the base URL and token owned by this seam; callers build
-// only the path+query. Prefetch adminToken() so the token is in hand before the click.
-export const API_BASE = BASE;
-export function adminToken() {
-  return getToken();
+// GET /icon?pkg=<package>&user=<userId> -> raw PNG (the daemon renders the app icon and caches it).
+// There is no fetchable URL for an <img src> any more — the bytes come back over the root bridge — so
+// this returns a self-contained data: URL the view can drop straight into an <img>, or null when the
+// app has no icon (the helper exits non-zero on a non-2xx response). `userId` picks the Android user:
+// an app that exists only in a work profile has no record in user 0 to read an icon from.
+export async function iconDataUrl(pkg, userId) {
+  if (!pkg) return null;
+  const token = await getToken();
+  const path = "/icon?pkg=" + encodeURIComponent(pkg) + "&user=" + encodeURIComponent(userId || 0);
+  const r = await run([HELPER, SOCK, "GET", path, token, "--b64"]);
+  // errno 0 = HTTP 2xx (a PNG); anything else (no icon, transport error) -> fall back to the avatar.
+  if (r.errno !== 0 || !r.stdout) return null;
+  return "data:image/png;base64," + r.stdout.trim();
 }
 
-// GET /icon?pkg=<package>&token=<token> -> raw PNG (the daemon renders the app icon and
-// caches it). A browser <img> cannot set the X-Teesim-Token header, so — exactly like the
-// log-download route — the token rides in the query string. The URL is what an <img src> or
-// CSS background points at; this seam owns the base+token so the view never names either.
-// The Scope controller prefetches adminToken() once and then builds row URLs synchronously,
-// but this async helper is here for any caller that just wants one URL without that dance.
-export async function iconUrlAsync(pkg) {
-  const t = await getToken();
-  return BASE + "/icon?pkg=" + encodeURIComponent(pkg || "") + "&token=" + encodeURIComponent(t || "");
-}
-
-// One request helper: attach the token header, parse JSON, and convert any non-200
-// or network/parse failure into a thrown Error carrying the daemon's message when
-// there is one.
+// One request helper: run the UDS client with the token header, parse the JSON body it prints, and
+// convert a transport failure or a daemon { ok:false } into a thrown Error carrying the daemon's
+// message when there is one. The helper's exit code encodes the HTTP status class (0 = 2xx, 2 = other
+// status with the body still on stdout, 1 = connect/transport failure).
 async function request(method, path, body) {
   const token = await getToken();
   const t0 = Date.now();
   console.log("[keyAdmin] → %s %s%s", method, path, token ? "" : " (NO TOKEN)");
-  const init = { method, headers: { "X-Teesim-Token": token } };
+  // A request body can be large (e.g. a full log dump for logsWrite), so it is handed to the helper
+  // through a root-only temp file rather than the command line. The helper streams it with a
+  // Content-Length; we delete it afterwards.
+  let bodyFile = null;
+  const argv = [HELPER, SOCK, method, path, token];
   if (body != null) {
-    init.body = body;
-    init.headers["Content-Type"] = "text/plain; charset=utf-8";
+    bodyFile = DIR + "/req-" + Math.random().toString(36).slice(2) + ".tmp";
+    await writeFileAtomic(bodyFile, String(body));
+    argv.push("--body-file", bodyFile);
   }
-  let res;
   try {
-    res = await fetch(BASE + path, init);
-  } catch (e) {
-    console.error("[keyAdmin] ✗ %s %s network error in %dms:", method, path, Date.now() - t0, e);
-    throw new Error("daemon unreachable: " + (e && e.message ? e.message : String(e)));
+    const r = await run(argv);
+    if (r.errno === 1 || r.errno === -1) {
+      console.error("[keyAdmin] ✗ %s %s transport error in %dms: %o", method, path, Date.now() - t0, r.stderr);
+      throw new Error("daemon unreachable" + (r.stderr ? ": " + String(r.stderr).trim() : ""));
+    }
+    // Response body — a distinct name from the `body` REQUEST parameter above (re-declaring a parameter
+    // with `let` is a SyntaxError that would break this whole module and, with it, the entire WebUI).
+    let data = null;
+    try { data = JSON.parse(r.stdout); } catch { /* leave null on empty/invalid JSON */ }
+    const ok = data ? data.ok !== false : r.errno === 0;
+    console.log("[keyAdmin] ← %s %s errno=%o ok=%o in %dms", method, path, r.errno, ok, Date.now() - t0);
+    if (!ok) {
+      console.warn("[keyAdmin] ✗ %s %s body:", method, path, data);
+      // The daemon reports failures two ways: key ops use { ok:false, error }, while the canary
+      // endpoints use { ok:false, message }. Surface either so a failed canaryInstall keeps the
+      // daemon's human-readable reason.
+      throw new Error((data && (data.error || data.message)) || ("helper errno " + r.errno));
+    }
+    return data;
+  } finally {
+    if (bodyFile) { try { await deleteFile(bodyFile); } catch { /* best effort */ } }
   }
-  // Response body — a distinct name from the `body` REQUEST parameter above (re-declaring a parameter
-  // with `let` is a SyntaxError that would break this whole module and, with it, the entire WebUI).
-  let data = null;
-  try { data = await res.json(); } catch { /* leave null on empty/invalid JSON */ }
-  console.log("[keyAdmin] ← %s %s %d ok=%o in %dms", method, path, res.status, res.ok, Date.now() - t0);
-  if (!res.ok) {
-    console.warn("[keyAdmin] ✗ %s %s body:", method, path, data);
-    // The daemon reports failures two ways: key ops use { ok:false, error },
-    // while the canary endpoints use { ok:false, message }. Surface either so a
-    // failed canaryInstall keeps the daemon's human-readable reason.
-    throw new Error((data && (data.error || data.message)) || ("HTTP " + res.status));
-  }
-  return data;
 }
 
 // The alias travels in the query string; encode it so any character is inert.

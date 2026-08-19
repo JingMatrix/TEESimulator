@@ -13,7 +13,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Control-channel CLIENT. Connects the abstract unix socket `@teesim`, verifies the peer is
+ * Control-channel CLIENT. Connects the filesystem unix socket at [Const.CONTROL_SOCKET_PATH], verifies the peer is
  * keystore (SO_PEERCRED uid == 1017) before sending the keybox bytes, then speaks the control.cpp
  * framing: [u32 BE length][UTF-8 JSON].
  *
@@ -90,7 +90,7 @@ object Control {
             try {
                 socket = LocalSocket()
                 socket.connect(
-                    LocalSocketAddress(Const.CONTROL_SOCKET, LocalSocketAddress.Namespace.ABSTRACT)
+                    LocalSocketAddress(Const.CONTROL_SOCKET_PATH, LocalSocketAddress.Namespace.FILESYSTEM)
                 )
                 val peerUid =
                     try {
@@ -108,7 +108,7 @@ object Control {
                     continue
                 }
                 SystemLogger.info(
-                    "control: connected to @${Const.CONTROL_SOCKET} (peer uid=$peerUid)"
+                    "control: connected to ${Const.CONTROL_SOCKET_PATH} (peer uid=$peerUid)"
                 )
                 backoff = 500L
 

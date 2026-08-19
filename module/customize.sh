@@ -36,4 +36,5 @@ set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/daemon" 0 0 0755
 for abi in arm64-v8a x86_64; do
   [ -f "$MODPATH/$abi/inject" ] && set_perm "$MODPATH/$abi/inject" 0 0 0755
+  [ -f "$MODPATH/$abi/teesim-uds" ] && set_perm "$MODPATH/$abi/teesim-uds" 0 0 0755
 done

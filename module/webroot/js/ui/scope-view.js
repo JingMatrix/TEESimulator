@@ -480,24 +480,55 @@ function scopeRow(row, ctx, actions) {
   ]);
 }
 
-// The lazy app icon: an <img loading="lazy"> pointing at the daemon's /icon route, with a
-// letter-avatar as the fallback both before a URL exists and when the image fails to decode
-// (no such icon, 404). The avatar is swapped in on error so a broken icon never shows.
+// Fetching an app icon is now a root-exec round-trip (the daemon lives behind a root-only unix
+// socket, so there is no <img src> URL). To keep the list cheap we still load lazily: each icon wrap
+// carries a loader that a shared IntersectionObserver fires once, when the row nears the viewport.
+const iconObserver =
+  typeof IntersectionObserver === "function"
+    ? new IntersectionObserver(
+        (entries, obs) => {
+          for (const e of entries) {
+            if (!e.isIntersecting) continue;
+            obs.unobserve(e.target);
+            const load = e.target._loadIcon;
+            if (load) load();
+          }
+        },
+        { rootMargin: "200px" },
+      )
+    : null;
+
+// The lazy app icon: a letter-avatar shows immediately (before, and instead of a missing/failed
+// icon); the real icon is fetched as a data: URL when the row scrolls into view and swapped in.
 function iconEl(row, primary, label, iconUrl) {
   const wrap = el("span", { class: "scope-ico", "aria-hidden": "true" });
   const avatar = () => el("span", {
     class: "scope-avatar", style: "background:" + hashColor(label + "/" + row.uid), text: avatarLetter(row.label, primary),
   });
+  wrap.appendChild(avatar());
   const pkg = (row.packages || [])[0];
+  if (!pkg) return wrap;
   // The user rides along: an app that exists only in a work profile has no record in user 0 for the
-  // daemon to read an icon out of.
-  const url = pkg ? iconUrl(pkg, row.userId || 0) : null;
-  if (!url) { wrap.appendChild(avatar()); return wrap; }
-  const img = el("img", {
-    class: "scope-ico-img", loading: "lazy", decoding: "async", alt: "", src: url,
-    onerror: () => { const a = avatar(); if (img.parentNode) img.replaceWith(a); },
-  });
-  wrap.appendChild(img);
+  // daemon to read an icon out of. iconUrl now returns a Promise of a data: URL (or null).
+  let loaded = false;
+  const load = () => {
+    if (loaded) return;
+    loaded = true;
+    Promise.resolve(iconUrl(pkg, row.userId || 0))
+      .then((url) => {
+        if (!url) return; // no icon -> keep the avatar
+        const img = el("img", {
+          class: "scope-ico-img", decoding: "async", alt: "", src: url,
+          onerror: () => { if (img.parentNode) img.replaceWith(avatar()); },
+        });
+        const cur = wrap.firstChild;
+        if (cur) cur.replaceWith(img); else wrap.appendChild(img);
+      })
+      .catch(() => { /* keep the avatar */ });
+  };
+  wrap._loadIcon = load;
+  if (iconObserver) iconObserver.observe(wrap);
+  else load(); // no observer support: load eagerly
   return wrap;
 }
 

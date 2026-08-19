@@ -57,7 +57,7 @@ android {
                 abiFilters += listOf("arm64-v8a", "x86_64")
                 // Match package.sh: build the injector and both interceptors; the
                 // static BoringSSL `crypto` target builds transitively for keystore.
-                targets += listOf("inject", "teesim_keymint", "teesim_keystore")
+                targets += listOf("inject", "teesim-uds", "teesim_keymint", "teesim_keystore")
             }
         }
     }
@@ -244,8 +244,8 @@ androidComponents {
                     include("**/libteesim_keymint.so", "**/libteesim_keystore.so")
                 }
 
-                // The injector executable, one per <abi>/.
-                from(cmakeObj) { include("**/inject") }
+                // The injector executable and the WebUI's admin-socket client, one per <abi>/.
+                from(cmakeObj) { include("**/inject", "**/teesim-uds") }
 
                 // The module scripts and WebUI (service.sh, daemon, customize.sh,
                 // sepolicy.rule, config.default.json, webroot/); module.prop is

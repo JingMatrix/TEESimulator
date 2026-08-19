@@ -67,7 +67,7 @@ export function renderKeys(mount, state, handler) {
   if (unavailable) {
     mount.appendChild(el("div", { class: "card" }, [el("div", { class: "banner" }, [
       el("div", { text: "Daemon key capability unavailable." }),
-      el("div", { class: "muted small", text: "The daemon's KeyAdmin endpoint (127.0.0.1:8790) isn't reachable yet; keys can't be listed." }),
+      el("div", { class: "muted small", text: "The daemon's admin endpoint isn't reachable yet; keys can't be listed." }),
     ])]));
     return;
   }

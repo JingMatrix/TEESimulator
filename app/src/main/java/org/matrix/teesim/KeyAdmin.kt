@@ -1,14 +1,15 @@
 package org.matrix.teesim
 
+import android.net.LocalServerSocket
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.Build
 import android.security.keystore.KeyInfo
+import android.system.Os
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStream
-import java.net.InetAddress
-import java.net.ServerSocket
-import java.net.Socket
 import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -31,9 +32,14 @@ import org.json.JSONObject
 
 /**
  * Key-management endpoint the WebUI calls to list / inspect / delete AndroidKeyStore entries the
- * daemon (a real root Context) can reach. Minimal HTTP/1.1 on loopback, guarded by a random token
- * written to [Const.adminTokenFile] (0600) — only root (the WebUI's manager bridge) can read the
- * token, so other apps on the device can't drive it.
+ * daemon (a real root Context) can reach. Minimal HTTP/1.1 over a FILESYSTEM unix-domain socket at
+ * [Const.adminSocketFile], inside the 0700 root-only [Const.DATA_DIR]. A loopback TCP port would be
+ * connectable by any app uid — and a service answering there fingerprints the module — so it is served
+ * on a unix socket instead: the kernel refuses a connect() from any non-root caller, making the
+ * endpoint invisible to every other app. The WebView cannot reach a unix socket directly, so the WebUI
+ * drives it through its root-exec bridge and the shipped `teesim-uds` client. Every request still
+ * carries the random admin token (defense in depth on top of the socket's permissions); the peer uid is
+ * additionally checked to be root at accept time.
  *
  * Contract (all responses application/json; send header `X-Teesim-Token: <token>`): GET /status ->
  * { ok, version, harvest{...}, lib{hook,api} } GET /keys -> { ok, keys:[ {alias, securityLevel, ours,
@@ -101,9 +107,18 @@ object KeyAdmin {
         harvest = record
     }
 
+    // Hold the listening socket and the LocalSocket that owns its bound fd for the life of the daemon,
+    // so neither is garbage-collected out from under the accept loop (a finalizer would close the fd).
+    @Volatile private var listenSocket: LocalServerSocket? = null
+    @Volatile private var listenBinder: LocalSocket? = null
+
     private fun startInner() {
         try {
             Const.adminTokenFile.parentFile?.mkdirs()
+            // The data dir holds the token and the admin socket; keep it root-only (0700) so neither is
+            // reachable by another uid even before the socket's own permissions apply. /data/adb is
+            // already 0700 on every supported root solution — this is belt-and-suspenders.
+            runCatching { Os.chmod(Const.DATA_DIR, /* 0700 */ 448) }
             Const.adminTokenFile.writeText(token)
             Const.adminTokenFile.setReadable(false, false)
             Const.adminTokenFile.setReadable(true, true) // owner (root) only
@@ -123,18 +138,59 @@ object KeyAdmin {
         return b.joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * Constant-time comparison of a caller-supplied token against the in-memory admin token. A `null`
+     * or length-mismatched candidate never matches. Length-independent so the compare time does not
+     * leak how many leading characters were correct — the token is the only thing standing between an
+     * app on the device and the admin surface, so it is compared without an early-out.
+     */
+    private fun tokensMatch(candidate: String?): Boolean {
+        val expected = token
+        if (candidate == null || expected.isEmpty()) return false
+        var diff = candidate.length xor expected.length
+        for (i in expected.indices) {
+            diff = diff or (expected[i].code xor (candidate.getOrNull(i)?.code ?: 0))
+        }
+        return diff == 0
+    }
+
     private fun serve() {
+        val path = Const.adminSocketFile.absolutePath
         val server =
             try {
-                ServerSocket(Const.ADMIN_PORT, 8, InetAddress.getByName("127.0.0.1"))
+                // A stale socket file from a previous run would make bind() fail with EADDRINUSE.
+                Const.adminSocketFile.delete()
+                // Bind a filesystem-namespaced unix socket, then wrap its fd in a LocalServerSocket
+                // (whose constructor calls listen()). A LocalServerSocket(String) would use the ABSTRACT
+                // namespace, which ignores filesystem permissions and is reachable by any app — exactly
+                // what we are avoiding — so we bind the filesystem path explicitly.
+                val binder = LocalSocket(LocalSocket.SOCKET_STREAM)
+                binder.bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
+                listenBinder = binder
+                // The 0700 data dir already blocks other uids; also mark the socket node 0600.
+                runCatching { Os.chmod(path, /* 0600 */ 384) }
+                LocalServerSocket(binder.fileDescriptor).also { listenSocket = it }
             } catch (e: Exception) {
-                SystemLogger.error("KeyAdmin: cannot bind 127.0.0.1:${Const.ADMIN_PORT}", e)
+                SystemLogger.error("KeyAdmin: cannot bind unix socket $path", e)
                 return
             }
-        SystemLogger.info("KeyAdmin: listening on 127.0.0.1:${Const.ADMIN_PORT}")
+        SystemLogger.info("KeyAdmin: listening on unix:$path")
         while (true) {
             try {
                 val client = server.accept()
+                // Defense in depth on top of the socket's filesystem permissions: only root may drive
+                // the admin endpoint. A peer that is not uid 0 is dropped without a byte of response.
+                val peerUid =
+                    try {
+                        client.peerCredentials.uid
+                    } catch (_: Exception) {
+                        -1
+                    }
+                if (peerUid != 0) {
+                    SystemLogger.warning("KeyAdmin: rejecting non-root peer uid=$peerUid")
+                    runCatching { client.close() }
+                    continue
+                }
                 // Handle each connection on its own thread with a read timeout, so one slow, half-open,
                 // or mis-framed client (e.g. a Content-Length that never fully arrives) can never wedge
                 // the accept loop and take the whole admin endpoint down with it.
@@ -152,19 +208,18 @@ object KeyAdmin {
         }
     }
 
-    private fun handle(client: Socket) {
+    private fun handle(client: LocalSocket) {
         client.use {
-            val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
-            val out = client.getOutputStream()
+            val reader = BufferedReader(InputStreamReader(client.inputStream, Charsets.UTF_8))
+            val out = client.outputStream
 
+            // Do NOT log the request line yet: nothing about a request is trusted or reflected until the
+            // token check below passes, so an unauthenticated caller never sees its own path echoed into
+            // the log. The request line is logged only after auth succeeds.
             val requestLine = reader.readLine() ?: return
             val t0 = System.currentTimeMillis()
-            SystemLogger.info("KeyAdmin: → ${requestLine.take(140)}")
             val parts = requestLine.split(" ")
-            if (parts.size < 2) {
-                respond(out, 400, JSONObject().put("ok", false).put("error", "bad request"))
-                return
-            }
+            if (parts.size < 2) return // malformed: drop silently, emit nothing
             val method = parts[0]
             val rawPath = parts[1]
 
@@ -177,41 +232,30 @@ object KeyAdmin {
                 if (idx <= 0) continue
                 val hName = line.substring(0, idx).trim()
                 val hVal = line.substring(idx + 1).trim()
-                if (hName.equals("X-Teesim-Token", true)) headerToken = hVal
-                else if (hName.equals("Content-Length", true)) contentLength = hVal.toIntOrNull() ?: 0
+                when {
+                    hName.equals("X-Teesim-Token", true) -> headerToken = hVal
+                    hName.equals("Content-Length", true) -> contentLength = hVal.toIntOrNull() ?: 0
+                }
             }
 
-            if (method == "OPTIONS") { // CORS preflight
-                respond(out, 204, null)
+            // The peer is already proven to be root (checked at accept) and reached us only through the
+            // root-only socket; the token is the final gate. A request without it is dropped silently —
+            // no response body, no reflected path, nothing to observe. There is no browser on this
+            // transport any more, so no CORS/OPTIONS handling is needed.
+            if (!tokensMatch(headerToken)) return
+            SystemLogger.info("KeyAdmin: → ${requestLine.take(140)}")
+
+            // Raw (non-JSON) routes: a PNG icon and a plain-text log stream. The WebUI reaches these
+            // through the same token-authenticated helper as every other route (a browser <img>/download
+            // navigation could not set the header, but the WebUI no longer fetches these directly — it
+            // pipes the bytes in over the root bridge).
+            val rawRoute = rawPath.substringBefore('?')
+            if (method == "GET" && rawRoute == "/logs/download") {
+                downloadLogs(out, parseQuery(rawPath.substringAfter('?', "")))
                 return
             }
-            // The log download is opened by a browser navigation, which cannot set the
-            // X-Teesim-Token header, so this one route authenticates with a ?token= query
-            // parameter (validated against the same in-memory token) and streams plain text
-            // named by a Content-Disposition header instead of the JSON envelope. Handled here,
-            // ahead of the header-token check that every other route still requires.
-            if (method == "GET" && rawPath.substringBefore('?') == "/logs/download") {
-                val dlQuery = parseQuery(rawPath.substringAfter('?', ""))
-                if (dlQuery["token"] != token) {
-                    respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
-                    return
-                }
-                downloadLogs(out, dlQuery)
-                return
-            }
-            // App icons are loaded by a browser <img src>, which likewise cannot set the token header,
-            // so /icon authenticates by ?token= exactly like /logs/download and streams a raw PNG.
-            if (method == "GET" && rawPath.substringBefore('?') == "/icon") {
-                val iconQuery = parseQuery(rawPath.substringAfter('?', ""))
-                if (iconQuery["token"] != token) {
-                    respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
-                    return
-                }
-                serveIcon(out, iconQuery)
-                return
-            }
-            if (headerToken == null || headerToken != token) {
-                respond(out, 403, JSONObject().put("ok", false).put("error", "invalid token"))
+            if (method == "GET" && rawRoute == "/icon") {
+                serveIcon(out, parseQuery(rawPath.substringAfter('?', "")))
                 return
             }
 

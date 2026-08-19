@@ -33,6 +33,12 @@ target_include_directories(inject PRIVATE injector/include)
 target_link_libraries(inject PRIVATE lsplt log)
 target_link_options(inject PRIVATE -static-libstdc++)
 
+# --- The WebUI's admin-socket client ----------------------------------------
+# The daemon serves its admin endpoint on a root-only filesystem unix socket (see KeyAdmin.kt); a
+# WebView cannot fetch() a unix socket, so the WebUI reaches it through its root-exec bridge and this
+# tiny HTTP-over-UDS client. Plain C, no dependencies — it just pumps one request/response.
+add_executable(teesim-uds injector/teesim_uds.c)
+
 # --- KeyMint AIDL, generated with the NDK backend ---------------------------
 # fromBinder's local-binder fallback (checked below) only exists in aidl from build-tools >= 35, so
 # prefer the newest installed build-tools over whatever aidl happens to be first on PATH or first in
