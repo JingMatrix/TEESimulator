@@ -546,6 +546,17 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
     // attest-key creation already arrived with no injected key — exactly why StrongBox worked and TE did
     // not.) Forward std::nullopt: the TA self-attests the new key under the keybox.
     if (IsAttestKeyRequest(keyParams)) {
+      // An attest key created via setAttestKeyAlias(A) arrives with A's blob injected: the app is
+      // building a key graph A -> B and expects B's leaf to be SIGNED BY A (so verifying B under A's
+      // public key succeeds). If A is ours we must honor that — sign B's leaf with A in the TA — or the
+      // graph breaks and B's leaf verifies under neither A nor the keybox, a signature no real KeyMint
+      // could produce and a reliable "leaf re-rooted" tell. Only self-attest under the keybox when there
+      // is no injected key, or a FOREIGN one (an RKP key keystore2 injected for a bare challenge) we
+      // cannot re-root anyway.
+      if (attestationKey && IsOurs(attestationKey->keyBlob)) {
+        LOGI("generateKey: attest-key creation attested by our attest key; signing its leaf with it (preserving the A->B chain)");
+        return Simulate(t.ta.get(), keyParams, attestationKey, out);
+      }
       LOGI("generateKey: attest-key creation -> forced generation in the TA (ignoring any injected attest key)");
       return Simulate(t.ta.get(), keyParams, std::nullopt, out);
     }
