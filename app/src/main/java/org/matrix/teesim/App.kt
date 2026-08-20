@@ -16,7 +16,7 @@ import org.json.JSONObject
  * Privileged control daemon, launched via app_process. Bootstraps just enough of the Android
  * framework for AndroidKeyStore + PackageManager to work in this bare process (following the proven
  * main-branch sequence), harvests real attestation parameters, injects the native interceptor, and
- * pushes resolved config over @teesim.
+ * pushes resolved config over the control socket.
  *
  * Launch (from the module's service.sh): app_process -Djava.class.path=$MODDIR/classes.dex $MODDIR
  * \ --nice-name=teesim org.matrix.teesim.App $MODDIR The trailing $MODDIR tells the Injector where

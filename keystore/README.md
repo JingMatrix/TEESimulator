@@ -37,7 +37,7 @@ callback binder passed in the request (the transaction's own reply is just a sta
 produces each result by calling that callback binder, mirroring what the real daemon would do.
 
 The profile set (which apps to simulate, which keybox signs) is pushed from the control daemon
-over the `@teesim` abstract socket; nothing here is read from disk.
+over the control socket; nothing here is read from disk.
 
 ## Files
 

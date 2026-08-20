@@ -1,15 +1,35 @@
-# The interceptor runs in the keystore domain (keystore on Android 10/11, keystore2
-# on 12+) and binds an abstract unix socket; the root control daemon connects to it
-# to push the resolved config. Grant the keystore side the socket-server permissions.
-#
-# The daemon runs in the root manager's own already-privileged domain, which carries
-# connectto, but that domain name differs per manager — so the connectto rules below
-# are best-effort and may need adjustment on a given setup (DESIGN open question Q1).
-# If the socket path proves unworkable on some manager, the daemon can fall back to a
-# file the lib watches instead.
+# The interceptor runs in the keystore domain (keystore on Android 10/11, keystore2 on 12+) and binds
+# the daemon<->hook control socket; the root control daemon connects to it to push the resolved config.
+# That socket is now a FILESYSTEM socket inside keystore's OWN 0700 data dir (keystore_data_file), not
+# an abstract name — an abstract name is probeable by any app (bound -> EACCES, unbound -> ECONNREFUSED,
+# an existence oracle for the hook), whereas a node under a 0700 dir an app cannot traverse gives a
+# uniform EACCES and is undetectable. Grant keystore the sock_file create/bind, and the root-manager
+# domain (ksu on KernelSU, su on APatch, magisk on Magisk) the connectto + dir-traversal + sock_file
+# access to reach it. Best-effort: the exact daemon domain differs per manager (and these root domains
+# are commonly permissive).
 allow keystore self unix_stream_socket { create bind listen accept getopt setopt read write shutdown }
+allow keystore keystore_data_file sock_file { create bind unlink read write open getattr setattr }
+allow ksu keystore unix_stream_socket connectto
 allow su keystore unix_stream_socket connectto
 allow magisk keystore unix_stream_socket connectto
+allow ksu keystore_data_file dir search
+allow su keystore_data_file dir search
+allow magisk keystore_data_file dir search
+allow ksu keystore_data_file sock_file { read write open getattr }
+allow su keystore_data_file sock_file { read write open getattr }
+allow magisk keystore_data_file sock_file { read write open getattr }
+
+# The control daemon serves its WebUI admin endpoint on a FILESYSTEM unix socket under /data/adb
+# (adb_data_file), which the WebUI reaches via its root shell and the teesim-uds client. The daemon and
+# that shell both run in a root-manager domain — su on KernelSU/APatch, magisk on Magisk — so grant both
+# the listening-socket, connectto, and sock_file permissions. Best-effort: the exact domain differs per
+# manager (and these root domains are commonly permissive), mirroring the control-socket note above.
+allow su self unix_stream_socket { create bind listen accept getopt setopt read write shutdown connectto }
+allow magisk self unix_stream_socket { create bind listen accept getopt setopt read write shutdown connectto }
+allow su magisk unix_stream_socket connectto
+allow magisk su unix_stream_socket connectto
+allow su adb_data_file sock_file { create unlink read write open getattr setattr }
+allow magisk adb_data_file sock_file { create unlink read write open getattr setattr }
 
 # The `inject` binary attaches to the keystore process with PTRACE_ATTACH (it runs
 # in the crash_dump domain), and keystore then dlopen()s the interceptor .so that

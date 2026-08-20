@@ -79,7 +79,7 @@ class Injector(private val moduleDir: File) {
         }
     }
 
-    /** The control-channel hello is the real proof the lib loaded and bound @teesim. Warn
+    /** The control-channel hello is the real proof the lib loaded and bound the control socket. Warn
      * (don't re-inject — that risks double-hooking) if it never arrives. */
     private fun confirmAsync(pid: Int) {
         Thread({
@@ -88,8 +88,8 @@ class Injector(private val moduleDir: File) {
                     sleep(500)
                 }
                 SystemLogger.warning(
-                    "injector: injected pid=$pid but the lib never checked in over @teesim " +
-                        "(SELinux on the abstract socket? look for 'avc: denied' in logcat)"
+                    "injector: injected pid=$pid but the lib never checked in over ${Const.CONTROL_SOCKET_PATH} " +
+                        "(SELinux on the control socket? look for 'avc: denied' in logcat)"
                 )
             }, "teesim-inject-confirm")
             .apply {

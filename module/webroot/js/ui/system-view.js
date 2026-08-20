@@ -78,7 +78,7 @@ function healthCard(status) {
   if (status.reachable === false) {
     card.appendChild(el("div", { class: "banner" }, [
       el("div", { text: "Daemon status endpoint unreachable." }),
-      el("div", { class: "muted small", text: status.error || "The daemon isn't responding on 127.0.0.1:8790 yet." }),
+      el("div", { class: "muted small", text: status.error || "The daemon isn't responding yet." }),
     ]));
   }
   return card;

@@ -1,6 +1,6 @@
-// The control-channel server: it owns the abstract unix socket @teesim, accepts
-// the daemon's connection, and turns each pushed "config" message into calls on
-// the router's staging API. See control.h for the protocol shape.
+// The control-channel server: it owns the control socket, accepts the daemon's
+// connection, and turns each pushed "config" message into calls on the router's
+// staging API. See control.h for the protocol shape.
 //
 // Pure POSIX + the JSON reader + the staging API, so the same object file links
 // into both interceptors (which are built with -fno-exceptions/-fno-rtti); it
@@ -10,6 +10,7 @@
 
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -27,10 +28,13 @@
 
 namespace {
 
-// Abstract socket: sun_path[0] == '\0', then these bytes. One daemon, one
-// keystore, so a single well-known name suffices.
-constexpr const char kSocketName[] = "teesim";
-constexpr size_t kSocketNameLen = sizeof(kSocketName) - 1;
+// Filesystem socket inside keystore's own 0700 data dir (keystore_data_file). An abstract name (the
+// previous design) is probeable by any app: connect() to a bound abstract name is refused by SELinux
+// with EACCES, to an unbound one with ECONNREFUSED — an existence oracle that reveals the hook. A path
+// under a directory an app cannot traverse instead yields a uniform EACCES whether or not the node
+// exists, so there is nothing for an app to detect. The daemon (root) can traverse to it; keystore is
+// the one that binds it, and this is a directory keystore owns.
+constexpr const char kSocketPath[] = "/data/misc/keystore/.teesim-ctl";
 constexpr size_t kMaxFrame = 8u * 1024 * 1024;
 
 // Decode standard base64 (padding optional; whitespace ignored). Returns false
@@ -390,15 +394,22 @@ void *ServerThread(void *) {
   }
   struct sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
-  addr.sun_path[0] = '\0';  // abstract namespace
-  memcpy(addr.sun_path + 1, kSocketName, kSocketNameLen);
-  socklen_t alen = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + 1 + kSocketNameLen);
+  strncpy(addr.sun_path, kSocketPath, sizeof(addr.sun_path) - 1);
+  socklen_t alen =
+      static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + strlen(kSocketPath) + 1);
 
-  // The previous keystore may still own the name for a moment after a restart.
+  // A stale socket node from a previous run makes bind() fail with EADDRINUSE, so remove it first each
+  // attempt. The retry loop still covers a previous keystore instance briefly holding the node after a
+  // restart.
   for (int attempt = 0; attempt < 10; ++attempt) {
-    if (bind(srv, reinterpret_cast<struct sockaddr *>(&addr), alen) == 0) break;
+    unlink(kSocketPath);
+    if (bind(srv, reinterpret_cast<struct sockaddr *>(&addr), alen) == 0) {
+      // The containing directory is already 0700 keystore-only; keep the node 0600 as well.
+      chmod(kSocketPath, 0600);
+      break;
+    }
     if (attempt == 9) {
-      LOGE("control: bind(@teesim) failed: %s", strerror(errno));
+      LOGE("control: bind(%s) failed: %s", kSocketPath, strerror(errno));
       close(srv);
       return nullptr;
     }
@@ -409,7 +420,7 @@ void *ServerThread(void *) {
     close(srv);
     return nullptr;
   }
-  LOGI("control: listening on @%s (hook=%s)", kSocketName, teesim_hook_name());
+  LOGI("control: listening on %s (hook=%s)", kSocketPath, teesim_hook_name());
 
   for (;;) {
     int fd = accept(srv, nullptr, nullptr);

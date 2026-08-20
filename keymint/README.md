@@ -144,7 +144,7 @@ attestation, it falls back to `Simulate` (generation) so a target key is always 
 
 The same re-sign is exposed to the daemon as `teesim_cfg_resign` (see [control.h](../common/control.h)):
 after a config push commits, the daemon re-attests keys that already existed before their app was
-covered by handing each one's real leaf back over the `@teesim` channel and writing the returned,
+covered by handing each one's real leaf back over the control channel and writing the returned,
 keybox-rooted chain into the keystore. The re-sign is identical to a fresh patch — it keeps the real
 key blob and only re-roots the certificate.
 
@@ -234,7 +234,7 @@ not the forwarding guard.
   `teesim_cfg_commit`) that build a new profile set and swap it in atomically, plus
   `teesim_router_new_device`.
 - [`keymint_entry.cpp`](keymint_entry.cpp) — `entry()`, what the injector calls. It reads no
-  files: it starts the `@teesim` control server and installs the hook in a no-op state, and
+  files: it starts the control server and installs the hook in a no-op state, and
   the daemon then connects and pushes the resolved profiles (keyboxes included). Until a
   profile is pushed nothing is simulated — a keystore without configuration is a no-op,
   not a hazard.

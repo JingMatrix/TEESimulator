@@ -3,7 +3,7 @@
 // The daemon injects this into the keystore daemon and calls entry(). We install
 // the libbinder ioctl hook, register the app-facing keystore service so its
 // transactions reach our handler, and start the control server. The profile set
-// arrives from the daemon over @teesim; nothing is read from disk here.
+// arrives from the daemon over the control socket; nothing is read from disk here.
 
 #include <binder/IServiceManager.h>
 #include <binder/Parcel.h>

@@ -1,7 +1,7 @@
 // The daemon <-> lib control channel, and the config-staging API the routers
 // implement. The daemon resolves configuration against the live device and
-// pushes it here over an abstract unix socket; the lib is a pure engine that
-// never reads files, a clock, or package data.
+// pushes it here over a root-only filesystem unix socket; the lib is a pure
+// engine that never reads files, a clock, or package data.
 //
 // A push is applied as: teesim_cfg_begin(boot); add_profile() x N; commit(epoch).
 // commit atomically swaps the live profile set and routing tables, so the
@@ -112,8 +112,8 @@ int teesim_android_api(void);
 
 // --- control server, implemented in common/control.cpp -----------------------
 
-// Bind the abstract socket @teesim, listen, and serve config pushes on a
-// detached thread. Idempotent; safe to call once from entry().
+// Bind the control socket (its path lives in control.cpp), listen, and serve
+// config pushes on a detached thread. Idempotent; safe to call once from entry().
 void teesim_control_start(void);
 
 #ifdef __cplusplus
