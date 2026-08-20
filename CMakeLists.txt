@@ -39,6 +39,22 @@ target_link_options(inject PRIVATE -static-libstdc++)
 # tiny HTTP-over-UDS client. Plain C, no dependencies — it just pumps one request/response.
 add_executable(teesim-uds injector/teesim_uds.c)
 
+# --- The daemon's in-process log reader -------------------------------------
+# Loaded (System.load) into the app_process daemon by LogTail. Reads logd directly through liblog's
+# reader API instead of spawning a `logcat` child (which carried the whole device log stream through a
+# pipe and let a flood amplify — see #265): it filters in C to the lines we keep, serves them to the
+# WebUI from a bounded ring, and mirrors them to rotating files under /data/adb/teesim/log. The liblog
+# reader symbols are absent from the NDK stub, so they stay undefined here (-Wl,-z,undefs) and resolve
+# at runtime against the device's real liblog.so.
+add_library(teesim_logcat SHARED logcat/logcat.cpp)
+target_include_directories(teesim_logcat PRIVATE logcat)
+target_link_libraries(teesim_logcat PRIVATE log)
+target_link_options(teesim_logcat PRIVATE
+    -static-libstdc++
+    -Wl,-z,undefs
+    -Wl,--version-script=${CMAKE_SOURCE_DIR}/logcat/exports.map
+    -Wl,--gc-sections)
+
 # --- KeyMint AIDL, generated with the NDK backend ---------------------------
 # fromBinder's local-binder fallback (checked below) only exists in aidl from build-tools >= 35, so
 # prefer the newest installed build-tools over whatever aidl happens to be first on PATH or first in

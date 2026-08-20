@@ -1,0 +1,11 @@
+# Export only the JNI entry points; hide everything else (the bundled libc++ and the liblog
+# reader symbols we resolve at runtime).
+TEESIM_LOG {
+  global:
+    Java_org_matrix_teesim_LogTail_nativeRun;
+    Java_org_matrix_teesim_LogTail_nativeSetTargetPid;
+    Java_org_matrix_teesim_LogTail_nativePoll;
+    Java_org_matrix_teesim_LogTail_nativeMaxSeq;
+  local:
+    *;
+};

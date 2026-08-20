@@ -29,6 +29,10 @@ object Const {
      *  (when absent) and never rewritten, so auto-include can add only packages installed AFTER it. */
     val knownPackagesFile = File(DATA_DIR, "known_packages.json")
 
+    /** Where the in-process log reader ([LogTail]) writes its rotating log files (teesim.log + parts),
+     *  inside the root-only [DATA_DIR] so the captured stream is as private as the rest of the state. */
+    val logDir = File(DATA_DIR, "log")
+
     /** keystore's uid; the control socket only sends the keybox once the peer is it. Named after AOSP's
      *  own AID_KEYSTORE (android_filesystem_config.h) and mirrored here because the framework's
      *  Process.KEYSTORE_UID is @hide — the public SDK exposes only ROOT/SYSTEM/PHONE/SHELL and the

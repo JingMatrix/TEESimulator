@@ -31,6 +31,15 @@ allow magisk su unix_stream_socket connectto
 allow su adb_data_file sock_file { create unlink read write open getattr setattr }
 allow magisk adb_data_file sock_file { create unlink read write open getattr setattr }
 
+# The daemon now reads logd DIRECTLY, in-process, through liblog's reader API (libteesim_logcat.so),
+# instead of spawning a `logcat` child. Reading the log stream means connecting to logd's reader
+# socket, so grant the daemon's root-manager domain (su on KernelSU/APatch, magisk on Magisk) that
+# access. Best-effort per manager, as above; these root domains are commonly permissive.
+allow su logd unix_stream_socket connectto
+allow magisk logd unix_stream_socket connectto
+allow su logdr_socket sock_file write
+allow magisk logdr_socket sock_file write
+
 # The `inject` binary attaches to the keystore process with PTRACE_ATTACH (it runs
 # in the crash_dump domain), and keystore then dlopen()s the interceptor .so that
 # lives under /data/adb (adb_data_file). Both are required for injection to work on
