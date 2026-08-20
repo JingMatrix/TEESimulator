@@ -14,7 +14,7 @@ import org.json.JSONObject
 
 /**
  * Control-channel CLIENT. Connects the filesystem unix socket at [Const.CONTROL_SOCKET_PATH], verifies the peer is
- * keystore (SO_PEERCRED uid == 1017) before sending the keybox bytes, then speaks the control.cpp
+ * keystore (SO_PEERCRED uid == [Const.AID_KEYSTORE]) before sending the keybox bytes, then speaks the control.cpp
  * framing: [u32 BE length][UTF-8 JSON].
  *
  * Wire sequence: the lib sends its `hello` on accept; we send our `hello` then the latest `config`,

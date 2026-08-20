@@ -1,6 +1,6 @@
-// The control-channel server: it owns the abstract unix socket @teesim, accepts
-// the daemon's connection, and turns each pushed "config" message into calls on
-// the router's staging API. See control.h for the protocol shape.
+// The control-channel server: it owns the control socket, accepts the daemon's
+// connection, and turns each pushed "config" message into calls on the router's
+// staging API. See control.h for the protocol shape.
 //
 // Pure POSIX + the JSON reader + the staging API, so the same object file links
 // into both interceptors (which are built with -fno-exceptions/-fno-rtti); it

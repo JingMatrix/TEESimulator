@@ -29,7 +29,10 @@ object Const {
      *  (when absent) and never rewritten, so auto-include can add only packages installed AFTER it. */
     val knownPackagesFile = File(DATA_DIR, "known_packages.json")
 
-    /** keystore's uid; the control socket only sends the keybox once the peer is it. */
+    /** keystore's uid; the control socket only sends the keybox once the peer is it. Named after AOSP's
+     *  own AID_KEYSTORE (android_filesystem_config.h) and mirrored here because the framework's
+     *  Process.KEYSTORE_UID is @hide — the public SDK exposes only ROOT/SYSTEM/PHONE/SHELL and the
+     *  application-uid bounds. */
     const val AID_KEYSTORE = 1017
 
     /** Filesystem control socket the interceptor library binds, inside keystore's own 0700 data dir

@@ -78,7 +78,7 @@ object KeyAdmin {
     // ?pkg= into PackageManager. Same shape ConfigStore validates apps[] package entries with (the
     // user an icon should be looked up in rides in its own ?user= parameter, not in the name).
     private val PKG_RE = Regex("^[A-Za-z0-9_.]+$")
-    // Upper bound on a request body (bytes). The admin socket is localhost + token-authed, but a bogus
+    // Upper bound on a request body (bytes). The admin socket is root-only + token-authed, but a bogus
     // Content-Length should still never be trusted as an allocation size.
     private const val MAX_BODY_BYTES = 8 * 1024 * 1024
     private val b64 = Base64.getEncoder()

@@ -54,7 +54,7 @@ If the fd transfer fails — a seccomp filter blocks `recvmsg`/`SCM_RIGHTS`, or 
 
 The loaded library must export `extern "C" bool entry(void*)`. `remote_find_entry` `dlsym`s it in the target, `remote_call_entry` calls it with the `dlopen` handle as its single argument and logs the return value. We never `dlclose` — the library stays resident. `get_remote_dlerror` reads the target's `dlerror()` string (via remote `dlerror` + `strlen` + `read_proc`) so failed loads report a real reason.
 
-One sharp edge: `inject` reports success once `entry` has been *called*, regardless of what `entry` returns. `remote_call_entry` always returns `true`. So if `entry()` itself fails, `inject` still exits 0, and the control daemon treats that pid as covered. "Injection succeeded" means "the library loaded and `entry` ran," not "the hooks are live" — so the daemon confirms separately by waiting for the library to check in over the `@teesim` control channel, and logs a warning if it never does.
+One sharp edge: `inject` reports success once `entry` has been *called*, regardless of what `entry` returns. `remote_call_entry` always returns `true`. So if `entry()` itself fails, `inject` still exits 0, and the control daemon treats that pid as covered. "Injection succeeded" means "the library loaded and `entry` ran," not "the hooks are live" — so the daemon confirms separately by waiting for the library to check in over the control channel, and logs a warning if it never does.
 
 ## LSPlt usage
 

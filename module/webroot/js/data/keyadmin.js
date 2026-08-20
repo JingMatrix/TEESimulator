@@ -4,11 +4,10 @@
 // HTTP transport for, say, an exec-based one later is therefore a one-file change
 // — nothing above this file ever names a URL, a token, or a header.
 //
-// Transport: HTTP/1.1 to the daemon's loopback listener. The daemon serves CORS-
-// open on 127.0.0.1 so the WebUI (running in the manager's webview) can fetch it
-// directly. Every request carries the admin token in X-Teesim-Token; the daemon
-// rejects anything without it, which keeps the endpoint safe even though it is
-// bound to loopback.
+// Transport: HTTP/1.1 over the daemon's root-only unix socket, driven through the
+// root-exec bridge (see below) because a WebView cannot fetch() one. Every request
+// carries the admin token in X-Teesim-Token; the daemon rejects anything without it,
+// and refuses any peer that is not root.
 //
 // Public surface (stable):
 //   keyAdmin("status")               -> { ok, version, harvest{…}, lib:{ hook, api } }

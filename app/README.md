@@ -5,7 +5,7 @@ Android framework (an attested key to harvest from, `PackageManager` to resolve 
 `Context` to reach keystore) lives here, in a Kotlin process launched by the module's
 `service.sh` via `app_process`. The injected native interceptors stay pure crypto-and-routing
 engines; this daemon owns the configuration, resolves it against the live device, injects the
-interceptor, and pushes the resolved profiles over the `@teesim` control socket. It never sits
+interceptor, and pushes the resolved profiles over the control socket. It never sits
 in the keystore hot path.
 
 It builds to a single `classes.dex` (AGP), shipped in the module and run as:
@@ -90,9 +90,9 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
    other's copy.
 3. **`Injector`** finds the keystore daemon's pid (`keystore2` on API ≥ 31, `keystore` on 10/11),
    runs the packaged `inject` binary to load the right interceptor, and re-injects whenever the
-   pid changes; it confirms the library actually checked in over `@teesim` and warns otherwise
-   (usually an SELinux denial on the abstract socket).
-4. **`Control`** connects the `@teesim` abstract unix socket, checks peer credentials, and pushes
+   pid changes; it confirms the library actually checked in over the control socket and warns otherwise
+   (usually an SELinux denial on it).
+4. **`Control`** connects the control socket, checks the peer is keystore, and pushes
    the resolved config on start and on every change.
 5. **`ReAttest`** runs after each push commits (on the lib's `ack`) to re-root keys that already
    existed before their app was covered — a key made earlier carries the real hardware attestation
@@ -123,8 +123,8 @@ Once the framework is up, `App.main` wires the daemon and enters `Looper.loop()`
 
 ## The WebUI back end
 
-The root-manager WebUI talks to the daemon over a tiny loopback HTTP endpoint, since the daemon
-has a real `Context` and root that the webview alone does not:
+The root-manager WebUI talks to the daemon over a tiny HTTP endpoint on a root-only socket, since the
+daemon has a real `Context` and root that the webview alone does not:
 
 - **`KeyAdmin`** — HTTP/1.1 over a root-only filesystem unix socket (`/data/adb/teesim/admin.sock`), gated by a random token in a root-only file
   (`admin.token`). It serves the WebUI's status, key, keybox, logs, and canary routes, plus the
