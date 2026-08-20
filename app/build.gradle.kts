@@ -55,9 +55,10 @@ android {
             cmake {
                 // The interceptors are 64-bit only (keystore2 is 64-bit everywhere).
                 abiFilters += listOf("arm64-v8a", "x86_64")
-                // Match package.sh: build the injector and both interceptors; the
-                // static BoringSSL `crypto` target builds transitively for keystore.
-                targets += listOf("inject", "teesim-uds", "teesim_keymint", "teesim_keystore")
+                // Match package.sh: build the injector, the UDS client, the daemon's log reader,
+                // and both interceptors; the static BoringSSL `crypto` target builds transitively
+                // for keystore.
+                targets += listOf("inject", "teesim-uds", "teesim_logcat", "teesim_keymint", "teesim_keystore")
             }
         }
     }
@@ -238,10 +239,14 @@ androidComponents {
                     }
                 }
 
-                // The stripped interceptor libraries, keeping their <abi>/ layout; the
-                // runtime stubs (libcrypto/libbinder/libutils) stay out of the zip.
+                // The stripped interceptor libraries and the daemon's log reader, keeping their
+                // <abi>/ layout; the runtime stubs (libcrypto/libbinder/libutils) stay out of the zip.
                 from(strippedLibs) {
-                    include("**/libteesim_keymint.so", "**/libteesim_keystore.so")
+                    include(
+                        "**/libteesim_keymint.so",
+                        "**/libteesim_keystore.so",
+                        "**/libteesim_logcat.so",
+                    )
                 }
 
                 // The injector executable and the WebUI's admin-socket client, one per <abi>/.

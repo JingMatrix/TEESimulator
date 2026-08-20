@@ -108,6 +108,9 @@ object App {
             )
         }
         SystemLogger.info("TEESimulator control daemon starting")
+        // Start the in-process log reader first, so even the boot-time bootstrap below is captured for
+        // the WebUI's Logs panel (the reader is a native thread; it does not depend on the framework).
+        startLogReader(resolveModuleDir(args))
         try {
             waitForSystemReady()
             appContext = prepareEnvironment()
@@ -425,6 +428,17 @@ object App {
                 SystemLogger.info("boot prop: forced $prop to the attested value (was '${live.ifEmpty { "unset" }}')")
             }
         }
+    }
+
+    /**
+     * Load and start [LogTail]'s native log reader from the module's per-ABI library directory. The ABI
+     * is chosen exactly as the [Injector] chooses the interceptor's — the daemon's own primary ABI, with
+     * a device-property fallback — since both artifacts ship side by side under `<abi>/`.
+     */
+    private fun startLogReader(moduleDir: File) {
+        val abi =
+            Build.SUPPORTED_ABIS?.firstOrNull() ?: DeviceProps.prop("ro.product.cpu.abi", "arm64-v8a")
+        LogTail.start(File(moduleDir, "$abi/libteesim_logcat.so"))
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */

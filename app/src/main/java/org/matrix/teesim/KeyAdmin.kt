@@ -81,6 +81,9 @@ object KeyAdmin {
     // Upper bound on a request body (bytes). The admin socket is root-only + token-authed, but a bogus
     // Content-Length should still never be trusted as an allocation size.
     private const val MAX_BODY_BYTES = 8 * 1024 * 1024
+    // Highest rotated log-part index LogTail keeps on disk (teesim.1.log .. teesim.<N>.log); mirrors
+    // kMaxParts in logcat.cpp so /logs/download reassembles the full set in chronological order.
+    private const val LOG_PART_MAX = 4
     private val b64 = Base64.getEncoder()
 
     @Volatile private var token: String = ""
@@ -125,7 +128,6 @@ object KeyAdmin {
         } catch (e: Exception) {
             SystemLogger.error("KeyAdmin: failed to write admin token", e)
         }
-        LogTail.start()
         Thread({ serve() }, "teesim-keyadmin").apply {
             isDaemon = true
             start()
@@ -154,30 +156,48 @@ object KeyAdmin {
         return diff == 0
     }
 
+    /**
+     * Bind a fresh filesystem-namespaced unix socket at [path] and wrap its fd in a LocalServerSocket
+     * (whose constructor calls listen()). A LocalServerSocket(String) would use the ABSTRACT namespace,
+     * which ignores filesystem permissions and is reachable by any app — exactly what we are avoiding —
+     * so we bind the filesystem path explicitly. Any prior binder/server is closed first, and the two
+     * @Volatile fields are refreshed so the accept loop and any GC finalizer both see the live fd.
+     * Returns the new server, or null if the bind failed. Called on first start AND on the recovery
+     * path in [serve] when the listen fd is torn out from under us (see #265).
+     */
+    private fun bindListener(path: String): LocalServerSocket? {
+        // Drop any prior listener explicitly so a rebind never leaks the old fd.
+        runCatching { listenSocket?.close() }
+        runCatching { listenBinder?.close() }
+        return try {
+            // A stale socket file (this run's dead node, or one left by a previous run) would make
+            // bind() fail with EADDRINUSE.
+            Const.adminSocketFile.delete()
+            val binder = LocalSocket(LocalSocket.SOCKET_STREAM)
+            binder.bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
+            listenBinder = binder
+            // The 0700 data dir already blocks other uids; also mark the socket node 0600.
+            runCatching { Os.chmod(path, /* 0600 */ 384) }
+            LocalServerSocket(binder.fileDescriptor).also { listenSocket = it }
+        } catch (e: Exception) {
+            SystemLogger.error("KeyAdmin: cannot bind unix socket $path", e)
+            null
+        }
+    }
+
     private fun serve() {
         val path = Const.adminSocketFile.absolutePath
-        val server =
-            try {
-                // A stale socket file from a previous run would make bind() fail with EADDRINUSE.
-                Const.adminSocketFile.delete()
-                // Bind a filesystem-namespaced unix socket, then wrap its fd in a LocalServerSocket
-                // (whose constructor calls listen()). A LocalServerSocket(String) would use the ABSTRACT
-                // namespace, which ignores filesystem permissions and is reachable by any app — exactly
-                // what we are avoiding — so we bind the filesystem path explicitly.
-                val binder = LocalSocket(LocalSocket.SOCKET_STREAM)
-                binder.bind(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
-                listenBinder = binder
-                // The 0700 data dir already blocks other uids; also mark the socket node 0600.
-                runCatching { Os.chmod(path, /* 0600 */ 384) }
-                LocalServerSocket(binder.fileDescriptor).also { listenSocket = it }
-            } catch (e: Exception) {
-                SystemLogger.error("KeyAdmin: cannot bind unix socket $path", e)
-                return
-            }
+        var server = bindListener(path) ?: return
         SystemLogger.info("KeyAdmin: listening on unix:$path")
+        // Consecutive accept() failures without an intervening success. A healthy endpoint stays at 0;
+        // a listen fd closed under us (EBADF — #265, MIUI power management reclaiming the fd on
+        // screen-off) fails instantly and forever, so we count the streak, back off so the thread never
+        // hot-spins at ~2.4 cores flooding the log, and rebind the socket to recover.
+        var consecutiveFailures = 0
         while (true) {
             try {
                 val client = server.accept()
+                consecutiveFailures = 0
                 // Defense in depth on top of the socket's filesystem permissions: only root may drive
                 // the admin endpoint. A peer that is not uid 0 is dropped without a byte of response.
                 val peerUid =
@@ -203,7 +223,31 @@ object KeyAdmin {
                     }
                 }, "teesim-keyadmin-conn").apply { isDaemon = true }.start()
             } catch (e: Exception) {
-                SystemLogger.warning("KeyAdmin: accept error", e)
+                consecutiveFailures++
+                // Log the first failure of a burst with its stack, then stay quiet: a dead fd throws
+                // thousands of times a second, and logging every one is itself the flood #265 reports.
+                if (consecutiveFailures == 1) {
+                    SystemLogger.warning("KeyAdmin: accept error; will back off and rebind", e)
+                }
+                // Back off (capped) so a persistently dead fd costs ~nothing instead of a whole core.
+                try {
+                    Thread.sleep(minOf(1000L, 50L * consecutiveFailures))
+                } catch (_: InterruptedException) {
+                    return
+                }
+                // The listen fd will not heal on its own — rebind a fresh socket so the WebUI becomes
+                // reachable again without a daemon restart (which would never come: the process stays
+                // alive under Looper.loop, so service.sh's respawn never fires).
+                if (consecutiveFailures >= 3) {
+                    val rebound = bindListener(path)
+                    if (rebound != null) {
+                        server = rebound
+                        consecutiveFailures = 0
+                        SystemLogger.info("KeyAdmin: rebound unix:$path after accept failures")
+                    } else {
+                        SystemLogger.warning("KeyAdmin: rebind failed; retrying")
+                    }
+                }
             }
         }
     }
@@ -628,19 +672,49 @@ object KeyAdmin {
     }
 
     /**
-     * Streams the same recent log buffer as [logs] but as a plain-text attachment, so a browser
-     * navigation names and saves the file from the Content-Disposition header (the WebView's
-     * download handler ignores an <a download> attribute). Honors the same optional `after`/`max`
-     * params as [logs]; with neither present it dumps the full recent buffer.
+     * Streams the daemon's persisted log as a plain-text attachment (the WebView's download handler
+     * ignores an <a download> attribute, so a Content-Disposition header names the saved file). Unlike
+     * the in-memory [logs] ring, this reads the rotating files [LogTail] writes under [Const.logDir],
+     * oldest part first, so a download taken AFTER a crash or restart still carries the history the ring
+     * has already dropped. The whole set is tail-capped so a pathological log can't blow the response
+     * up; an optional `max` (MiB, 1..64) overrides the default cap.
      */
     private fun downloadLogs(out: OutputStream, query: Map<String, String>) {
-        val after = query["after"]?.toLongOrNull() ?: 0L
-        val max = (query["max"]?.toIntOrNull() ?: 2000).coerceIn(1, 2000)
-        val (lines, _) = LogTail.snapshot(after, max)
-        // Each Line.text is already the full logcat line the Logs tab renders, so one line per
-        // entry joined by newlines reproduces exactly what the on-screen Save produced.
-        val body = lines.joinToString("\n") { it.text }
-        val payload = (if (body.isEmpty()) body else body + "\n").toByteArray(Charsets.UTF_8)
+        val capBytes = (query["max"]?.toIntOrNull() ?: 16).coerceIn(1, 64) * 1024 * 1024
+        // teesim.<N>.log (oldest) .. teesim.1.log, then teesim.log (newest) — chronological order.
+        val ordered =
+            (LOG_PART_MAX downTo 1).map { File(Const.logDir, "teesim.$it.log") } +
+                File(Const.logDir, "teesim.log")
+        val present = ordered.filter { it.isFile }
+        val total = present.sumOf { it.length() }
+        val payload =
+            try {
+                val buf =
+                    java.io.ByteArrayOutputStream(
+                        minOf(total, capBytes.toLong()).toInt().coerceAtLeast(0)
+                    )
+                // When the on-disk log exceeds the cap, keep the NEWEST bytes: skip whole older parts,
+                // then partially skip into the first part that fits.
+                var skip = (total - capBytes).coerceAtLeast(0)
+                for (f in present) {
+                    val len = f.length()
+                    if (skip >= len) {
+                        skip -= len
+                        continue
+                    }
+                    f.inputStream().use { ins ->
+                        if (skip > 0) {
+                            ins.skip(skip)
+                            skip = 0
+                        }
+                        ins.copyTo(buf)
+                    }
+                }
+                buf.toByteArray()
+            } catch (e: Exception) {
+                SystemLogger.warning("KeyAdmin: reading log files for download failed", e)
+                ByteArray(0)
+            }
         val name = safeDownloadName(query["name"])
         respondRaw(
             out,
