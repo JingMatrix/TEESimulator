@@ -537,16 +537,27 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return Status(-100);
     }
-    // Creating an ATTESTATION KEY (ATTEST_KEY purpose) always mints it in the TA (ours) and IGNORES any
-    // attest key keystore2 injected to attest it. This MUST come before the attestationKey branch below:
-    // on TrustedEnvironment, attesting a new attest key that carries a challenge makes keystore2 inject
-    // an RKP-provisioned (real hardware) key — which would otherwise be seen here as a "foreign attest
-    // key" and forwarded, leaving us a foreign attest key we can never re-root. We must hold this key's
-    // private key so the leaves it later signs get a patched root of trust. (StrongBox has no RKP, so its
-    // attest-key creation already arrived with no injected key — exactly why StrongBox worked and TE did
-    // not.) Forward std::nullopt: the TA self-attests the new key under the keybox.
+    // Creating an ATTESTATION KEY (ATTEST_KEY purpose) always mints it in the TA (ours). Unless the
+    // caller named one of our keys as its attest key (the "ours" case just below), we ignore any
+    // injected attest key and self-attest the new key under the keybox. This MUST come before the
+    // attestationKey branch below: on TrustedEnvironment, attesting a new attest key that carries a
+    // challenge makes keystore2 inject an RKP-provisioned (real hardware) key — which that branch would
+    // forward, leaving us a foreign attest key we can never re-root. We must hold this key's private key
+    // so the leaves it later signs get a patched root of trust. (StrongBox has no RKP, so its attest-key
+    // creation already arrived with no injected key — exactly why StrongBox worked and TE did not.)
     if (IsAttestKeyRequest(keyParams)) {
-      LOGI("generateKey: attest-key creation -> forced generation in the TA (ignoring any injected attest key)");
+      // An attest key created via setAttestKeyAlias(A) arrives with A's blob injected: the app is
+      // building a key graph A -> B and expects B's leaf to be SIGNED BY A (so verifying B under A's
+      // public key succeeds). If A is ours we must honor that — sign B's leaf with A in the TA — or the
+      // graph breaks and B's leaf verifies under neither A nor the keybox, a signature no real KeyMint
+      // could produce and a reliable "leaf re-rooted" tell. Only self-attest under the keybox when there
+      // is no injected key, or a FOREIGN one (an RKP key keystore2 injected for a bare challenge) we
+      // cannot re-root anyway.
+      if (attestationKey && IsOurs(attestationKey->keyBlob)) {
+        LOGI("generateKey: attest-key creation attested by our attest key; signing its leaf with it (preserving the A->B chain)");
+        return Simulate(t.ta.get(), keyParams, attestationKey, out);
+      }
+      LOGI("generateKey: attest-key creation -> forced generation in the TA (no usable injected attest key)");
       return Simulate(t.ta.get(), keyParams, std::nullopt, out);
     }
     // A leaf that carries an attest key: keystore2 appends that attest key's OWN stored certificate chain
