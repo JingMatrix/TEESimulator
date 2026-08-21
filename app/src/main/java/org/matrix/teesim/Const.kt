@@ -12,6 +12,10 @@ object Const {
     /** User edits to the harvest override layer (device ids, synthesized levels, an all-zero boot key).
      *  Written by the WebUI, merged over the frozen captured harvest on every push. */
     val overridesFile = File(DATA_DIR, "overrides.json")
+    /** The user's persisted Remote Key Provisioning knobs ({ property: "true"/"false" }). The two rkp_only
+     *  props are non-persist and a vendor .prop can re-apply a default (often true) each boot (#236), so the
+     *  daemon re-forces them on boot; enable_rkpd is persist.device_config and already survives on its own. */
+    val rkpFile = File(DATA_DIR, "rkp.json")
     val adminTokenFile = File(DATA_DIR, "admin.token")
 
     /** Filesystem unix socket the WebUI reaches KeyAdmin on, in the root-only [DATA_DIR] (0700). Unlike a

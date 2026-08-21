@@ -52,7 +52,8 @@ import org.json.JSONObject
  * the last push actually targets, per profile; the only place auto-included uids are visible, since the
  * rule needs the root-only known_packages.json baseline. Empty profiles[] with epoch 0 before the first
  * push) POST /rescan -> { ok, uids } (re-resolve against the live device and re-push; how a newly
- * installed app is discovered, there being no package watcher) GET
+ * installed app is discovered, there being no package watcher) POST /rkp?name=P&on=true|false ->
+ * { ok, name, value } (set one RKP knob live and persist it, atomically; name must be a known knob) GET
  * /packages -> { ok, firstAppUid, apps:[ {uid, packages:[..], label, system, launchable, enabled,
  * installTime, freq, lastUsed, recent} ] } (every installed app, one entry per uid, for the Scope
  * picker: installTime = epoch ms of first install; freq = persistent key-request count; lastUsed =
@@ -97,6 +98,14 @@ object KeyAdmin {
      * -1 if there was no valid config to push.
      */
     @Volatile var onRescan: (() -> Int)? = null
+
+    /**
+     * Set by [App] to its live-set-and-persist for one RKP knob, and invoked by `POST /rkp`. Routing the
+     * WebUI's toggle through the daemon (rather than the WebUI shelling out `resetprop` and writing rkp.json
+     * itself) makes the live write and the persist atomic with respect to the boot/re-push re-force. Takes
+     * the real property name and the canonical "true"/"false"; returns whether the property was set live.
+     */
+    @Volatile var onSetRkp: ((String, String) -> Boolean)? = null
 
     fun start(record: Harvester.Record) {
         harvest = record
@@ -342,6 +351,7 @@ object KeyAdmin {
                         method == "GET" && path == "/scope" -> scope()
                         method == "GET" && path == "/packages" -> packages()
                         method == "POST" && path == "/rescan" -> rescan()
+                        method == "POST" && path == "/rkp" -> setRkp(query)
                         method == "POST" && path == "/usage/clear" -> usageClear()
                         method == "POST" && path == "/keys/db/delete" -> deleteDbKeys(query)
                         method == "GET" && path == "/keys/inspect" ->
@@ -604,6 +614,27 @@ object KeyAdmin {
             return JSONObject().put("ok", false).put("error", "no valid config to push")
         SystemLogger.info("KeyAdmin: rescan pushed a config targeting $uids caller uid(s)")
         return JSONObject().put("ok", true).put("uids", uids)
+    }
+
+    /**
+     * `POST /rkp?name=<property>&on=<true|false>` — set one Remote Key Provisioning knob live and persist it,
+     * as one atomic step in [App.setRkpKnob]. The property name is checked against [RkpStore.KNOWN] here so a
+     * malformed or hostile request can never drive `resetprop` at an arbitrary property; `on` must be canonical.
+     * Replaces the WebUI shelling out `resetprop` + writing rkp.json itself, closing the stale-read revert race.
+     */
+    private fun setRkp(query: Map<String, String>): JSONObject {
+        val name = query["name"] ?: error("name required")
+        val on = query["on"] ?: error("on required")
+        if (name !in RkpStore.KNOWN)
+            return JSONObject().put("ok", false).put("error", "unknown rkp property")
+        if (on != "true" && on != "false")
+            return JSONObject().put("ok", false).put("error", "on must be true or false")
+        val hook =
+            onSetRkp
+                ?: return JSONObject().put("ok", false).put("error", "daemon not ready")
+        if (!hook(name, on))
+            return JSONObject().put("ok", false).put("error", "could not set property (no working resetprop)")
+        return JSONObject().put("ok", true).put("name", name).put("value", on)
     }
 
     /**

@@ -178,6 +178,13 @@ const canaryInstallQuery = (args) =>
   "?tag=" + encodeURIComponent((args && args.tag) || "") +
   "&variant=" + encodeURIComponent((args && args.variant) || "release");
 
+// One RKP knob: the real property name and the desired boolean. The daemon re-validates the name
+// against its known-knob set and sets it live + persists it atomically (POST /rkp), so a stale-read
+// re-force can never revert the toggle. `on` is normalised to canonical "true"/"false".
+const setRkpQuery = (args) =>
+  "?name=" + encodeURIComponent((args && args.name) || "") +
+  "&on=" + ((args && args.on) ? "true" : "false");
+
 // The save target: the chosen folder and filename, both encoded so any character is inert.
 // The log text itself rides in the request body (too large for a query), not here.
 const logsWriteQuery = (args) =>
@@ -214,6 +221,10 @@ export async function keyAdmin(action, args = {}) {
       // app is discovered — there is no package observer in the daemon, so the Profiles screen's
       // pull-to-refresh is what goes and looks. Resolves to { ok, uids }.
       return request("POST", "/rescan");
+    case "setRkp":
+      // Set one RKP knob live and persist it in one daemon-owned, lock-ordered step, so the live write
+      // and the rkp.json record cannot interleave with a boot re-force. Resolves to { ok, name, value }.
+      return request("POST", "/rkp" + setRkpQuery(args));
     case "keysDbDelete":
       return request("POST", "/keys/db/delete" + idsQuery(args));
     case "inspect":

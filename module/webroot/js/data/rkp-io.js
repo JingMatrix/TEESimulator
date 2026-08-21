@@ -1,9 +1,10 @@
-// Remote-key-provisioning knobs adapter. It reads and writes the handful of system properties that
-// decide how keystore2 sources attestation keys, so the Keyboxes screen can show and flip them. The
-// property NAMES here are fixed literals, never derived from user input; only the boolean the user
-// toggles reaches setProp (as canonical "true"/"false"). No DOM.
+// Remote-key-provisioning knobs adapter. It reads the handful of system properties that decide how
+// keystore2 sources attestation keys, and flips them through the daemon (POST /rkp), so the Keyboxes
+// screen can show and toggle them. The property NAMES here are fixed literals, never derived from user
+// input; the daemon re-validates the name and sets it live + persists it atomically. No DOM.
 
-import { getProp, setProp } from "../bridge/shell.js";
+import { getProp } from "../bridge/shell.js";
+import { keyAdmin } from "./keyadmin.js";
 
 // The properties we surface, in display order. `key` is a stable id for the view; `name` is the real
 // system property; `label`/`help` describe it. The two rkp_only knobs force a security level down the
@@ -45,8 +46,17 @@ export async function readRkpProps() {
   return rows;
 }
 
-// Flip one knob, written as canonical "true"/"false". Callers re-read afterwards so the UI reflects
-// the value the device actually took (a failed write leaves the old value and the switch snaps back).
+// Flip one knob. The daemon owns both the live write and the persist: POST /rkp sets the property with
+// resetprop and records the choice in rkp.json as one atomic, lock-ordered step, so a concurrent re-push
+// can never read a half-updated file and revert the toggle. The rkp_only props are plain (not persist.*)
+// and would otherwise revert on reboot; the persisted value is what App.applyRkpProps re-forces each boot.
+//
+// Never throws: on any failure it returns { ok:false, error } so the caller's re-read simply snaps the
+// switch back to the value the device actually took (the daemon leaves the old value on a failed set).
 export async function setRkpProp(name, on) {
-  return setProp(name, on ? "true" : "false");
+  try {
+    return await keyAdmin("setRkp", { name, on });
+  } catch (e) {
+    return { ok: false, error: e && e.message };
+  }
 }
