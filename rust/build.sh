@@ -4,7 +4,8 @@
 # The crate is a static library that resolves BoringSSL at runtime inside
 # keystore2, so the build needs only BoringSSL's headers (openssl-sys bindgens the
 # FFI from them) — no libcrypto.so of any ABI. Configure via environment:
-#   NDK_HOME   Android NDK (default: newest under $ANDROID_HOME/ndk)
+#   NDK_HOME   Android NDK (default: $ANDROID_NDK_HOME or $ANDROID_NDK_ROOT, else the
+#              newest under $ANDROID_HOME/ndk)
 #   ABI        Android ABI (default: arm64-v8a)
 #   API        platform level (default: 29)
 #   BORINGSSL  BoringSSL source dir with include/ (cloned if unset/missing)
@@ -24,10 +25,20 @@ case "$ABI" in
 esac
 ENVPREFIX="$(echo "$TRIPLE" | tr '[:lower:]-' '[:upper:]_')"
 
+# Honour the standard NDK variables before falling back to the newest installed one. A CI runner
+# installs the NDK the workflow pins but keeps a newer one preinstalled, and "newest wins" picks
+# that newer one: NDK 30 rejects the unversioned target triple cargo-ndk passes ("Unversioned
+# target triples are not supported!" out of its cdefs.h) and openssl-sys's bindgen dies on it.
+# CMake always passes NDK_HOME explicitly, so only a direct call relies on this — notably CI's
+# `build.sh clippy`, which gets the pin through ANDROID_NDK_HOME.
+if [ -z "${NDK_HOME:-}" ]; then
+  NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+fi
 if [ -z "${NDK_HOME:-}" ]; then
   NDK_HOME="$(ls -d "${ANDROID_HOME:-$HOME/Android/Sdk}"/ndk/* 2>/dev/null | sort -V | tail -1)"
 fi
 [ -d "$NDK_HOME" ] || { echo "NDK not found; set NDK_HOME" >&2; exit 1; }
+echo "build.sh: using NDK $NDK_HOME (ABI $ABI, API $API)"
 # Set every NDK variable cargo-ndk consults to the one NDK we resolved, so it neither warns about a
 # mismatch nor silently falls back to a different preinstalled NDK (CI runners preset ANDROID_NDK_ROOT).
 export ANDROID_NDK_HOME="$NDK_HOME" ANDROID_NDK_ROOT="$NDK_HOME" ANDROID_NDK="$NDK_HOME"
