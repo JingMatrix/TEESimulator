@@ -94,6 +94,15 @@ object Resolver {
             profiles.put(resolveProfile(p, scope, harvest))
         }
         msg.put("profiles", profiles)
+
+        // The rkp_only props the user deleted, so the hook can tell a genuine rkp_only=true from
+        // one
+        // a vendor .prop reasserted after a delete and ask the daemon (via the getUsage reply) to
+        // re-delete it. Device-wide, full replace each push; empty when nothing is deleted.
+        val rkpDeleted = JSONArray()
+        for (name in RkpStore.load().keys) rkpDeleted.put(name)
+        msg.put("rkpDeleted", rkpDeleted)
+
         // Published as the last act of building the message, so a resolve that throws part-way
         // publishes nothing. There is no "push succeeded" moment to wait for instead: Control.push
         // only stages the JSON for the connection thread, and actual delivery is confirmed much

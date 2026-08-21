@@ -50,6 +50,11 @@ object Control {
     // Invoked (on [commitExecutor]) after the lib acks a config commit, so the daemon can re-attest
     // pre-existing keys against the just-committed profile set. Coalesced by [commitPending].
     @Volatile var onCommitted: (() -> Unit)? = null
+
+    // Invoked (on [commitExecutor]) when a getUsage reply reports rkp_only props the hook saw
+    // reasserted despite a delete intent (#262), so the daemon can re-delete them live. The names
+    // are always a subset of the known rkp_only knobs; the daemon re-validates.
+    @Volatile var onRkpReassert: ((List<String>) -> Unit)? = null
     private val commitExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "teesim-reattest").apply { isDaemon = true }
     }
@@ -262,8 +267,36 @@ object Control {
                 // on PackageManager.
                 usageReplies.clear()
                 usageReplies.offer(msg)
+                // A reasserted rkp_only prop (the hook saw it live despite a delete intent) rides
+                // the same reply; re-delete off the reader thread so a resetprop can't stall it.
+                dispatchRkpReassert(msg.optJSONArray("rkpReassert"))
             }
             "pong" -> logPong(msg.optLong("epoch"))
+        }
+    }
+
+    // Hand any reasserted rkp_only prop names from a getUsage reply to [onRkpReassert], on the
+    // commit
+    // executor (not the reader thread) so the daemon's resetprop --delete runs off the hot path.
+    // No-op
+    // when the array is absent/empty or no handler is set.
+    private fun dispatchRkpReassert(arr: JSONArray?) {
+        if (arr == null || arr.length() == 0) return
+        val names = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) arr.optString(i)
+            .takeIf { it.isNotEmpty() }
+            ?.let { names.add(it) }
+        if (names.isEmpty()) return
+        val handler = onRkpReassert ?: return
+        SystemLogger.info(
+            "Control: rkp reassert reported for ${names.joinToString(",")}; re-deleting"
+        )
+        commitExecutor.execute {
+            try {
+                handler(names)
+            } catch (e: Throwable) {
+                SystemLogger.warning("Control: rkp reassert handler failed: ${e.message}")
+            }
         }
     }
 

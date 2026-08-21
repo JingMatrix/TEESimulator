@@ -178,6 +178,12 @@ const canaryInstallQuery = (args) =>
   "?tag=" + encodeURIComponent((args && args.tag) || "") +
   "&variant=" + encodeURIComponent((args && args.variant) || "release");
 
+// One RKP-only property, by its real name. The daemon re-validates the name against its known set
+// and deletes/restores it live + records or clears the delete-intent atomically (POST /rkp/delete,
+// POST /rkp/restore), so a boot/push re-enforce can never interleave with the user's action.
+const rkpNameQuery = (args) =>
+  "?name=" + encodeURIComponent((args && args.name) || "");
+
 // The save target: the chosen folder and filename, both encoded so any character is inert.
 // The log text itself rides in the request body (too large for a query), not here.
 const logsWriteQuery = (args) =>
@@ -221,6 +227,17 @@ export async function keyAdmin(action, args = {}) {
       // app is discovered — there is no package observer in the daemon, so the Profiles screen's
       // pull-to-refresh is what goes and looks. Resolves to { ok, uids }.
       return request("POST", "/rescan");
+    case "rkpList":
+      // The user's RKP-only delete intents, so the view can show a Restore control for each deleted
+      // knob (a deleted prop reads back as unset, indistinguishable from never-shipped). { ok, deleted }.
+      return request("GET", "/rkp");
+    case "rkpDelete":
+      // Delete one RKP-only property live and persist the delete-intent, one daemon-owned lock-ordered
+      // step, so it cannot interleave with a boot/push re-enforce. Resolves to { ok, name, action }.
+      return request("POST", "/rkp/delete" + rkpNameQuery(args));
+    case "rkpRestore":
+      // Restore one deleted RKP-only property (set it back + clear the intent), atomically. { ok, name, action }.
+      return request("POST", "/rkp/restore" + rkpNameQuery(args));
     case "keysDbDelete":
       return request("POST", "/keys/db/delete" + idsQuery(args));
     case "inspect":

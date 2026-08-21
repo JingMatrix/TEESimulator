@@ -36,6 +36,10 @@ using aidl::android::hardware::security::keymint::IKeyMintDevice;
 extern "C" AIBinder* teesim_router_new_device(int32_t security_level, AIBinder* real_binder);
 // True if the calling uid belongs to a live target profile (keymint_router.cpp).
 extern "C" bool teesim_is_target_uid(int32_t uid);
+// RKP-only delete-intent tracking (keymint_router.cpp): is this prop one the user deleted, and note
+// that we saw it live again so the daemon re-deletes it.
+extern "C" bool teesim_rkp_is_delete_intent(const char* name);
+extern "C" void teesim_rkp_note_reassert(const char* name);
 
 namespace {
 
@@ -300,10 +304,25 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
         bool rkp_only = ReadRkpOnly(prop, raw);
         const char* val = raw[0] ? raw : "<unset>";
         if (rkp_only) {
-          tls_rkp_verdict = "allowed-rkp-only-level";
-          LOGI("HookedTransact: RKP NOT denying %s getRegistration for target uid=%d (irpcName=%s, "
-               "%s=%s; denial would fail key generation on an rkp-only level)",
-               level, uid, irpc, prop, val);
+          // The prop reads rkp_only=true. If the user deleted it, this is a reassertion (a vendor
+          // .prop or a delayed config sync, #262) the daemon must undo — note it so the next
+          // getUsage poll re-deletes it. We still ALLOW this one lookup: denying an rkp-only level
+          // fails key generation outright (there is no batch fallback yet), which is worse than the
+          // one leaked check this races with. Once the daemon re-deletes, the prop reads unset and
+          // the ordinary deny -> keybox path takes over on the next provisioning.
+          if (teesim_rkp_is_delete_intent(prop)) {
+            teesim_rkp_note_reassert(prop);
+            tls_rkp_verdict = "allowed-reasserted-pending-redelete";
+            LOGW("HookedTransact: RKP lazy re-delete — %s reasserted to %s=%s for target uid=%d "
+                 "despite a delete intent; allowing this lookup and asking the daemon to re-delete "
+                 "(this check may leak once; the next one won't)",
+                 level, prop, val, uid);
+          } else {
+            tls_rkp_verdict = "allowed-rkp-only-level";
+            LOGI("HookedTransact: RKP NOT denying %s getRegistration for target uid=%d (irpcName=%s, "
+                 "%s=%s; denial would fail key generation on an rkp-only level)",
+                 level, uid, irpc, prop, val);
+          }
         } else {
           tls_rkp_verdict = "denied";
           // The gate only knows what keystore2 will now do, not how the key will be rooted: a

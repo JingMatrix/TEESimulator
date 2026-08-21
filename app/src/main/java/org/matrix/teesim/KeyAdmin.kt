@@ -54,20 +54,23 @@ import org.json.JSONObject
  * place auto-included uids are visible, since the rule needs the root-only known_packages.json
  * baseline. Empty profiles[] with epoch 0 before the first push) POST /rescan -> { ok, uids }
  * (re-resolve against the live device and re-push; how a newly installed app is discovered, there
- * being no package watcher) GET /packages -> { ok, firstAppUid, apps:[ {uid, packages:[..], label,
- * system, launchable, enabled, installTime, freq, lastUsed, recent} ] } (every installed app, one
- * entry per uid, for the Scope picker: installTime = epoch ms of first install; freq = persistent
- * key-request count; lastUsed = epoch ms of last request; recent = requested a key since this boot)
- * GET /icon?pkg=P&token=T -> raw image/png (query-token auth, like /logs/download; 404 when the
- * package has no icon) POST /usage/clear -> { ok, cleared } (wipes the frequency memory) POST
- * /keys/db/delete?ids=1,2,3 -> { ok, deleted, requested } (removes those keyentry ids from
- * keystore2, marker- and target-verified) GET /keys/inspect?alias=A -> { ok, alias,
- * attestation{...} | null } POST /keys/delete?alias=A -> { ok, deleted } GET /logs?after=N&max=M ->
- * { ok, lines:[{seq,level,tag,text}], nextAfter } GET /keybox/inspect?name=F -> { ok, name,
- * deviceId, revocationListAvailable, keys:[{algorithm, privateKeyPresent, chainLength, linkage,
- * rootAuthority(google|aosp|knox|unknown|none), googleSigned, chainVerified, revoked,
- * revocationChecked, certs:[{index, subject, issuer, serial, notBefore, notAfter, expired, sigAlg,
- * keyAlgorithm, keySize, isCa, selfSigned, signatureValid?, revocationChecked?, revoked?,
+ * being no package watcher) GET /rkp -> { ok, deleted:{ prop:value } } (the user's RKP-only delete
+ * intents, for the Restore control) POST /rkp/delete?name=P and POST /rkp/restore?name=P -> { ok,
+ * name, action } (delete one RKP-only prop + persist the intent, or restore it + clear the intent,
+ * atomically; name must be a known knob) GET /packages -> { ok, firstAppUid, apps:[ {uid,
+ * packages:[..], label, system, launchable, enabled, installTime, freq, lastUsed, recent} ] }
+ * (every installed app, one entry per uid, for the Scope picker: installTime = epoch ms of first
+ * install; freq = persistent key-request count; lastUsed = epoch ms of last request; recent =
+ * requested a key since this boot) GET /icon?pkg=P&token=T -> raw image/png (query-token auth, like
+ * /logs/download; 404 when the package has no icon) POST /usage/clear -> { ok, cleared } (wipes the
+ * frequency memory) POST /keys/db/delete?ids=1,2,3 -> { ok, deleted, requested } (removes those
+ * keyentry ids from keystore2, marker- and target-verified) GET /keys/inspect?alias=A -> { ok,
+ * alias, attestation{...} | null } POST /keys/delete?alias=A -> { ok, deleted } GET
+ * /logs?after=N&max=M -> { ok, lines:[{seq,level,tag,text}], nextAfter } GET /keybox/inspect?name=F
+ * -> { ok, name, deviceId, revocationListAvailable, keys:[{algorithm, privateKeyPresent,
+ * chainLength, linkage, rootAuthority(google|aosp|knox|unknown|none), googleSigned, chainVerified,
+ * revoked, revocationChecked, certs:[{index, subject, issuer, serial, notBefore, notAfter, expired,
+ * sigAlg, keyAlgorithm, keySize, isCa, selfSigned, signatureValid?, revocationChecked?, revoked?,
  * revocationStatus?, revocationReason?, rootAuthority?}]}] } GET /canary -> { ok, currentCode,
  * latest{...}|null, updateAvailable } POST /canary/install?tag=&variant= -> { ok, message }
  */
@@ -99,6 +102,14 @@ object KeyAdmin {
      * caller uids the new push targets, or -1 if there was no valid config to push.
      */
     @Volatile var onRescan: (() -> Int)? = null
+
+    /**
+     * Set by [App] to its delete-and-restore for one RKP-only property, invoked by `POST
+     * /rkp/delete` and `POST /rkp/restore`. Running the live `resetprop` and the delete-intent
+     * write in the daemon keeps them atomic with the boot/push re-enforce. Takes the action
+     * ("delete"|"restore") and the real property name; returns whether the live change took.
+     */
+    @Volatile var onRkp: ((String, String) -> Boolean)? = null
 
     fun start(record: Harvester.Record) {
         harvest = record
@@ -431,6 +442,9 @@ object KeyAdmin {
                         method == "GET" && path == "/scope" -> scope()
                         method == "GET" && path == "/packages" -> packages()
                         method == "POST" && path == "/rescan" -> rescan()
+                        method == "GET" && path == "/rkp" -> rkpList()
+                        method == "POST" && path == "/rkp/delete" -> rkpAction("delete", query)
+                        method == "POST" && path == "/rkp/restore" -> rkpAction("restore", query)
                         method == "POST" && path == "/usage/clear" -> usageClear()
                         method == "POST" && path == "/keys/db/delete" -> deleteDbKeys(query)
                         method == "GET" && path == "/keys/inspect" ->
@@ -701,6 +715,38 @@ object KeyAdmin {
         if (uids < 0) return JSONObject().put("ok", false).put("error", "no valid config to push")
         SystemLogger.info("KeyAdmin: rescan pushed a config targeting $uids caller uid(s)")
         return JSONObject().put("ok", true).put("uids", uids)
+    }
+
+    /**
+     * `GET /rkp` — the user's current RKP-only delete intents, `{ ok, deleted:{ <property>:
+     * <value-at-deletion> } }`, so the WebUI can render a Restore control for each deleted knob
+     * (the property itself reads back as unset, so the live value alone cannot tell "deleted" from
+     * "never shipped"). Read-only; a dirty read only feeds a repaint, so it does not take the App
+     * monitor.
+     */
+    private fun rkpList(): JSONObject {
+        val deleted = JSONObject()
+        for ((name, value) in RkpStore.load()) deleted.put(name, value)
+        return JSONObject().put("ok", true).put("deleted", deleted)
+    }
+
+    /**
+     * `POST /rkp/delete?name=<property>` and `POST /rkp/restore?name=<property>` — delete one
+     * RKP-only property (and persist the intent) or restore it (and clear the intent), as one
+     * atomic step in [App.deleteRkpProp]/[App.restoreRkpProp]. The property name is checked against
+     * [RkpStore.KNOWN] here so a malformed or hostile request can never drive `resetprop` at an
+     * arbitrary property.
+     */
+    private fun rkpAction(action: String, query: Map<String, String>): JSONObject {
+        val name = query["name"] ?: error("name required")
+        if (name !in RkpStore.KNOWN)
+            return JSONObject().put("ok", false).put("error", "unknown rkp property")
+        val hook = onRkp ?: return JSONObject().put("ok", false).put("error", "daemon not ready")
+        if (!hook(action, name))
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "could not $action property (no working resetprop)")
+        return JSONObject().put("ok", true).put("name", name).put("action", action)
     }
 
     /**

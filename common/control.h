@@ -110,6 +110,19 @@ char *teesim_usage_json_alloc(void);
 // shifted its transaction ordinals and grew finish()'s signature between 10 and 11.
 int teesim_android_api(void);
 
+// The set of remote_provisioning.*.rkp_only property names the user has deleted, pushed with each
+// config (full replace; names borrowed for the call). It lets the keymint hook tell a genuine
+// rkp_only=true — leave it, allow the lookup — from one a vendor .prop reasserted after a delete,
+// which it notes for the daemon to re-delete. The keymint router stores it; keystore1 no-ops (RKP is
+// a keystore2-only construct).
+void teesim_cfg_set_rkp_deleted(const char *const *names, size_t n);
+
+// Drain the rkp_only property names the hook saw reasserted (present while under a delete intent)
+// since the last call, as a malloc'd NUL-terminated JSON array the caller must free() —
+// ["remote_provisioning.tee.rkp_only"], or "[]" when none. The daemon polls this on the getUsage
+// reply and re-deletes each live. The keymint router fills it; keystore1 returns "[]".
+char *teesim_rkp_reassert_json_alloc(void);
+
 // --- control server, implemented in common/control.cpp -----------------------
 
 // Bind the control socket (its path lives in control.cpp), listen, and serve
