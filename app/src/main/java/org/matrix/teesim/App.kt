@@ -168,6 +168,9 @@ object App {
             // no-ops from 34 on). So the set of installed apps is only ever re-read here, on a
             // config change, and at daemon start.
             KeyAdmin.onRescan = { resolveAndPush() }
+            // The WebUI's RKP toggles set their property through the daemon (POST /rkp) rather than shelling
+            // out themselves, so the live write and the rkp.json persist are one atomic, lock-ordered step.
+            KeyAdmin.onSetRkp = { name, value -> setRkpKnob(name, value) }
             startUsagePoll()
 
             SystemLogger.info("Daemon initialised; entering main loop")
@@ -306,6 +309,7 @@ object App {
         harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
         KeyAdmin.updateHarvest(harvest)
         applyBootProps(harvest)
+        applyRkpProps()
         try {
             lastGoodConfig = ConfigStore.load()
         } catch (e: ConfigStore.ConfigException) {
@@ -439,6 +443,49 @@ object App {
         val abi =
             Build.SUPPORTED_ABIS?.firstOrNull() ?: DeviceProps.prop("ro.product.cpu.abi", "arm64-v8a")
         LogTail.start(File(moduleDir, "$abi/libteesim_logcat.so"))
+    }
+
+    /**
+     * Re-apply the user's persisted Remote Key Provisioning knobs (rkp.json) to their system properties, so a
+     * choice like "TEE RKP-only off" survives a reboot. The two `remote_provisioning.*.rkp_only` props are the
+     * point of this: they are plain (not `persist.*`), and though keystore2 defaults them to false when unset,
+     * a device can ship them set `true` in a vendor `.prop` that init re-applies every boot (OnePlus Android
+     * 16, #236) — so a live `resetprop … false` reverts on reboot. `…enable_rkpd` is `persist.device_config`
+     * and already survives on its own, so forcing it is a harmless no-op in the common case. Runs from
+     * resolveAndPush, whose first call is daemon start (after system_server is up). Mirrors [applyBootProps]:
+     * overwrite only on a live-vs-stored mismatch, so a steady state does no work. `resetprop -n` at boot is
+     * fine — no provisioning has read the prop yet.
+     */
+    private fun applyRkpProps() {
+        for ((name, value) in RkpStore.load()) {
+            if (value.isEmpty()) continue // a knob with no chosen value: nothing to force
+            val live = DeviceProps.prop(name, "")
+            if (live != value) {
+                SysProp.set(name, value)
+                SystemLogger.info("rkp prop: forced $name to persisted '$value' (was '${live.ifEmpty { "unset" }}')")
+            }
+        }
+    }
+
+    /**
+     * Set one Remote Key Provisioning knob live and persist the choice, as one atomic step. Reached from
+     * the WebUI through `KeyAdmin`'s `POST /rkp`, this replaces the WebUI writing the property and rkp.json
+     * out-of-process: because it is `@Synchronized` on the same monitor as [resolveAndPush] (and therefore
+     * [applyRkpProps]), the live write and the persist can never interleave with a boot/re-push re-force, so
+     * a concurrent push can no longer read a stale rkp.json and revert the toggle the user just made. Persist
+     * only when the live write took, so the file keeps mirroring the live property. [name] is validated
+     * against [RkpStore.KNOWN] by the caller. Returns whether the property was set live.
+     */
+    @Synchronized
+    fun setRkpKnob(name: String, value: String): Boolean {
+        val ok = SysProp.set(name, value)
+        if (ok) {
+            RkpStore.save(name, value)
+            SystemLogger.info("rkp prop: set $name=$value (live + persisted)")
+        } else {
+            SystemLogger.warning("rkp prop: could not set $name live; not persisting")
+        }
+        return ok
     }
 
     /** Where the inject binary + native libs live: args[0], else the dex dir, else default. */
