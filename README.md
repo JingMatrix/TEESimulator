@@ -123,3 +123,9 @@ The whole build is one Gradle graph. `zipRelease` (or `zipDebug`, which bundles 
 | `rust/teesim-km/` | The in-process TA — the reference KeyMint TA wired to BoringSSL and keybox-based attestation, behind a small C ABI. |
 | `module/` | The flashable module: boot service, installer, `sepolicy.rule`, the default configuration, and the WebUI. |
 | `third_party/` | Submodules: the reference KeyMint, the AIDL interfaces, `frameworks/native`, BoringSSL, and LSPlt. |
+
+## License
+
+TEESimulator is free software, licensed under the [GNU General Public License v3.0](LICENSE) or
+any later version. The third-party code it builds on — the AOSP submodules, BoringSSL, LSPlt and
+the vendored platform headers — is listed with its own terms in [NOTICE](NOTICE).

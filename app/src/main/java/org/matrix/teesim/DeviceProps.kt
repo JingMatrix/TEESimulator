@@ -84,24 +84,28 @@ object DeviceProps {
     fun vendorSecurityPatch(): String =
         prop("ro.vendor.build.security_patch").ifBlank { systemSecurityPatch() }
 
-    /** Boot has no dedicated build property; use the vendor security patch, the closest real value. */
+    /**
+     * Boot has no dedicated build property; use the vendor security patch, the closest real value.
+     */
     fun bootSecurityPatch(): String = vendorSecurityPatch()
 
     /** osVersion from getprop (ro.build.version.release), encoded, or null when unavailable. */
-    fun propOsVersion(): Int? = parseOsVersion(prop("ro.build.version.release", Build.VERSION.RELEASE ?: ""))
+    fun propOsVersion(): Int? =
+        parseOsVersion(prop("ro.build.version.release", Build.VERSION.RELEASE ?: ""))
 
     /**
      * Resolve one patch-level component from the config mini-language to its integer encoding, or
      * null to mean "omit / not reported".
      *
-     * An empty value reuses the value captured from the real TEE at harvest ([harvested]). Keywords:
-     * `system_property` (the matching build property from getprop, and nothing else), `today` (the
-     * current month/day), `no` (report 0), or an explicit `YYYY-MM` / `YYYY-MM-DD` date. A date may
-     * use the template tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` tracks the
-     * calendar.
+     * An empty value reuses the value captured from the real TEE at harvest ([harvested]).
+     * Keywords: `system_property` (the matching build property from getprop, and nothing else),
+     * `today` (the current month/day), `no` (report 0), or an explicit `YYYY-MM` / `YYYY-MM-DD`
+     * date. A date may use the template tokens `YYYY` / `MM` / `DD`, resolved to today, so
+     * `YYYY-MM-05` tracks the calendar.
      *
      * An empty harvested value or an absent build property reports nothing — the tag is omitted
-     * rather than sent as a made-up default. component: "system" (YYYYMM), "vendor"/"boot" (YYYYMMDD).
+     * rather than sent as a made-up default. component: "system" (YYYYMM), "vendor"/"boot"
+     * (YYYYMMDD).
      */
     fun resolvePatch(language: String, component: String, harvested: Int?): Int? {
         val isYmd = component != "system"

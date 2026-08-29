@@ -14,8 +14,8 @@ object ConfigStore {
     class ConfigException(message: String) : Exception(message)
 
     // The accepted apps[] entry shapes: a package name (the app as installed for the primary user),
-    // the same name suffixed with @N for Android user N (a work profile or a secondary user), or the
-    // advanced raw-uid token uid:N.
+    // the same name suffixed with @N for Android user N (a work profile or a secondary user), or
+    // the advanced raw-uid token uid:N.
     private val PKG_RE = Regex("^[A-Za-z0-9_.]+(@\\d+)?$")
     private val UID_RE = Regex("^uid:\\d+$")
 
@@ -38,10 +38,10 @@ object ConfigStore {
         val meid: String,
         val imei2: String,
         val apps: List<String>,
-        // When true, the profile ALSO targets every installed user app (uid >= first app uid) that no
-        // OTHER profile claims — including apps installed later, since the daemon re-resolves on each
-        // package change. At most one profile may set this (checked below); it lets the apps list be
-        // empty, the auto set covering it.
+        // When true, the profile ALSO targets every installed user app (uid >= first app uid) that
+        // no OTHER profile claims — including apps installed later, since the daemon re-resolves on
+        // each package change. At most one profile may set this (checked below); it lets the apps
+        // list be empty, the auto set covering it.
         val autoIncludeNewApps: Boolean,
     )
 
@@ -67,9 +67,12 @@ object ConfigStore {
                 ?: throw ConfigException("config.json has no \"profiles\" object")
         if (profilesObj.length() == 0) throw ConfigException("config.json has no profiles")
 
-        val seenApps = HashMap<String, String>() // apps[] entry (package or uid:N) -> owning profile id
-        val seenUids = HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
-        var autoIncludeProfiles = 0 // how many profiles set autoIncludeNewApps (at most one allowed)
+        val seenApps =
+            HashMap<String, String>() // apps[] entry (package or uid:N) -> owning profile id
+        val seenUids =
+            HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
+        var autoIncludeProfiles =
+            0 // how many profiles set autoIncludeNewApps (at most one allowed)
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -84,8 +87,8 @@ object ConfigStore {
                 throw ConfigException("profile '$id' keybox not found: ${keyboxFile.absolutePath}")
 
             // Operation mode: patch (re-sign the real hardware attestation) or generation (mint the
-            // whole key). Defaults to patch; a level whose hardware is unavailable still falls back to
-            // generation at resolve time.
+            // whole key). Defaults to patch; a level whose hardware is unavailable still falls back
+            // to generation at resolve time.
             val mode = p.optString("mode", "patch").trim().lowercase()
             if (mode != "patch" && mode != "generation")
                 throw ConfigException("profile '$id' has invalid mode '$mode' (patch | generation)")
@@ -106,15 +109,18 @@ object ConfigStore {
                         "auto-include new apps (two would both claim every unowned user app)"
                 )
             if (apps.isEmpty() && !autoIncludeNewApps)
-                throw ConfigException("profile '$id' has no apps (and does not auto-include new apps)")
+                throw ConfigException(
+                    "profile '$id' has no apps (and does not auto-include new apps)"
+                )
 
             // Each apps[] entry is a package name, a pkg@user name, or the advanced raw-uid token
-            // uid:N. Validate the shape here so a typo can't silently slip through to routing, and keep
-            // the per-entry uniqueness (a package/user pair OR a uid token may live in only one profile
-            // — the router needs exactly one owner per caller).
+            // uid:N. Validate the shape here so a typo can't silently slip through to routing, and
+            // keep the per-entry uniqueness (a package/user pair OR a uid token may live in only
+            // one profile — the router needs exactly one owner per caller).
             for (entry in apps) {
                 if (PKG_RE.matches(entry)) {
-                    // a package name, optionally naming the user it lives in — nothing further to validate
+                    // a package name, optionally naming the user it lives in — nothing further to
+                    // validate
                 } else if (UID_RE.matches(entry)) {
                     val n = entry.substring(4).toIntOrNull()
                     if (n == null || n < 0)
@@ -133,12 +139,13 @@ object ConfigStore {
                         "app entry '$entry' appears in both profile '$prev' and '$id' " +
                             "(routing requires one profile per package/uid)"
                     )
-                // The literal-string check above misses two entries that DIFFER textually but resolve to
-                // the SAME caller uid — a package vs a uid:N token (com.foo vs uid:10123), or two packages
-                // that share a uid (a sharedUserId pair). Both would put two profiles' keyboxes on one
-                // caller (last-writer-wins in routing). Reject on the effective uid too, when it resolves.
-                // Scope.parse is what splits pkg@user, so the uid compared here is the per-user one: the
-                // same package in two users is two callers and may legitimately sit in two profiles.
+                // The literal-string check above misses two entries that DIFFER textually but
+                // resolve to the SAME caller uid — a package vs a uid:N token (com.foo vs
+                // uid:10123), or two packages that share a uid (a sharedUserId pair). Both would
+                // put two profiles' keyboxes on one caller (last-writer-wins in routing). Reject on
+                // the effective uid too, when it resolves. Scope.parse is what splits pkg@user, so
+                // the uid compared here is the per-user one: the same package in two users is two
+                // callers and may legitimately sit in two profiles.
                 val uid =
                     when {
                         UID_RE.matches(entry) -> entry.substring(4).toIntOrNull() ?: -1
@@ -159,9 +166,9 @@ object ConfigStore {
                     id = id,
                     keybox = keybox,
                     mode = mode,
-                    // Defaults for an omitted field mirror the shipped config: a current-month system
-                    // patch and the conventional YYYY-MM-05 vendor/boot patch; an absent osVersion is
-                    // left empty (reuse the harvested value).
+                    // Defaults for an omitted field mirror the shipped config: a current-month
+                    // system patch and the conventional YYYY-MM-05 vendor/boot patch; an absent
+                    // osVersion is left empty (reuse the harvested value).
                     patchSystem = patch.optString("system", "today"),
                     patchVendor = patch.optString("vendor", "YYYY-MM-05"),
                     patchBoot = patch.optString("boot", "YYYY-MM-05"),

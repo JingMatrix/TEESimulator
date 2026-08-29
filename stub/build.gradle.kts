@@ -1,7 +1,7 @@
-// Compile-only stubs for hidden framework APIs the daemon calls (ActivityThread,
-// ServiceManager, IPackageManager, SystemProperties, the keystore providers). These
-// classes exist on the device at runtime; here they only satisfy the compiler and
-// are never packaged (the app depends on this module with compileOnly).
+// Compile-only stubs for hidden framework APIs the daemon calls (ActivityThread, ServiceManager,
+// IPackageManager, SystemProperties, the keystore providers). These classes exist on the device at
+// runtime; here they only satisfy the compiler and are never packaged (the app depends on this
+// module with compileOnly).
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.ktfmt)

@@ -45,8 +45,8 @@ class Injector(private val moduleDir: File) {
         var failures = 0
         while (running) {
             val pid = findPid(procName)
-            // Tell the log tail which process to capture, so the Logs panel shows the
-            // target keystore's own output — even before we manage to inject it.
+            // Tell the log tail which process to capture, so the Logs panel shows the target
+            // keystore's own output — even before we manage to inject it.
             LogTail.targetPid = if (pid > 0) pid else -1
             if (pid > 0 && pid != lastPid && serviceReady()) {
                 if (inject(pid)) {
@@ -66,8 +66,10 @@ class Injector(private val moduleDir: File) {
         }
     }
 
-    /** keystore forks before it registers its binder; wait for the service so we don't
-     * inject into a half-initialised process. */
+    /**
+     * keystore forks before it registers its binder; wait for the service so we don't inject into a
+     * half-initialised process.
+     */
     private fun serviceReady(): Boolean {
         val name =
             if (api >= 31) "android.system.keystore2.IKeystoreService/default"
@@ -79,19 +81,24 @@ class Injector(private val moduleDir: File) {
         }
     }
 
-    /** The control-channel hello is the real proof the lib loaded and bound the control socket. Warn
-     * (don't re-inject — that risks double-hooking) if it never arrives. */
+    /**
+     * The control-channel hello is the real proof the lib loaded and bound the control socket. Warn
+     * (don't re-inject — that risks double-hooking) if it never arrives.
+     */
     private fun confirmAsync(pid: Int) {
-        Thread({
-                for (i in 0 until 24) { // ~12s
-                    if (Control.libApi != 0) return@Thread
-                    sleep(500)
-                }
-                SystemLogger.warning(
-                    "injector: injected pid=$pid but the lib never checked in over ${Const.CONTROL_SOCKET_PATH} " +
-                        "(SELinux on the control socket? look for 'avc: denied' in logcat)"
-                )
-            }, "teesim-inject-confirm")
+        Thread(
+                {
+                    for (i in 0 until 24) { // ~12s
+                        if (Control.libApi != 0) return@Thread
+                        sleep(500)
+                    }
+                    SystemLogger.warning(
+                        "injector: injected pid=$pid but the lib never checked in over ${Const.CONTROL_SOCKET_PATH} " +
+                            "(SELinux on the control socket? look for 'avc: denied' in logcat)"
+                    )
+                },
+                "teesim-inject-confirm",
+            )
             .apply {
                 isDaemon = true
                 start()

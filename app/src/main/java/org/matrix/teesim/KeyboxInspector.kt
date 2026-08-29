@@ -15,20 +15,23 @@ import org.w3c.dom.Element
 /**
  * Parses a keybox.xml for the WebUI's keybox inspector. For each `<Key algorithm>` block it decodes
  * the certificate chain and reports the fields that let a user spot a bad keybox — subject/issuer,
- * validity (with expiry), key type and size, and whether the chain links up — plus whether a private
- * key is present. Read-only: the private key material is never returned, only that it exists.
+ * validity (with expiry), key type and size, and whether the chain links up — plus whether a
+ * private key is present. Read-only: the private key material is never returned, only that it
+ * exists.
  *
- * It also runs the checks that decide whether a keybox would pass Play Integrity / hardware attestation:
- * each cert's signature is verified against its parent, [RootPublicKey] classifies the root the chain
- * terminates in (Google, AOSP software, Knox, or unknown), and every serial is looked up in Google's
- * revocation list ([RevocationList]). A Google-rooted, cryptographically linked, unrevoked chain is a
- * genuine live keybox; a revoked or software-rooted one is not.
+ * It also runs the checks that decide whether a keybox would pass Play Integrity / hardware
+ * attestation: each cert's signature is verified against its parent, [RootPublicKey] classifies the
+ * root the chain terminates in (Google, AOSP software, Knox, or unknown), and every serial is
+ * looked up in Google's revocation list ([RevocationList]). A Google-rooted, cryptographically
+ * linked, unrevoked chain is a genuine live keybox; a revoked or software-rooted one is not.
  */
 object KeyboxInspector {
 
     private val NAME_RE = Regex("^[A-Za-z0-9._-]+\\.xml$")
 
-    /** Coerce to a safe *.xml basename inside the module dir, or null. Mirrors the WebUI's safeName. */
+    /**
+     * Coerce to a safe *.xml basename inside the module dir, or null. Mirrors the WebUI's safeName.
+     */
     private fun safeName(raw: String): String? {
         val name = raw.trim().substringAfterLast('/').substringAfterLast('\\')
         if (name.isEmpty() || name.contains("..") || !NAME_RE.matches(name)) return null
@@ -39,7 +42,8 @@ object KeyboxInspector {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)
         if (!file.isFile) return fail("no such keybox: $name")
-        // Pull-to-refresh on the detail page re-fetches Google's revocation list before re-checking.
+        // Pull-to-refresh on the detail page re-fetches Google's revocation list before
+        // re-checking.
         if (forceRefresh) RevocationList.forceRefresh()
         return try {
             val doc = newSafeBuilder().parse(file)
@@ -64,18 +68,22 @@ object KeyboxInspector {
     }
 
     /**
-     * Canonical subject-DN -> keybox filename, across every `*.xml` keybox in the module dir. Used to
-     * attribute a stored attestation key to the keybox that signed it: the key's leaf certificate is
-     * issued by the keybox's signing (batch) cert, whose subject appears here, and the batch/intermediate/
-     * root certs of the key's chain are keybox subjects too — so a hit on either the leaf's issuer or any
-     * chain subject names the signer. Best effort: an unparseable keybox simply contributes nothing.
+     * Canonical subject-DN -> keybox filename, across every `*.xml` keybox in the module dir. Used
+     * to attribute a stored attestation key to the keybox that signed it: the key's leaf
+     * certificate is issued by the keybox's signing (batch) cert, whose subject appears here, and
+     * the batch/intermediate/ root certs of the key's chain are keybox subjects too — so a hit on
+     * either the leaf's issuer or any chain subject names the signer. Best effort: an unparseable
+     * keybox simply contributes nothing.
      */
     fun signerIndex(): Map<String, String> {
         val out = HashMap<String, String>()
-        val files = File(Const.DATA_DIR).listFiles { f -> f.isFile && NAME_RE.matches(f.name) } ?: return out
+        val files =
+            File(Const.DATA_DIR).listFiles { f -> f.isFile && NAME_RE.matches(f.name) }
+                ?: return out
         for (file in files) {
             try {
-                val certNodes = newSafeBuilder().parse(file).documentElement.getElementsByTagName("Certificate")
+                val certNodes =
+                    newSafeBuilder().parse(file).documentElement.getElementsByTagName("Certificate")
                 for (i in 0 until certNodes.length) {
                     val cert = parsePem(certNodes.item(i).textContent) ?: continue
                     out[canonicalDn(cert.subjectX500Principal)] = file.name
@@ -88,17 +96,19 @@ object KeyboxInspector {
     }
 
     /**
-     * Every keybox's signing chain as a set of its certificates' canonical subject DNs — one entry per
-     * `<Key>` block (a keybox usually holds an ecdsa and an rsa chain), paired with the keybox filename.
-     * Used to attribute a stored attestation key to a keybox only when the key's own chain embeds that
-     * keybox's WHOLE chain, from the root certificate down through the intermediate to the batch signer.
-     * A single shared root/intermediate — as a genuine device key shares with a Google keybox — is not
-     * enough, so a coincidental match no longer names a keybox. Best effort: an unparseable keybox or
-     * chain simply contributes nothing.
+     * Every keybox's signing chain as a set of its certificates' canonical subject DNs — one entry
+     * per `<Key>` block (a keybox usually holds an ecdsa and an rsa chain), paired with the keybox
+     * filename. Used to attribute a stored attestation key to a keybox only when the key's own
+     * chain embeds that keybox's WHOLE chain, from the root certificate down through the
+     * intermediate to the batch signer. A single shared root/intermediate — as a genuine device key
+     * shares with a Google keybox — is not enough, so a coincidental match no longer names a
+     * keybox. Best effort: an unparseable keybox or chain simply contributes nothing.
      */
     fun signerChains(): List<Pair<String, Set<String>>> {
         val out = ArrayList<Pair<String, Set<String>>>()
-        val files = File(Const.DATA_DIR).listFiles { f -> f.isFile && NAME_RE.matches(f.name) } ?: return out
+        val files =
+            File(Const.DATA_DIR).listFiles { f -> f.isFile && NAME_RE.matches(f.name) }
+                ?: return out
         for (file in files) {
             try {
                 val root = newSafeBuilder().parse(file).documentElement
@@ -122,7 +132,10 @@ object KeyboxInspector {
         return out
     }
 
-    /** RFC 2253 canonical form of a DN, so subject/issuer strings compare regardless of encoding quirks. */
+    /**
+     * RFC 2253 canonical form of a DN, so subject/issuer strings compare regardless of encoding
+     * quirks.
+     */
     fun canonicalDn(p: javax.security.auth.x500.X500Principal): String =
         p.getName(javax.security.auth.x500.X500Principal.CANONICAL)
 
@@ -154,17 +167,18 @@ object KeyboxInspector {
             }
             val j = certJson(i, cert)
 
-            // Cryptographic linkage: every cert is signed by the next one up; a self-signed root signs
-            // itself. When the top cert is not self-signed the real root is not embedded (the chain ends
-            // at an intermediate) — there is nothing in-chain to check it against, so leave it and let
-            // RootPublicKey.authorityOf decide its trust.
+            // Cryptographic linkage: every cert is signed by the next one up; a self-signed root
+            // signs itself. When the top cert is not self-signed the real root is not embedded (the
+            // chain ends at an intermediate) — there is nothing in-chain to check it against, so
+            // leave it and let RootPublicKey.authorityOf decide its trust.
             val isTop = i == parsed.size - 1
             val selfSigned = cert.subjectX500Principal == cert.issuerX500Principal
-            val parentKey = when {
-                isTop && !selfSigned -> null
-                isTop -> cert.publicKey
-                else -> parsed[i + 1]?.publicKey
-            }
+            val parentKey =
+                when {
+                    isTop && !selfSigned -> null
+                    isTop -> cert.publicKey
+                    else -> parsed[i + 1]?.publicKey
+                }
             val sigValid = parentKey?.let {
                 try {
                     cert.verify(it)
@@ -246,7 +260,8 @@ object KeyboxInspector {
     private fun parsePem(text: String): X509Certificate? =
         try {
             val body =
-                text.replace("-----BEGIN CERTIFICATE-----", "")
+                text
+                    .replace("-----BEGIN CERTIFICATE-----", "")
                     .replace("-----END CERTIFICATE-----", "")
                     .replace(Regex("\\s"), "")
             if (body.isEmpty()) null

@@ -42,9 +42,11 @@ object RevocationList {
     /** True when we hold a revocation list (fresh or stale) to check against. */
     fun available(): Boolean = ensureEntries() != null
 
-    /** Force a fresh fetch straight from the server — bypassing the TTL and any edge cache — then
-     *  report availability. Backs the keybox inspector's pull-to-refresh, so a re-verify sees the
-     *  live list rather than a copy a CDN has been serving for hours. */
+    /**
+     * Force a fresh fetch straight from the server — bypassing the TTL and any edge cache — then
+     * report availability. Backs the keybox inspector's pull-to-refresh, so a re-verify sees the
+     * live list rather than a copy a CDN has been serving for hours.
+     */
     fun forceRefresh(): Boolean {
         fetchNow()
         return entries != null

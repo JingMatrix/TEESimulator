@@ -13,9 +13,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Control-channel CLIENT. Connects the filesystem unix socket at [Const.CONTROL_SOCKET_PATH], verifies the peer is
- * keystore (SO_PEERCRED uid == [Const.AID_KEYSTORE]) before sending the keybox bytes, then speaks the control.cpp
- * framing: [u32 BE length][UTF-8 JSON].
+ * Control-channel CLIENT. Connects the filesystem unix socket at [Const.CONTROL_SOCKET_PATH],
+ * verifies the peer is keystore (SO_PEERCRED uid == [Const.AID_KEYSTORE]) before sending the keybox
+ * bytes, then speaks the control.cpp framing: [u32 BE length][UTF-8 JSON].
  *
  * Wire sequence: the lib sends its `hello` on accept; we send our `hello` then the latest `config`,
  * and read back `hello`/`ack`/`pong`. Only ever the newest config is sent (full replace).
@@ -37,19 +37,22 @@ object Control {
     // The live connection's output stream, or null when disconnected — used to send resign requests
     // outside the writer loop (writeFrame is stream-synchronized, so concurrent sends are safe).
     @Volatile private var activeOut: OutputStream? = null
-    // Responses to the one in-flight resign request. Buffered (size 1) so a reply that arrives before
-    // the sender polls is not lost; the sender drains it before each request.
+    // Responses to the one in-flight resign request. Buffered (size 1) so a reply that arrives
+    // before the sender polls is not lost; the sender drains it before each request.
     private val resignReplies = LinkedBlockingQueue<JSONObject>(1)
 
-    // The one in-flight usage-poll reply, same buffered(1) rationale as [resignReplies]. [usageLock]
-    // serializes fetchUsage() so only a single getUsage request is ever outstanding on the wire.
+    // The one in-flight usage-poll reply, same buffered(1) rationale as [resignReplies].
+    // [usageLock] serializes fetchUsage() so only a single getUsage request is ever outstanding on
+    // the wire.
     private val usageReplies = LinkedBlockingQueue<JSONObject>(1)
     private val usageLock = Object()
 
     // Invoked (on [commitExecutor]) after the lib acks a config commit, so the daemon can re-attest
     // pre-existing keys against the just-committed profile set. Coalesced by [commitPending].
     @Volatile var onCommitted: (() -> Unit)? = null
-    private val commitExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "teesim-reattest").apply { isDaemon = true } }
+    private val commitExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "teesim-reattest").apply { isDaemon = true }
+    }
     private val commitPending = AtomicBoolean(false)
 
     @Volatile
@@ -90,7 +93,10 @@ object Control {
             try {
                 socket = LocalSocket()
                 socket.connect(
-                    LocalSocketAddress(Const.CONTROL_SOCKET_PATH, LocalSocketAddress.Namespace.FILESYSTEM)
+                    LocalSocketAddress(
+                        Const.CONTROL_SOCKET_PATH,
+                        LocalSocketAddress.Namespace.FILESYSTEM,
+                    )
                 )
                 val peerUid =
                     try {
@@ -206,8 +212,8 @@ object Control {
                         "applied=${msg.optInt("profilesApplied")} failed=${msg.optInt("profilesFailed")}"
                 )
                 // The ack means the lib has committed the new profile set — the point at which
-                // pre-existing keys can be re-attested against it. Coalesce bursts of pushes into one
-                // run and never run it on this reader thread (resign responses arrive here).
+                // pre-existing keys can be re-attested against it. Coalesce bursts of pushes into
+                // one run and never run it on this reader thread (resign responses arrive here).
                 val cb = onCommitted
                 if (cb != null && commitPending.compareAndSet(false, true)) {
                     commitExecutor.execute {
@@ -225,8 +231,9 @@ object Control {
                 resignReplies.offer(msg)
             }
             "usage" -> {
-                // The poll thread parks on usageReplies; hand the frame over and never do the (uid->pkg,
-                // disk) merge here — this is the reader thread, and the merge can block on PackageManager.
+                // The poll thread parks on usageReplies; hand the frame over and never do the
+                // (uid->pkg, disk) merge here — this is the reader thread, and the merge can block
+                // on PackageManager.
                 usageReplies.clear()
                 usageReplies.offer(msg)
             }
@@ -235,16 +242,18 @@ object Control {
     }
 
     /**
-     * Ask the lib to re-sign an existing key's attestation [leaf] under profile [profileId]'s keybox,
-     * returning the patched chain (leaf first) or null if there is no live connection, the request
-     * times out, or the lib reports failure. Called from [onCommitted] on [commitExecutor]; the reader
-     * thread delivers the reply, so this must not run on that thread.
+     * Ask the lib to re-sign an existing key's attestation [leaf] under profile [profileId]'s
+     * keybox, returning the patched chain (leaf first) or null if there is no live connection, the
+     * request times out, or the lib reports failure. Called from [onCommitted] on [commitExecutor];
+     * the reader thread delivers the reply, so this must not run on that thread.
      */
     fun resign(profileId: String, leaf: ByteArray): List<ByteArray>? {
         val out =
             activeOut
                 ?: run {
-                    SystemLogger.warning("control: resign for '$profileId' skipped — no live connection")
+                    SystemLogger.warning(
+                        "control: resign for '$profileId' skipped — no live connection"
+                    )
                     return null
                 }
         resignReplies.clear()
@@ -274,7 +283,9 @@ object Control {
         val dec = Base64.getDecoder()
         return try {
             val chain = (0 until arr.length()).map { dec.decode(arr.getString(it)) }
-            SystemLogger.info("control: resign returned a ${chain.size}-cert chain for '$profileId'")
+            SystemLogger.info(
+                "control: resign returned a ${chain.size}-cert chain for '$profileId'"
+            )
             chain
         } catch (e: Exception) {
             SystemLogger.warning("control: resign reply undecodable: ${e.message}")
@@ -283,14 +294,15 @@ object Control {
     }
 
     /**
-     * Poll the lib for its per-uid key-request usage, mirroring [resign]'s request/reply
-     * shape: write `{"type":"getUsage"}`, wait for the matching `usage` frame, and hand back its `apps`
-     * array (one entry per uid that has requested a key since the lib loaded), or null on no connection /
-     * timeout / malformed reply. Serialized by [usageLock] so at most one request is outstanding.
+     * Poll the lib for its per-uid key-request usage, mirroring [resign]'s request/reply shape:
+     * write `{"type":"getUsage"}`, wait for the matching `usage` frame, and hand back its `apps`
+     * array (one entry per uid that has requested a key since the lib loaded), or null on no
+     * connection / timeout / malformed reply. Serialized by [usageLock] so at most one request is
+     * outstanding.
      *
-     * MUST be called off the reader thread ([App]'s poll thread) — [handleFrame] delivers the reply, so
-     * blocking here on that same thread would deadlock. The reply is consumed as-is; the caller resolves
-     * uid->package and folds deltas into [UsageStore].
+     * MUST be called off the reader thread ([App]'s poll thread) — [handleFrame] delivers the
+     * reply, so blocking here on that same thread would deadlock. The reply is consumed as-is; the
+     * caller resolves uid->package and folds deltas into [UsageStore].
      */
     fun fetchUsage(): JSONArray? =
         synchronized(usageLock) {

@@ -13,29 +13,30 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Read/manage window into keystore2's on-disk database, so the WebUI can list and remove the keys THIS
- * MODULE generated for target apps (gms, key-attestation, …). Those keys live in keystore2's per-app
- * namespaces, not in the daemon's own AndroidKeyStore, so [KeyAdmin.listKeys] can never see them. Only
- * meaningful on Android 12+ (API 31+), where keystore2 replaced the legacy keystore; on 10/11 there is
- * no such database and [available] returns false.
+ * Read/manage window into keystore2's on-disk database, so the WebUI can list and remove the keys
+ * THIS MODULE generated for target apps (gms, key-attestation, …). Those keys live in keystore2's
+ * per-app namespaces, not in the daemon's own AndroidKeyStore, so [KeyAdmin.listKeys] can never see
+ * them. Only meaningful on Android 12+ (API 31+), where keystore2 replaced the legacy keystore; on
+ * 10/11 there is no such database and [available] returns false.
  *
- * "Ours" is decided by fact, not heuristics: our KeyMint TA prepends the routing marker `TEESIMkm\0` to
- * every key blob it emits (teesim-km `BLOB_MARKER` / `mark_blob`), and keystore2 stores that blob in
- * `blobentry`. A key whose blob starts with the marker is one we minted; every other key on the device
- * is ignored. (A key keystore2 super-encrypts before storing would hide the marker, but the attestation
- * keys these apps create are not auth-bound, so their blobs are stored as the TA returned them.)
+ * "Ours" is decided by fact, not heuristics: our KeyMint TA prepends the routing marker
+ * `TEESIMkm\0` to every key blob it emits (teesim-km `BLOB_MARKER` / `mark_blob`), and keystore2
+ * stores that blob in `blobentry`. A key whose blob starts with the marker is one we minted; every
+ * other key on the device is ignored. (A key keystore2 super-encrypts before storing would hide the
+ * marker, but the attestation keys these apps create are not auth-bound, so their blobs are stored
+ * as the TA returned them.)
  *
- * The keybox that rooted a key is recovered from its stored certificate chain: a key is attributed to
- * a keybox only when its chain embeds that keybox's WHOLE signing chain (root through batch), matched
- * against [KeyboxInspector.signerChains]. Whether the leaf itself was batch-issued (the generated /
- * patched distinction) is a separate check against [KeyboxInspector.signerIndex].
+ * The keybox that rooted a key is recovered from its stored certificate chain: a key is attributed
+ * to a keybox only when its chain embeds that keybox's WHOLE signing chain (root through batch),
+ * matched against [KeyboxInspector.signerChains]. Whether the leaf itself was batch-issued (the
+ * generated / patched distinction) is a separate check against [KeyboxInspector.signerIndex].
  *
- * Reads never touch the live file: keystore2 owns persistent.sqlite in WAL mode under a live lock, so we
- * snapshot it (+ its -wal / -shm siblings) into a private dir under [Const.DATA_DIR], open the COPY
- * read-only, and delete the snapshot. Deletion is the one write path and DOES open the live database —
- * safely, because it is already a WAL database that supports a second writer (we set a busy timeout and
- * only ever remove rows we re-verify as our own target-app keys). Root can read and write the
- * keystore-owned files.
+ * Reads never touch the live file: keystore2 owns persistent.sqlite in WAL mode under a live lock,
+ * so we snapshot it (+ its -wal / -shm siblings) into a private dir under [Const.DATA_DIR], open
+ * the COPY read-only, and delete the snapshot. Deletion is the one write path and DOES open the
+ * live database — safely, because it is already a WAL database that supports a second writer (we
+ * set a busy timeout and only ever remove rows we re-verify as our own target-app keys). Root can
+ * read and write the keystore-owned files.
  *
  * Schema (AOSP system/security/keystore2/src/database.rs):
  * ```
@@ -63,22 +64,30 @@ object KeystoreDb {
     private const val ATTEST_EXT_OID = "1.3.6.1.4.1.11129.2.1.17"
 
     // keystore2's SubComponentType (database.rs): the blobentry.subcomponent_type of a key's leaf
-    // certificate and of the rest of its chain. KEY_BLOB is 0; these two are what re-rooting rewrites.
+    // certificate and of the rest of its chain. KEY_BLOB is 0; these two are what re-rooting
+    // rewrites.
     private const val SUBCOMPONENT_CERT = 1 // the leaf certificate
     private const val SUBCOMPONENT_CERT_CHAIN = 2 // the rest of the chain
 
     // keystore2 stores key parameters in `keyparameter(tag, data)`. Tag::PURPOSE is the KeyMint tag
-    // enum (TagType.ENUM_REP<<28 | 1) and KeyPurpose::ATTEST_KEY is 7, so a row (PURPOSE, 7) marks an
-    // attestation key.
+    // enum (TagType.ENUM_REP<<28 | 1) and KeyPurpose::ATTEST_KEY is 7, so a row (PURPOSE, 7) marks
+    // an attestation key.
     private const val PURPOSE_TAG = 536870913 // 0x20000001
     private const val ATTEST_KEY_PURPOSE = 7
 
-    // KeyPurpose enum values keystore2 stores under Tag::PURPOSE, mapped to display labels. Value 4 is
-    // unused by KeyMint; an unknown value falls back to its number so nothing is silently dropped.
-    private val PURPOSE_LABELS = mapOf(
-        0 to "Encrypt", 1 to "Decrypt", 2 to "Sign", 3 to "Verify",
-        5 to "WrapKey", 6 to "AgreeKey", 7 to "AttestKey",
-    )
+    // KeyPurpose enum values keystore2 stores under Tag::PURPOSE, mapped to display labels. Value 4
+    // is unused by KeyMint; an unknown value falls back to its number so nothing is silently
+    // dropped.
+    private val PURPOSE_LABELS =
+        mapOf(
+            0 to "Encrypt",
+            1 to "Decrypt",
+            2 to "Sign",
+            3 to "Verify",
+            5 to "WrapKey",
+            6 to "AgreeKey",
+            7 to "AttestKey",
+        )
 
     // Plausible epoch-millis window (~2014-05 .. ~2128), used to spot a creation-date metadata cell
     // without depending on the release-specific tag number.
@@ -91,13 +100,13 @@ object KeystoreDb {
     fun available(): Boolean = Build.VERSION.SDK_INT >= 31
 
     /**
-     * The live keys THIS MODULE minted for the given apps, read from a snapshot of keystore2's database.
-     * [targets] maps each target app uid (keystore2's `namespace`) to its package name; the map's keys are
-     * the uids we query for, its values decorate each returned row. Yields one JSON object per key:
-     * `{ id, alias, uid, package, state, created?, keybox? }` — `id` is keyentry.id (the handle
-     * [deleteKeys] removes by), `keybox` is the signing keybox filename when the chain could be
-     * attributed. Returns an empty list on any failure, when [available] is false, or when [targets] is
-     * empty — never throws.
+     * The live keys THIS MODULE minted for the given apps, read from a snapshot of keystore2's
+     * database. [targets] maps each target app uid (keystore2's `namespace`) to its package name;
+     * the map's keys are the uids we query for, its values decorate each returned row. Yields one
+     * JSON object per key: `{ id, alias, uid, package, state, created?, keybox? }` — `id` is
+     * keyentry.id (the handle [deleteKeys] removes by), `keybox` is the signing keybox filename
+     * when the chain could be attributed. Returns an empty list on any failure, when [available] is
+     * false, or when [targets] is empty — never throws.
      */
     @Synchronized
     fun listKeys(targets: Map<Int, String>): List<JSONObject> {
@@ -128,15 +137,17 @@ object KeystoreDb {
         }
     }
 
-    /** One pre-existing key to re-attest: its owning app uid, keyentry id, and leaf certificate DER. */
+    /**
+     * One pre-existing key to re-attest: its owning app uid, keyentry id, and leaf certificate DER.
+     */
     data class AttestedKey(val uid: Int, val id: Long, val leaf: ByteArray)
 
     /**
-     * Every stored key of the given app [uids] that carries a hardware attestation leaf and is NOT one
-     * of ours (no marker blob) — the pre-existing keys whose attestation the daemon re-roots to the
-     * keybox on a config push. One snapshot read for all uids; best effort, never throws. Our own
-     * generation keys (marker blobs) are skipped, and keys with no attestation extension (a plain key
-     * generated without a challenge) have nothing to re-root and are skipped too.
+     * Every stored key of the given app [uids] that carries a hardware attestation leaf and is NOT
+     * one of ours (no marker blob) — the pre-existing keys whose attestation the daemon re-roots to
+     * the keybox on a config push. One snapshot read for all uids; best effort, never throws. Our
+     * own generation keys (marker blobs) are skipped, and keys with no attestation extension (a
+     * plain key generated without a challenge) have nothing to re-root and are skipped too.
      */
     @Synchronized
     fun attestedKeys(uids: Set<Int>): List<AttestedKey> {
@@ -190,12 +201,13 @@ object KeystoreDb {
                     skippedNoAttestation++ // no attestation extension to re-root
                     continue
                 }
-                // Skip keys already rooted in a currently-configured keybox (ones we've patched, or a
-                // generation key's chain): re-signing them would be redundant. Matching requires the
-                // WHOLE keybox chain to be embedded, so a genuine device key that only shares Google's
-                // real root/intermediate is NOT matched and does get re-rooted. A key rooted in a keybox
-                // that is no longer configured (e.g. after a keybox swap) is likewise unmatched, so it is
-                // re-signed under the new keybox — the re-attest self-heals a rotation.
+                // Skip keys already rooted in a currently-configured keybox (ones we've patched, or
+                // a generation key's chain): re-signing them would be redundant. Matching requires
+                // the WHOLE keybox chain to be embedded, so a genuine device key that only shares
+                // Google's real root/intermediate is NOT matched and does get re-rooted. A key
+                // rooted in a keybox that is no longer configured (e.g. after a keybox swap) is
+                // likewise unmatched, so it is re-signed under the new keybox — the re-attest
+                // self-heals a rotation.
                 if (matchKeybox(certs, signerChains) != null) {
                     skippedRooted++
                     continue
@@ -221,14 +233,15 @@ object KeystoreDb {
     }
 
     /**
-     * Remove the given keys. [ids] are keyentry.id values from [listKeys]; each is first re-verified
-     * (read-only, against a snapshot) to belong to a [targets] app, so a stray or malicious id can never
-     * take out a system/banking key. The page lists every target-app key — ours and pre-existing real
-     * ones — and any of them may be deleted (the target apps are the user's chosen spoofing targets), so
-     * this is scoped to the target uids but NOT to our marker. Each eligible key is deleted as its owning
-     * app (via [Keystore2Service.deleteKeyByIdAsUid], which seteuid's so keystore2 accepts it and evicts
-     * its cache); only a key that owner-delete cannot remove falls back to a direct database delete, which
-     * is logged and takes effect once keystore2 next restarts. Returns the number removed; 0 on failure.
+     * Remove the given keys. [ids] are keyentry.id values from [listKeys]; each is first
+     * re-verified (read-only, against a snapshot) to belong to a [targets] app, so a stray or
+     * malicious id can never take out a system/banking key. The page lists every target-app key —
+     * ours and pre-existing real ones — and any of them may be deleted (the target apps are the
+     * user's chosen spoofing targets), so this is scoped to the target uids but NOT to our marker.
+     * Each eligible key is deleted as its owning app (via [Keystore2Service.deleteKeyByIdAsUid],
+     * which seteuid's so keystore2 accepts it and evicts its cache); only a key that owner-delete
+     * cannot remove falls back to a direct database delete, which is logged and takes effect once
+     * keystore2 next restarts. Returns the number removed; 0 on failure.
      */
     fun deleteKeys(targets: Set<Int>, ids: List<Long>): Int {
         if (!available() || ids.isEmpty() || targets.isEmpty()) return 0
@@ -236,7 +249,9 @@ object KeystoreDb {
         val eligible = filterTargetIds(targets, ids)
         val refused = ids.size - eligible.size
         if (refused > 0)
-            SystemLogger.warning("KeystoreDb.deleteKeys: skipping $refused id(s) that aren't target-app keys")
+            SystemLogger.warning(
+                "KeystoreDb.deleteKeys: skipping $refused id(s) that aren't target-app keys"
+            )
         if (eligible.isEmpty()) return 0
 
         var deleted = 0
@@ -257,27 +272,31 @@ object KeystoreDb {
     }
 
     /**
-     * Delete every FOREIGN (not-ours) ATTEST_KEY-purpose key owned by a [targets] app. Called once at
-     * daemon start so a stale attestation key — one made before the app was covered (real, unlocked) or
-     * under a previous build — is removed and the app is forced to regenerate it, which now always
-     * goes through the TA's generation path (we hold the private key, so leaves it later attests get
-     * root-of-trust patched). Our OWN marked attest keys are left alone: they are already keybox-rooted
-     * and we hold their key. Scoped hard to target uids AND ATTEST_KEY purpose AND not-our-marker, so
-     * it can never touch a system or banking key. Deletes each as its owning app first (so keystore2
-     * evicts its cache); only a key that owner-delete cannot remove falls back to a direct database
-     * delete. Returns the number that needed the database fallback — those require a keystore2 restart
-     * to take effect, since a raw database delete does not evict keystore2's cache; 0 otherwise.
+     * Delete every FOREIGN (not-ours) ATTEST_KEY-purpose key owned by a [targets] app. Called once
+     * at daemon start so a stale attestation key — one made before the app was covered (real,
+     * unlocked) or under a previous build — is removed and the app is forced to regenerate it,
+     * which now always goes through the TA's generation path (we hold the private key, so leaves it
+     * later attests get root-of-trust patched). Our OWN marked attest keys are left alone: they are
+     * already keybox-rooted and we hold their key. Scoped hard to target uids AND ATTEST_KEY
+     * purpose AND not-our-marker, so it can never touch a system or banking key. Deletes each as
+     * its owning app first (so keystore2 evicts its cache); only a key that owner-delete cannot
+     * remove falls back to a direct database delete. Returns the number that needed the database
+     * fallback — those require a keystore2 restart to take effect, since a raw database delete does
+     * not evict keystore2's cache; 0 otherwise.
      */
     fun deleteTargetAttestKeys(targets: Set<Int>): Int {
         if (!available() || targets.isEmpty()) return 0
         val keys = targetAttestKeyIds(targets)
         if (keys.isEmpty()) return 0
-        SystemLogger.info("KeystoreDb.deleteTargetAttestKeys: ${keys.size} attest key(s) to clear across ${targets.size} target uid(s)")
+        SystemLogger.info(
+            "KeystoreDb.deleteTargetAttestKeys: ${keys.size} attest key(s) to clear across ${targets.size} target uid(s)"
+        )
 
         var viaOwner = 0
         val dbFallback = ArrayList<Long>()
         for ((id, uid) in keys) {
-            if (Keystore2Service.deleteKeyByIdAsUid(id, uid) == 0) viaOwner++ else dbFallback.add(id)
+            if (Keystore2Service.deleteKeyByIdAsUid(id, uid) == 0) viaOwner++
+            else dbFallback.add(id)
         }
         var viaDb = 0
         if (dbFallback.isNotEmpty()) {
@@ -294,7 +313,10 @@ object KeystoreDb {
         return viaDb
     }
 
-    /** (keyentry id, owner uid) for each ATTEST_KEY-purpose, not-ours key of a [targets] app (snapshot read). */
+    /**
+     * (keyentry id, owner uid) for each ATTEST_KEY-purpose, not-ours key of a [targets] app
+     * (snapshot read).
+     */
     @Synchronized
     private fun targetAttestKeyIds(targets: Set<Int>): List<Pair<Long, Int>> {
         val src = File(KEYSTORE2_DB)
@@ -329,7 +351,10 @@ object KeystoreDb {
         }
     }
 
-    /** Live-DB re-check that [id] is a FOREIGN (not-our-marker) ATTEST_KEY-purpose key of a [targets] app. */
+    /**
+     * Live-DB re-check that [id] is a FOREIGN (not-our-marker) ATTEST_KEY-purpose key of a
+     * [targets] app.
+     */
     private fun isTargetAttestKey(db: SQLiteDatabase, id: Long, targets: Set<Int>): Boolean {
         val uids = targets.joinToString(",")
         return db.rawQuery(
@@ -343,9 +368,12 @@ object KeystoreDb {
             .use { it.moveToNext() }
     }
 
-    /** The subset of [ids] that, right now, belong to a [targets] app, each with its owner uid (snapshot
-     * read). Marker-agnostic: pre-existing real keys are deletable too, but the target-uid scope still
-     * bars non-target keys. The uid lets the delete run as the key's owner so keystore2 accepts it. */
+    /**
+     * The subset of [ids] that, right now, belong to a [targets] app, each with its owner uid
+     * (snapshot read). Marker-agnostic: pre-existing real keys are deletable too, but the
+     * target-uid scope still bars non-target keys. The uid lets the delete run as the key's owner
+     * so keystore2 accepts it.
+     */
     @Synchronized
     private fun filterTargetIds(targets: Set<Int>, ids: List<Long>): List<Pair<Long, Int>> {
         val src = File(KEYSTORE2_DB)
@@ -379,11 +407,12 @@ object KeystoreDb {
     }
 
     /**
-     * Fallback delete: remove the keys directly from keystore2's LIVE database (WAL, matching keystore2's
-     * mode, with a busy wait), clearing every child row — blobentry + its blobmetadata, keyparameter,
-     * keymetadata, grant, … — before the keyentry. [ids] are already verified eligible; each is re-checked
-     * against the live DB as a last guard. This write may itself be denied by SELinux for our context, in
-     * which case nothing is removed and the failure is logged. Returns the number of keyentry rows deleted.
+     * Fallback delete: remove the keys directly from keystore2's LIVE database (WAL, matching
+     * keystore2's mode, with a busy wait), clearing every child row — blobentry + its blobmetadata,
+     * keyparameter, keymetadata, grant, … — before the keyentry. [ids] are already verified
+     * eligible; each is re-checked against the live DB as a last guard. This write may itself be
+     * denied by SELinux for our context, in which case nothing is removed and the failure is
+     * logged. Returns the number of keyentry rows deleted.
      */
     private fun deleteFromDatabase(ids: List<Long>, guard: (SQLiteDatabase, Long) -> Boolean): Int {
         val src = File(KEYSTORE2_DB)
@@ -426,9 +455,14 @@ object KeystoreDb {
             } finally {
                 db.endTransaction()
             }
-            SystemLogger.info("KeystoreDb: direct database delete removed $deleted of ${ids.size} key(s)")
+            SystemLogger.info(
+                "KeystoreDb: direct database delete removed $deleted of ${ids.size} key(s)"
+            )
         } catch (e: Throwable) {
-            SystemLogger.warning("KeystoreDb.deleteFromDatabase failed (SELinux may deny writing keystore2's DB)", e)
+            SystemLogger.warning(
+                "KeystoreDb.deleteFromDatabase failed (SELinux may deny writing keystore2's DB)",
+                e,
+            )
         } finally {
             try {
                 db?.close()
@@ -437,20 +471,22 @@ object KeystoreDb {
         return deleted
     }
 
-    /** One pre-existing key's re-rooted certificates: its keyentry id, the leaf DER, and the DER
-     *  concatenation of the rest of the chain (empty when the leaf is the whole chain). */
+    /**
+     * One pre-existing key's re-rooted certificates: its keyentry id, the leaf DER, and the DER
+     * concatenation of the rest of the chain (empty when the leaf is the whole chain).
+     */
     data class CertUpdate(val id: Long, val leaf: ByteArray, val chain: ByteArray)
 
     /**
-     * Fallback for [ReAttest]: write re-rooted certificates straight into keystore2's LIVE database when
-     * the owner-as-euid API refused the update. Mirrors [deleteFromDatabase] — same WAL open, busy wait,
-     * transaction, and per-id target-app re-check — but it REPLACES the key's stored certificates instead
-     * of removing the key. It reproduces keystore2's own set_blob for a certificate (AOSP
-     * database.rs set_blob_internal): delete any existing blobentry of that subcomponent type for the key
-     * (and any blobmetadata keyed off it), then insert the new one — [SUBCOMPONENT_CERT] for the leaf,
-     * [SUBCOMPONENT_CERT_CHAIN] for the rest. The key blob is never touched. Unlike the delete fallback,
-     * this does not restart keystore2. Returns the number of keys updated; 0 on failure (e.g. SELinux
-     * denies writing keystore2's DB).
+     * Fallback for [ReAttest]: write re-rooted certificates straight into keystore2's LIVE database
+     * when the owner-as-euid API refused the update. Mirrors [deleteFromDatabase] — same WAL open,
+     * busy wait, transaction, and per-id target-app re-check — but it REPLACES the key's stored
+     * certificates instead of removing the key. It reproduces keystore2's own set_blob for a
+     * certificate (AOSP database.rs set_blob_internal): delete any existing blobentry of that
+     * subcomponent type for the key (and any blobmetadata keyed off it), then insert the new one —
+     * [SUBCOMPONENT_CERT] for the leaf, [SUBCOMPONENT_CERT_CHAIN] for the rest. The key blob is
+     * never touched. Unlike the delete fallback, this does not restart keystore2. Returns the
+     * number of keys updated; 0 on failure (e.g. SELinux denies writing keystore2's DB).
      */
     fun updateSubcomponents(targets: Set<Int>, updates: List<CertUpdate>): Int {
         if (!available() || updates.isEmpty() || targets.isEmpty()) return 0
@@ -474,8 +510,9 @@ object KeystoreDb {
             try {
                 for (u in updates) {
                     if (!isTargetKey(db, u.id, targets)) continue
-                    // Clear the key's existing leaf + chain blobs (and any blobmetadata keyed off them),
-                    // then insert the re-rooted pair — exactly what keystore2's set_blob does for a cert.
+                    // Clear the key's existing leaf + chain blobs (and any blobmetadata keyed off
+                    // them), then insert the re-rooted pair — exactly what keystore2's set_blob
+                    // does for a cert.
                     if (hasBlobMeta) {
                         db.execSQL(
                             "DELETE FROM blobmetadata WHERE blobentryid IN " +
@@ -489,25 +526,38 @@ object KeystoreDb {
                         "keyentryid=? AND subcomponent_type IN ($SUBCOMPONENT_CERT, $SUBCOMPONENT_CERT_CHAIN)",
                         arrayOf(u.id.toString()),
                     )
-                    db.insert("blobentry", null, ContentValues().apply {
-                        put("subcomponent_type", SUBCOMPONENT_CERT)
-                        put("keyentryid", u.id)
-                        put("blob", u.leaf)
-                    })
-                    db.insert("blobentry", null, ContentValues().apply {
-                        put("subcomponent_type", SUBCOMPONENT_CERT_CHAIN)
-                        put("keyentryid", u.id)
-                        put("blob", u.chain)
-                    })
+                    db.insert(
+                        "blobentry",
+                        null,
+                        ContentValues().apply {
+                            put("subcomponent_type", SUBCOMPONENT_CERT)
+                            put("keyentryid", u.id)
+                            put("blob", u.leaf)
+                        },
+                    )
+                    db.insert(
+                        "blobentry",
+                        null,
+                        ContentValues().apply {
+                            put("subcomponent_type", SUBCOMPONENT_CERT_CHAIN)
+                            put("keyentryid", u.id)
+                            put("blob", u.chain)
+                        },
+                    )
                     updated++
                 }
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()
             }
-            SystemLogger.info("KeystoreDb: direct database write re-rooted $updated of ${updates.size} key(s)")
+            SystemLogger.info(
+                "KeystoreDb: direct database write re-rooted $updated of ${updates.size} key(s)"
+            )
         } catch (e: Throwable) {
-            SystemLogger.warning("KeystoreDb.updateSubcomponents failed (SELinux may deny writing keystore2's DB)", e)
+            SystemLogger.warning(
+                "KeystoreDb.updateSubcomponents failed (SELinux may deny writing keystore2's DB)",
+                e,
+            )
         } finally {
             try {
                 db?.close()
@@ -534,7 +584,9 @@ object KeystoreDb {
         return dest
     }
 
-    /** Log the discovered table set and the keyentry DDL once, to keep the assumptions auditable. */
+    /**
+     * Log the discovered table set and the keyentry DDL once, to keep the assumptions auditable.
+     */
     private fun logSchemaOnce(db: SQLiteDatabase) {
         if (schemaLogged) return
         schemaLogged = true
@@ -556,8 +608,8 @@ object KeystoreDb {
 
     private fun query(db: SQLiteDatabase, targets: Map<Int, String>): List<JSONObject> {
         if (!tableExists(db, "blobentry")) {
-            // Without blobentry we cannot tell our keys from anyone else's, and listing every app key
-            // is exactly what we must not do — so surface nothing.
+            // Without blobentry we cannot tell our keys from anyone else's, and listing every app
+            // key is exactly what we must not do — so surface nothing.
             SystemLogger.warning("KeystoreDb: no blobentry table; cannot identify our keys")
             return emptyList()
         }
@@ -592,8 +644,8 @@ object KeystoreDb {
                 val o =
                     JSONObject()
                         // keystore2 assigns keyentry.id as a random 64-bit value, which overflows a
-                        // JS Number (2^53); carry it as a string so the WebUI round-trips it losslessly
-                        // and delete-by-id matches the same row this listing returned.
+                        // JS Number (2^53); carry it as a string so the WebUI round-trips it
+                        // losslessly and delete-by-id matches the same row this listing returned.
                         .put("id", id.toString())
                         .put("alias", c.getString(iAlias))
                         .put("uid", uid)
@@ -606,49 +658,57 @@ object KeystoreDb {
         }
 
         if (rows.isNotEmpty()) attributeKeys(db, rows, ids)
-        SystemLogger.info("KeystoreDb: ${rows.size} attested keys across ${targets.size} target uids")
+        SystemLogger.info(
+            "KeystoreDb: ${rows.size} attested keys across ${targets.size} target uids"
+        )
         return rows
     }
 
     /**
-     * Fill in each key's metadata that lives in its stored certificate chain: the signing algorithm of
-     * the generated key (the leaf certificate's public key) and the keybox that rooted it (the keybox
-     * whose whole chain is embedded, via [KeyboxInspector.signerChains]). Fetches every blob of
-     * the listed keys in one pass; rows and [ids] are index-aligned. Best effort — a key whose certs
-     * don't parse simply gets neither field. Also attaches a "class" naming how the chain is
+     * Fill in each key's metadata that lives in its stored certificate chain: the signing algorithm
+     * of the generated key (the leaf certificate's public key) and the keybox that rooted it (the
+     * keybox whose whole chain is embedded, via [KeyboxInspector.signerChains]). Fetches every blob
+     * of the listed keys in one pass; rows and [ids] are index-aligned. Best effort — a key whose
+     * certs don't parse simply gets neither field. Also attaches a "class" naming how the chain is
      * keybox-rooted (generated / delegated / patched / untouched), always set for every row. Also
-     * attaches "purposes", the key's KeyPurpose labels (from its Tag::PURPOSE rows), when it has any.
+     * attaches "purposes", the key's KeyPurpose labels (from its Tag::PURPOSE rows), when it has
+     * any.
      */
     private fun attributeKeys(db: SQLiteDatabase, rows: List<JSONObject>, ids: List<Long>) {
         val blobsById = HashMap<Long, MutableList<ByteArray>>()
         val idList = ids.joinToString(",")
         try {
-            db.rawQuery("SELECT keyentryid, blob FROM blobentry WHERE keyentryid IN ($idList)", null).use { c ->
-                while (c.moveToNext()) {
-                    val kid = c.getLong(0)
-                    val blob = c.getBlob(1) ?: continue
-                    blobsById.getOrPut(kid) { ArrayList() }.add(blob)
+            db.rawQuery(
+                    "SELECT keyentryid, blob FROM blobentry WHERE keyentryid IN ($idList)",
+                    null,
+                )
+                .use { c ->
+                    while (c.moveToNext()) {
+                        val kid = c.getLong(0)
+                        val blob = c.getBlob(1) ?: continue
+                        blobsById.getOrPut(kid) { ArrayList() }.add(blob)
+                    }
                 }
-            }
         } catch (e: Exception) {
             SystemLogger.warning("KeystoreDb: could not read blobs for key attribution", e)
             return
         }
 
-        // keystore2 stores each key's purposes as repeated PURPOSE rows in keyparameter; read them all
-        // in one batched pass, like the blobs above, so every row can report what its key may be used
-        // for. Best effort: a missing table or a read error just leaves the purposes off.
+        // keystore2 stores each key's purposes as repeated PURPOSE rows in keyparameter; read them
+        // all in one batched pass, like the blobs above, so every row can report what its key may
+        // be used for. Best effort: a missing table or a read error just leaves the purposes off.
         val purposesById = HashMap<Long, MutableList<Int>>()
         if (tableExists(db, "keyparameter")) {
             try {
                 db.rawQuery(
-                    "SELECT keyentryid, data FROM keyparameter WHERE tag=$PURPOSE_TAG AND keyentryid IN ($idList)",
-                    null,
-                ).use { c ->
-                    while (c.moveToNext()) {
-                        purposesById.getOrPut(c.getLong(0)) { ArrayList() }.add(c.getInt(1))
+                        "SELECT keyentryid, data FROM keyparameter WHERE tag=$PURPOSE_TAG AND keyentryid IN ($idList)",
+                        null,
+                    )
+                    .use { c ->
+                        while (c.moveToNext()) {
+                            purposesById.getOrPut(c.getLong(0)) { ArrayList() }.add(c.getInt(1))
+                        }
                     }
-                }
             } catch (e: Exception) {
                 SystemLogger.warning("KeystoreDb: could not read key purposes", e)
             }
@@ -666,12 +726,15 @@ object KeystoreDb {
             val keybox = matchKeybox(certs, signerChains)
             // Classify the key by how (and whether) its chain is keybox-rooted. A generated key
             // carries our marker and its leaf is signed directly by a keybox batch; a delegated key
-            // is marked but signed by our attestation key, keybox-rooted only through a deeper cert;
+            // is marked but signed by our attestation key, keybox-rooted only through a deeper
+            // cert;
             // a patched key is a real hardware blob whose LEAF we re-rooted onto a keybox batch.
-            // Patched keys the leaf must be batch-issued: a genuine untouched key shares Google's real
-            // root/intermediate with the keybox, so matching any chain cert would misclassify it.
+            // Patched keys the leaf must be batch-issued: a genuine untouched key shares Google's
+            // real root/intermediate with the keybox, so matching any chain cert would misclassify
+            // it.
             val leafKeyboxIssued =
-                leaf != null && signers[KeyboxInspector.canonicalDn(leaf.issuerX500Principal)] != null
+                leaf != null &&
+                    signers[KeyboxInspector.canonicalDn(leaf.issuerX500Principal)] != null
             val cls =
                 when {
                     marked && leafKeyboxIssued -> "generated"
@@ -680,11 +743,11 @@ object KeystoreDb {
                     else -> "untouched"
                 }
             rows[i].put("class", cls)
-            // Only attribute a keybox to a key we actually rooted through it. matchKeybox() also fires
-            // on a genuine untouched key that shares Google's real root/intermediate with an imported
-            // Google keybox, which would show a Keybox line on an "Untouched" row — a contradiction. A
-            // patched key's keybox is its leaf issuer; a delegated key's is a deeper chain cert; an
-            // untouched key has none of ours, so drop the coincidental match.
+            // Only attribute a keybox to a key we actually rooted through it. matchKeybox() also
+            // fires on a genuine untouched key that shares Google's real root/intermediate with an
+            // imported Google keybox, which would show a Keybox line on an "Untouched" row — a
+            // contradiction. A patched key's keybox is its leaf issuer; a delegated key's is a
+            // deeper chain cert; an untouched key has none of ours, so drop the coincidental match.
             if (cls != "untouched") keybox?.let { rows[i].put("keybox", it) }
             purposesById[ids[i]]?.let { vals ->
                 val labels = vals.toSortedSet().map { PURPOSE_LABELS[it] ?: it.toString() }
@@ -693,7 +756,10 @@ object KeystoreDb {
         }
     }
 
-    /** Every X.509 cert across a key's non-marker blobs (a blob may hold one cert or a concatenated chain). */
+    /**
+     * Every X.509 cert across a key's non-marker blobs (a blob may hold one cert or a concatenated
+     * chain).
+     */
     private fun parseCerts(blobs: List<ByteArray>?, cf: CertificateFactory): List<X509Certificate> {
         if (blobs == null) return emptyList()
         val out = ArrayList<X509Certificate>()
@@ -708,27 +774,31 @@ object KeystoreDb {
         return out
     }
 
-    /** The end-entity (the generated key's cert): the one whose subject is no other cert's issuer. */
+    /**
+     * The end-entity (the generated key's cert): the one whose subject is no other cert's issuer.
+     */
     private fun leafOf(certs: List<X509Certificate>): X509Certificate? {
         if (certs.isEmpty()) return null
         val issuers = certs.map { KeyboxInspector.canonicalDn(it.issuerX500Principal) }.toHashSet()
-        return certs.firstOrNull { KeyboxInspector.canonicalDn(it.subjectX500Principal) !in issuers }
-            ?: certs.first()
+        return certs.firstOrNull {
+            KeyboxInspector.canonicalDn(it.subjectX500Principal) !in issuers
+        } ?: certs.first()
     }
 
     /**
      * The keybox that rooted this key's chain: the keybox whose ENTIRE signing chain — root, any
-     * intermediate, and the batch signer — is embedded in the key's certificates. Matching the whole
-     * chain (not just one cert) is what tells a key we re-rooted onto a keybox apart from a genuine
-     * device key that merely shares Google's real root/intermediate with an imported Google keybox.
-     * Returns the first keybox chain fully contained in [certs], or null.
+     * intermediate, and the batch signer — is embedded in the key's certificates. Matching the
+     * whole chain (not just one cert) is what tells a key we re-rooted onto a keybox apart from a
+     * genuine device key that merely shares Google's real root/intermediate with an imported Google
+     * keybox. Returns the first keybox chain fully contained in [certs], or null.
      */
     private fun matchKeybox(
         certs: List<X509Certificate>,
         signerChains: List<Pair<String, Set<String>>>,
     ): String? {
         if (certs.isEmpty() || signerChains.isEmpty()) return null
-        val present = certs.mapTo(HashSet<String>()) { KeyboxInspector.canonicalDn(it.subjectX500Principal) }
+        val present =
+            certs.mapTo(HashSet<String>()) { KeyboxInspector.canonicalDn(it.subjectX500Principal) }
         for ((name, chain) in signerChains) {
             if (present.containsAll(chain)) return name
         }
@@ -751,7 +821,9 @@ object KeystoreDb {
         return true
     }
 
-    /** True iff [id] belongs to a [targets] app (the live-DB delete precondition; marker-agnostic). */
+    /**
+     * True iff [id] belongs to a [targets] app (the live-DB delete precondition; marker-agnostic).
+     */
     private fun isTargetKey(db: SQLiteDatabase, id: Long, targets: Set<Int>): Boolean {
         val uids = targets.joinToString(",")
         return db.rawQuery(
@@ -761,7 +833,9 @@ object KeystoreDb {
             .use { it.moveToNext() }
     }
 
-    /** Names of every table that has a `keyentryid` column — the child rows a key delete must clear. */
+    /**
+     * Names of every table that has a `keyentryid` column — the child rows a key delete must clear.
+     */
     private fun tablesWithColumn(db: SQLiteDatabase, column: String): List<String> {
         val out = ArrayList<String>()
         val tables = ArrayList<String>()
@@ -788,7 +862,6 @@ object KeystoreDb {
     private fun quoteIdent(name: String): String = "\"" + name.replace("\"", "\"\"") + "\""
 
     private fun tableExists(db: SQLiteDatabase, name: String): Boolean =
-        db.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", arrayOf(name)).use {
-            it.moveToNext()
-        }
+        db.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", arrayOf(name))
+            .use { it.moveToNext() }
 }

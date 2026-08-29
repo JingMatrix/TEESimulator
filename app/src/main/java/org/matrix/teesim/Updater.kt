@@ -8,10 +8,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Canary self-update. CI publishes rolling `canary-<code>` GitHub prereleases (keeping the
- * newest five) with the Release/Debug module zips as assets. The daemon — which has root and
- * network — checks GitHub, and on request downloads a build and hands it to the root manager
- * to flash, so the WebUI needs neither a GitHub account nor external network access.
+ * Canary self-update. CI publishes rolling `canary-<code>` GitHub prereleases (keeping the newest
+ * five) with the Release/Debug module zips as assets. The daemon — which has root and network —
+ * checks GitHub, and on request downloads a build and hands it to the root manager to flash, so the
+ * WebUI needs neither a GitHub account nor external network access.
  */
 object Updater {
 
@@ -35,7 +35,9 @@ object Updater {
         return 0
     }
 
-    /** The installed module's version name, e.g. "v4.0 (17-abc1234-debug)", from its module.prop. */
+    /**
+     * The installed module's version name, e.g. "v4.0 (17-abc1234-debug)", from its module.prop.
+     */
     fun currentVersion(): String {
         for (p in
             listOf(
@@ -87,25 +89,24 @@ object Updater {
         return try {
             val cur = currentCode()
             val newest = newestCanary(JSONArray(httpGet(API)))
-            val latest =
-                newest?.let { (code, r) ->
-                    val assets = JSONArray()
-                    val ja = r.optJSONArray("assets") ?: JSONArray()
-                    for (i in 0 until ja.length()) {
-                        val a = ja.getJSONObject(i)
-                        assets.put(
-                            JSONObject().put("name", a.optString("name")).put("size", a.optLong("size"))
-                        )
-                    }
-                    JSONObject()
-                        .put("code", code)
-                        .put("tag", r.optString("tag_name"))
-                        .put("name", r.optString("name"))
-                        .put("notes", r.optString("body"))
-                        .put("htmlUrl", r.optString("html_url"))
-                        .put("commit", r.optString("target_commitish"))
-                        .put("assets", assets)
+            val latest = newest?.let { (code, r) ->
+                val assets = JSONArray()
+                val ja = r.optJSONArray("assets") ?: JSONArray()
+                for (i in 0 until ja.length()) {
+                    val a = ja.getJSONObject(i)
+                    assets.put(
+                        JSONObject().put("name", a.optString("name")).put("size", a.optLong("size"))
+                    )
                 }
+                JSONObject()
+                    .put("code", code)
+                    .put("tag", r.optString("tag_name"))
+                    .put("name", r.optString("name"))
+                    .put("notes", r.optString("body"))
+                    .put("htmlUrl", r.optString("html_url"))
+                    .put("commit", r.optString("target_commitish"))
+                    .put("assets", assets)
+            }
             JSONObject()
                 .put("ok", true)
                 .put("currentCode", cur)
@@ -174,7 +175,9 @@ object Updater {
                 val out = p.inputStream.bufferedReader().readText()
                 if (p.waitFor(120, TimeUnit.SECONDS) && p.exitValue() == 0) {
                     SystemLogger.info("Updater: flashed via ${cmd[0]}")
-                    return JSONObject().put("ok", true).put("message", "Installed — reboot to apply.")
+                    return JSONObject()
+                        .put("ok", true)
+                        .put("message", "Installed — reboot to apply.")
                 }
                 last = "${cmd[0]}: ${out.trim()}"
             } catch (e: Exception) {

@@ -1,0 +1,59 @@
+TEESimulator
+Copyright (C) 2025-2026 JingMatrix and contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. The full text is in LICENSE.
+
+
+Third-party components
+======================
+
+Everything under third_party/ is a git submodule, pinned to an upstream commit
+and unmodified in git (see third_party/README.md for the one build-time patch,
+which is applied to a working tree and never committed).
+
+1. third_party/keymint — https://android.googlesource.com/platform/system/keymint
+   AOSP's reference KeyMint TA, embedded by rust/teesim-km.
+   Apache License 2.0.
+
+2. third_party/interfaces — https://android.googlesource.com/platform/hardware/interfaces
+   The KeyMint / secureclock / sharedsecret AIDL, from which the keymint
+   interceptor's NDK stubs are generated.
+   Apache License 2.0.
+
+3. third_party/frameworks-native — https://android.googlesource.com/platform/frameworks/native
+   libbinder: the NDK binder headers the keymint interceptor compiles against,
+   and the C++ binder headers used by the Android 10/11 interceptor.
+   Apache License 2.0.
+
+4. third_party/boringssl — https://boringssl.googlesource.com/boringssl
+   The crypto library, linked statically into the keystore interceptor on
+   Android 10/11 and used for the Rust TA's openssl-sys bindings.
+   Apache License 2.0, with portions under the OpenSSL and ISC licenses; see
+   the submodule's own LICENSE.
+
+5. third_party/lsplt — https://github.com/JingMatrix/LSPlt
+   PLT/GOT hooking and /proc/<pid>/maps parsing, used by the injector and the
+   keymint AIBinder_transact hook. A fork of https://github.com/LSPosed/LSPlt.
+   GNU Lesser General Public License v3.0.
+
+
+Vendored sources
+================
+
+6. keystore/aosp/include/ — a curated copy of the AOSP libbinder, libutils and
+   libbase headers the Android 10/11 interceptor needs (system/core is not
+   submoduled for a dozen headers). Apache License 2.0.
+   keystore/aosp/stub_binder.cpp and keystore/aosp/stub_utils.cpp are ours: they
+   carry the matching C++ ABI so the device's own libraries resolve at runtime.
+
+7. app/src/main/java/org/matrix/teesim/RootPublicKey.kt embeds the public Google
+   attestation root keys, published by Google as part of the Android key
+   attestation documentation.
+
+8. stub/src/main/java/ declares hidden framework APIs (ActivityThread,
+   ServiceManager, IPackageManager, SystemProperties, the keystore providers)
+   as compile-only signatures matching AOSP's. They are never packaged; the
+   device supplies the real implementations at runtime. Apache License 2.0.

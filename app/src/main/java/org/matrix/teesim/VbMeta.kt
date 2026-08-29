@@ -11,17 +11,17 @@ import java.security.MessageDigest
 
 /**
  * Computes the AVB "vbmeta digest" from the on-device vbmeta partitions, reproducing what libavb's
- * `avb_slot_verify_data_calculate_vbmeta_digest()` (and `avbtool calculate_vbmeta_digest`) produce and
- * what the bootloader exposes as `ro.boot.vbmeta.digest`.
+ * `avb_slot_verify_data_calculate_vbmeta_digest()` (and `avbtool calculate_vbmeta_digest`) produce
+ * and what the bootloader exposes as `ro.boot.vbmeta.digest`.
  *
- * The digest is a plain hash over the concatenation of every vbmeta struct reached from the top-level
- * `vbmeta` partition — the main struct first, then each chained partition's struct in descriptor order,
- * depth-first — using the hash named by the top-level struct's algorithm (SHA-256 unless the algorithm
- * is one of the SHA-512 variants; an unsigned/NONE image hashes with SHA-256).
+ * The digest is a plain hash over the concatenation of every vbmeta struct reached from the
+ * top-level `vbmeta` partition — the main struct first, then each chained partition's struct in
+ * descriptor order, depth-first — using the hash named by the top-level struct's algorithm (SHA-256
+ * unless the algorithm is one of the SHA-512 variants; an unsigned/NONE image hashes with SHA-256).
  *
- * [computeDigest] is the value the harvester presents for verifiedBootHash / ro.boot.vbmeta.digest when
- * the TEE reported none: computing it ourselves is trustworthy in a way the (spoofable, often absent)
- * ro.boot.vbmeta.digest system property is not.
+ * [computeDigest] is the value the harvester presents for verifiedBootHash / ro.boot.vbmeta.digest
+ * when the TEE reported none: computing it ourselves is trustworthy in a way the (spoofable, often
+ * absent) ro.boot.vbmeta.digest system property is not.
  */
 object VbMeta {
 
@@ -29,11 +29,11 @@ object VbMeta {
     private const val FOOTER_MAGIC = "AVBf"
     private const val HEADER_SIZE = 256
     private const val FOOTER_SIZE = 64
-    private const val CHAIN_PARTITION_TAG = 4L // AVB_DESCRIPTOR_TAG_CHAIN_PARTITION (0=prop 1=hashtree 2=hash 3=cmdline 4=chain)
+    private const val CHAIN_PARTITION_TAG =
+        4L // AVB_DESCRIPTOR_TAG_CHAIN_PARTITION (0=prop 1=hashtree 2=hash 3=cmdline 4=chain)
     private const val MAX_PARTITIONS = 32 // cycle/runaway guard
 
-    private val BY_NAME_DIRS =
-        listOf("/dev/block/by-name", "/dev/block/bootdevice/by-name")
+    private val BY_NAME_DIRS = listOf("/dev/block/by-name", "/dev/block/bootdevice/by-name")
 
     data class Result(
         val algorithm: String, // "sha256" | "sha512" — the one the top-level struct selects
@@ -43,8 +43,9 @@ object VbMeta {
     )
 
     /**
-     * The AVB vbmeta digest computed from the on-device partitions, or null when they cannot be read or
-     * parsed. Never throws — a read/parse failure is logged and returns null so the caller can fall back.
+     * The AVB vbmeta digest computed from the on-device partitions, or null when they cannot be
+     * read or parsed. Never throws — a read/parse failure is logged and returns null so the caller
+     * can fall back.
      */
     fun computeDigest(): ByteArray? =
         try {
@@ -54,8 +55,10 @@ object VbMeta {
             null
         }
 
-    /** The concatenated vbmeta structs, hashed, plus the structs covered. Null when the top-level vbmeta
-     *  partition is unreadable. Logs the result so it is visible in the harvest logs. */
+    /**
+     * The concatenated vbmeta structs, hashed, plus the structs covered. Null when the top-level
+     * vbmeta partition is unreadable. Logs the result so it is visible in the harvest logs.
+     */
     fun compute(): Result? {
         val slot = DeviceProps.prop("ro.boot.slot_suffix", "")
         val top = readVbmetaBlob("vbmeta$slot") ?: return null
@@ -71,16 +74,25 @@ object VbMeta {
         walk("vbmeta", slot, top, order, blob, visited)
 
         val bytes = blob.toByteArray()
-        val digest = MessageDigest.getInstance(if (useSha512) "SHA-512" else "SHA-256").digest(bytes)
+        val digest =
+            MessageDigest.getInstance(if (useSha512) "SHA-512" else "SHA-256").digest(bytes)
         val label = if (useSha512) "sha512" else "sha256"
         SystemLogger.info(
             "vbmeta digest: computed ${digest.toHex()} ($label) over ${order.size} struct(s) " +
                 "[${order.joinToString(",")}] ${bytes.size}B"
         )
-        return Result(algorithm = label, digest = digest, partitions = order, totalBytes = bytes.size)
+        return Result(
+            algorithm = label,
+            digest = digest,
+            partitions = order,
+            totalBytes = bytes.size,
+        )
     }
 
-    /** Append [blob] (the vbmeta struct of [baseName]) then recurse into its chain partitions in order. */
+    /**
+     * Append [blob] (the vbmeta struct of [baseName]) then recurse into its chain partitions in
+     * order.
+     */
     private fun walk(
         baseName: String,
         slot: String,
@@ -133,10 +145,10 @@ object VbMeta {
     }
 
     /**
-     * The vbmeta struct bytes (header + auth block + aux block) of a partition: located via an AvbFooter
-     * in the last 64 bytes for a data partition with an appended footer (boot, system, ...), or at offset
-     * 0 for a dedicated vbmeta partition (vbmeta, vbmeta_system, ...). Null if the partition is missing,
-     * unreadable, or carries no AVB0 struct.
+     * The vbmeta struct bytes (header + auth block + aux block) of a partition: located via an
+     * AvbFooter in the last 64 bytes for a data partition with an appended footer (boot, system,
+     * ...), or at offset 0 for a dedicated vbmeta partition (vbmeta, vbmeta_system, ...). Null if
+     * the partition is missing, unreadable, or carries no AVB0 struct.
      */
     private fun readVbmetaBlob(name: String): ByteArray? {
         val path = resolvePartition(name) ?: return null
@@ -218,12 +230,18 @@ object VbMeta {
         } catch (_: ErrnoException) {}
     }
 
-    private fun ascii(b: ByteArray, off: Int, len: Int): String = String(b, off, len, Charsets.US_ASCII)
+    private fun ascii(b: ByteArray, off: Int, len: Int): String =
+        String(b, off, len, Charsets.US_ASCII)
 
-    /** Minimal growable byte sink, so we hash one concatenation without intermediate copies per struct. */
+    /**
+     * Minimal growable byte sink, so we hash one concatenation without intermediate copies per
+     * struct.
+     */
     private class ByteArrayBuilder {
         private val out = java.io.ByteArrayOutputStream()
+
         fun append(b: ByteArray) = out.write(b)
+
         fun toByteArray(): ByteArray = out.toByteArray()
     }
 }
