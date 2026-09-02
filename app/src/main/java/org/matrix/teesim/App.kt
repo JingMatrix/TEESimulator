@@ -348,7 +348,17 @@ object App {
         val cfg =
             lastGoodConfig
                 ?: run {
-                    SystemLogger.warning("No valid config yet; nothing to push")
+                    // The injected library is already serving keystore2's KeyMint by now, and it
+                    // cannot answer an operation on one of OUR key blobs until this push builds the
+                    // TA that holds the key-encryption key. It parks such an operation briefly and
+                    // then reports the hardware as unavailable — at which point an app is liable to
+                    // delete the alias and mint a fresh key, losing everything the old one had
+                    // encrypted. So this is not a quiet "nothing to do" state.
+                    SystemLogger.error(
+                        "No valid config to push — keys minted by TEESimulator cannot be used until " +
+                            "one exists, and an app that gives up on such a key may regenerate it " +
+                            "and lose the data it had encrypted. Fix config.json/the keybox."
+                    )
                     return -1
                 }
         return try {
