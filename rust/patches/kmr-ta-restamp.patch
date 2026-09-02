@@ -1,0 +1,65 @@
+diff --git a/ta/src/keys.rs b/ta/src/keys.rs
+index f4d3310..4ab006d 100644
+--- a/ta/src/keys.rs
++++ b/ta/src/keys.rs
+@@ -734,23 +734,20 @@ impl crate::KeyMintTa {
+                 },
+             };
+ 
++        // Upstream refuses to move a level backwards, since real hardware never does. The levels we
++        // present come from the profile and can be lowered again, so refusing here would leave the
++        // keyblob permanently unusable — keyblob_parse_decrypt has already asked for this upgrade.
++        // Re-stamp in whichever direction is needed.
+         fn upgrade(v: &mut u32, curr: u32, name: &str) -> Result<bool, Error> {
+             match (*v).cmp(&curr) {
+-                Ordering::Less => {
++                Ordering::Equal => Ok(false),
++                _ => {
++                    if *v > curr {
++                        warn!("re-stamping {name} down from {v} to {curr}");
++                    }
+                     *v = curr;
+                     Ok(true)
+                 }
+-                Ordering::Equal => Ok(false),
+-                Ordering::Greater => {
+-                    error!("refusing to downgrade {name} from {v} to {curr}");
+-                    Err(km_err!(
+-                        InvalidArgument,
+-                        "keyblob with future {} {} (current {})",
+-                        name,
+-                        v,
+-                        curr
+-                    ))
+-                }
+             }
+         }
+ 
+diff --git a/ta/src/lib.rs b/ta/src/lib.rs
+index 5f17d72..c821177 100644
+--- a/ta/src/lib.rs
++++ b/ta/src/lib.rs
+@@ -502,6 +502,12 @@ impl KeyMintTa {
+         }
+ 
+         // Check all of the patchlevels and versions to see if key upgrade is required.
++        //
++        // Upstream treats a keyblob stamped ahead of the current level as InvalidKeyBlob, because on
++        // real hardware a patch level only ever moves forward. Ours is a configured value that the
++        // user can lower again, so that would brick every key minted under the higher setting: the
++        // blob is unusable and keystore2 has no way to recover it. Ask for an upgrade in both
++        // directions instead and let upgrade_key re-stamp the blob at whatever we present now.
+         fn check(v: &u32, curr: u32, name: &str) -> Result<(), Error> {
+             match (*v).cmp(&curr) {
+                 Ordering::Less => Err(km_err!(
+@@ -513,8 +519,8 @@ impl KeyMintTa {
+                 )),
+                 Ordering::Equal => Ok(()),
+                 Ordering::Greater => Err(km_err!(
+-                    InvalidKeyBlob,
+-                    "keyblob with future {} {} (current {})",
++                    KeyRequiresUpgrade,
++                    "keyblob with future {} {} needs re-stamping to current {}",
+                     name,
+                     v,
+                     curr

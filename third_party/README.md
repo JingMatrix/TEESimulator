@@ -2,8 +2,8 @@
 
 Everything TEESimulator depends on but doesn't author. All of it is a git submodule
 (`git submodule update --init --recursive`), pinned to a specific upstream commit so a
-build is reproducible. Nothing here is edited in git — except one build-time patch,
-called out below.
+build is reproducible. Nothing here is edited in git — except the build-time
+patches called out below.
 
 | Directory | Upstream | Why it's here |
 |---|---|---|
@@ -13,25 +13,36 @@ called out below.
 | `frameworks-native` | [platform/frameworks/native](https://android.googlesource.com/platform/frameworks/native) | libbinder. The keymint interceptor compiles the NDK binder headers from `libs/binder/ndk`; the C++ binder headers also live here (see the `keystore/aosp` note). |
 | `lsplt` | [JingMatrix/LSPlt](https://github.com/JingMatrix/LSPlt) | PLT/GOT hooking and `/proc/<pid>/maps` parsing — used by the injector and the keymint `AIBinder_transact` hook. |
 
-## Build-time patch
+## Build-time patches
 
-`kmr-crypto-boring` is written to build under AOSP's **Soong** against `bssl-sys`
-(Soong's BoringSSL binding). We build under **Cargo** against `openssl-sys`, so the
-patch drops the `#[cfg(soong)]` paths and an `i32` key-length narrowing that the
-`openssl-sys` binding doesn't need. That's the whole delta — the crypto itself is
-unchanged.
+`rust/patches/` holds the delta between the reference TA as AOSP builds it and what we
+need it to be. Two patches are pure build plumbing, two adapt the TA to what an
+in-process simulator can honestly do, and one relaxes a rule that only holds on real
+hardware. None of them touch the crypto.
 
-`rust/build.sh` applies it to the `keymint` submodule's **working tree** at build
-time, idempotently: it reverse-checks first (`git apply --reverse --check`) and only
-applies if it isn't already there. Consequence: after a build, `git status` shows
-`third_party/keymint` as *modified* — that's the applied patch, not a mistake, and it
-never gets committed. Reset it with `git -C third_party/keymint checkout .` if a clean
-submodule is needed.
+| Patch | What it changes |
+|---|---|
+| `kmr-crypto-boring` | The crate is written to build under AOSP's **Soong** against `bssl-sys` (Soong's BoringSSL binding). We build under **Cargo** against `openssl-sys`, so this drops the `#[cfg(soong)]` paths and an `i32` key-length narrowing the `openssl-sys` binding doesn't need. |
+| `kmr-crypto-boring-ec-group` | Upstream parses an imported EC private key without naming its curve, which only works with Android's `rust-openssl` fork. Reaches for BoringSSL's group-aware entry point instead, so a SEC1 key that legally omits its parameters still parses — and one naming the wrong curve is rejected. |
+| `kmr-ta-seclevel` | Lets a single TA attest at the security level and `attestationVersion` of the HAL a request arrived through, so a dual-level device stays honest at both, and keeps pre-KeyMint (Keymaster) attestation versions representable. |
+| `kmr-ta-authtoken` | The auth token is MAC'd under the device's `ISharedSecret` key, which this TA never negotiates and so cannot verify. When there is no key to verify with, the token is trusted on presence; every other binding it carries is still enforced. |
+| `kmr-ta-restamp` | Upstream rejects a keyblob stamped *ahead* of the current patch level, because real hardware only ever moves forward. Ours is a configured value the user can lower again, which would strand every key minted under the higher setting, so the blob is re-stamped in whichever direction is needed. |
+
+`rust/build.sh` applies them to the `keymint` submodule's **working tree** at build
+time, idempotently: each is reverse-checked first (`git apply --reverse --check`) and
+only applied if it isn't already there. Consequence: after a build, `git status` shows
+`third_party/keymint` as *modified* — that's the applied patches, not a mistake, and
+they never get committed. Reset it with `git -C third_party/keymint checkout .` if a
+clean submodule is needed.
+
+A change made directly in the submodule's working tree is invisible to git here and
+that reset throws it away, so anything worth keeping has to land in `rust/patches/`
+before the tree is cleaned.
 
 If the dirty-submodule friction ever gets annoying, the alternative is to fork
-`system/keymint`, commit the patch there, and repoint this submodule at the fork — then
-the build needs no patch step at all. This file (and the `.patch`) stay the record of
-exactly what changed.
+`system/keymint`, commit the patches there, and repoint this submodule at the fork —
+then the build needs no patch step at all. This file (and the `.patch` files) stay the
+record of exactly what changed.
 
 ## `keystore/aosp`
 

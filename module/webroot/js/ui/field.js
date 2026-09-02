@@ -102,7 +102,8 @@ function patchWidget(d, value, onChange, ctx) {
 
 // A quick-pick token -> { label, value }. "@month05" inserts the template "YYYY-MM-05"
 // (a common vendor/boot patch date); the daemon resolves YYYY/MM to today, so it tracks
-// the calendar rather than freezing to the month it was picked.
+// the calendar rather than freezing to the month it was picked. Early in a month, before
+// the 5th, it resolves to the previous month instead -- never to a day still ahead.
 function resolvePick(token) {
   if (token === "@month05") return { label: "YYYY-MM-05", value: "YYYY-MM-05" };
   return { label: token, value: token };

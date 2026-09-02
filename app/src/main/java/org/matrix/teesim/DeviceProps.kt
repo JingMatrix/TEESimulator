@@ -3,6 +3,7 @@ package org.matrix.teesim
 import android.os.Build
 import android.os.SystemProperties
 import java.time.LocalDate
+import java.time.YearMonth
 
 /**
  * Read-only access to system properties plus the integer encodings KeyMint expects: osVersion =
@@ -134,12 +135,61 @@ object DeviceProps {
         }
     }
 
-    /** Replace YYYY / MM / DD tokens with today's zero-padded year / month / day. */
+    /**
+     * Replace YYYY / MM / DD tokens with today's zero-padded year / month / day, stepping back a
+     * month at a time while the date the template names has not arrived yet.
+     *
+     * Android dates a month's patch on its 1st or 5th, so the WebUI's default `YYYY-MM-05` names a
+     * day that is still in the future for the first four days of every month: on 2026-09-01 it
+     * would claim a patch level dated 2026-09-05, which no real device can carry. Rolling back to
+     * the previous month (and the previous year with it, each December) keeps such a template
+     * self-maintaining without ever running ahead of the calendar. A template with no day, or one
+     * that resolves to today via DD, is never in the future and is left alone.
+     */
     private fun substituteDateTemplates(v: String): String {
         if (!v.contains("YYYY") && !v.contains("MM") && !v.contains("DD")) return v
         val now = LocalDate.now()
-        return v.replace("YYYY", "%04d".format(now.year))
-            .replace("MM", "%02d".format(now.monthValue))
-            .replace("DD", "%02d".format(now.dayOfMonth))
+        var month = YearMonth.from(now)
+        // Twelve steps is a full year: a template still in the future after that is not one this
+        // can fix (a literal day no month is long enough to hold, say), so fall back to the plain
+        // substitution and let the caller's parse decide what to make of it.
+        repeat(12) {
+            val candidate = fillDateTemplate(v, month, now.dayOfMonth)
+            if (!namesFutureDate(candidate, now)) return candidate
+            month = month.minusMonths(1)
+        }
+        return fillDateTemplate(v, YearMonth.from(now), now.dayOfMonth)
+    }
+
+    /** Substitute the date tokens in [v] from [month] and [day]. */
+    private fun fillDateTemplate(v: String, month: YearMonth, day: Int): String =
+        v.replace("YYYY", "%04d".format(month.year))
+            .replace("MM", "%02d".format(month.monthValue))
+            .replace("DD", "%02d".format(day))
+
+    /**
+     * Whether a resolved patch string names a calendar date later than [today]. A dayless YYYY-MM
+     * counts as its 1st, so the month we are currently in never reads as future. Anything that is
+     * not a date we recognise is reported as not-future, which leaves it untouched.
+     */
+    private fun namesFutureDate(resolved: String, today: LocalDate): Boolean {
+        val n = resolved.replace("-", "")
+        if (n.isEmpty() || !n.all { it.isDigit() }) return false
+        val date =
+            try {
+                when (n.length) {
+                    8 ->
+                        LocalDate.of(
+                            n.substring(0, 4).toInt(),
+                            n.substring(4, 6).toInt(),
+                            n.substring(6, 8).toInt(),
+                        )
+                    6 -> LocalDate.of(n.substring(0, 4).toInt(), n.substring(4, 6).toInt(), 1)
+                    else -> null
+                }
+            } catch (e: java.time.DateTimeException) {
+                null
+            } ?: return false
+        return date.isAfter(today)
     }
 }
