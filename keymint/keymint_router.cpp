@@ -585,6 +585,17 @@ bool IsAttestKeyRequest(const std::vector<KeyParameter>& params) {
   return false;
 }
 
+// True if the request asks for attestation, i.e. carries an ATTESTATION_CHALLENGE. That tag decides
+// what the real HAL owes us: an attestation certificate with it, and without it a single certificate
+// that carries no attestation extension at all, which is what KeyCreationResult requires. There is
+// nothing to re-root in the latter, so patch mode keeps that key rather than falling to generation.
+bool HasAttestationChallenge(const std::vector<KeyParameter>& params) {
+  for (const auto& p : params) {
+    if (p.tag == Tag::ATTESTATION_CHALLENGE) return true;
+  }
+  return false;
+}
+
 // --- auth / timestamp token marshalling --------------------------------------
 
 // Flatten an optional AIDL HardwareAuthToken into the flat C ABI struct. Returns a pointer to
@@ -1452,17 +1463,30 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
     }
     const unsigned long long real_ms = real_el.Ms();
-    if (real.certificateChain.empty()) {
-      // A symmetric key (AES/HMAC/3DES) never has a certificate, so an empty chain is the real HAL
-      // saying there is nothing to attest — not a failure. Keep the hardware key exactly as it came
-      // back: minting our own would move the app's key material into the software TA for no gain in
-      // attestation, and an auth-bound key would then be checked against a TA that holds no device
-      // HMAC key ("no device HMAC key; accepting auth_token on presence"), which is how fingerprint-
-      // bound keys start failing with KEY_USER_NOT_AUTHENTICATED.
+    if (real.certificateChain.empty() || !HasAttestationChallenge(keyParams)) {
+      // Nothing to attest — not a failure, and KeyCreationResult spells out both shapes. A symmetric
+      // key (AES/HMAC/3DES) never has a certificate, so an empty chain is the real HAL saying it. A key
+      // requested without an ATTESTATION_CHALLENGE comes back as a single certificate with no
+      // attestation extension — self-signed when the key can sign, empty-signatured when it cannot —
+      // which says the same. Keep the hardware key exactly as it came back: minting
+      // our own would move the app's key material into the software TA for no gain in attestation, and
+      // an auth-bound key would then be checked against a TA that holds no device HMAC key ("no device
+      // HMAC key; accepting auth_token on presence"), which is how fingerprint-bound keys start failing
+      // with KEY_USER_NOT_AUTHENTICATED. Both are read before the move, not after it.
+      //
+      // certs= is here to keep this path honest. Taking the request's word for it means we no longer
+      // look inside the leaf, so a HAL that attested without being asked would have its real,
+      // unpatched chain handed to the app with nothing said. That cannot happen within the contract
+      // and has never been seen — every such request in the logs behind this change returned exactly
+      // one certificate — so it earns a logged number rather than a branch: any count but 1 here is a
+      // HAL breaking its side, and worth finding in a report instead of shipping for a release.
+      const char* nothing = real.certificateChain.empty() ? "real HAL returned no certificates"
+                                                          : "no attestation challenge in the request";
+      const size_t n_certs = real.certificateChain.size();
       *out = std::move(real);
-      LOGI("PatchAttest: real HAL returned no certificates (nothing to attest); keeping the real key "
-           "key=%s blob_len=%zu real=%llums",
-           BlobTag(out->keyBlob).c_str(), out->keyBlob.size(), real_ms);
+      LOGI("PatchAttest: %s (nothing to attest); keeping the real key key=%s blob_len=%zu certs=%zu "
+           "real=%llums",
+           nothing, BlobTag(out->keyBlob).c_str(), out->keyBlob.size(), n_certs, real_ms);
       return ndk::ScopedAStatus::ok();
     }
     LOGD("PatchAttest: real HAL returned %zu cert(s) in %llums; re-signing only the leaf under the "
