@@ -164,7 +164,9 @@ it is also ours — as does StrongBox:
   appends nothing, leaving the TA's keybox-rooted chain intact. It is scoped to target uids
   (`teesim_is_target_uid`, and the resolution runs on the app's binder thread so `getCallingUid`
   is the app's) and gated *per security level*: the request's `getRegistration` names its component
-  (`GetRegIsStrongBox` reads the `irpcName` arg), so we consult `remote_provisioning.strongbox.rkp_only`
+  (`GetRegIsStrongBox` reads the `irpcName` arg, which keystore2 builds interface-qualified —
+  `android.hardware.security.keymint.IRemotelyProvisionedComponent/strongbox` — so only the instance
+  past the last `/` is compared), so we consult `remote_provisioning.strongbox.rkp_only`
   for a StrongBox request and `remote_provisioning.tee.rkp_only` for a TE one, and skip the denial when
   that level is RKP-only (there keystore2 would fail the key rather than fall back). The property is
   only *read*, never written — a global change would be an obvious detection point.

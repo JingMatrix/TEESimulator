@@ -164,11 +164,22 @@ bool RkpStringAllocator(void* string_data, int32_t length, char** buffer) {
   return true;
 }
 
+// The instance part of an IRemotelyProvisionedComponent name. keystore2 asks for the
+// interface-qualified instance its globals build for the security level —
+// "android.hardware.security.keymint.IRemotelyProvisionedComponent/strongbox", never a bare
+// "strongbox" — so the instance is whatever follows the last '/'.
+const char* IrpcInstance(const char* name) {
+  const char* slash = std::strrchr(name, '/');
+  return slash ? slash + 1 : name;
+}
+
 // Which security level a getRegistration transact targets, read from its first argument — the
-// IRemotelyProvisionedComponent name ("strongbox" for StrongBox, "default" for TE). The interface
-// header size is measured from a throwaway prepared transaction on the same binder, so no wire format
-// is hardcoded; the input parcel's read position is saved and restored. Defaults to TE if unreadable.
-bool GetRegIsStrongBox(AIBinder* binder, AParcel* in) {
+// IRemotelyProvisionedComponent name, whose instance is "strongbox" for StrongBox and "default" for
+// TE. The interface header size is measured from a throwaway prepared transaction on the same binder,
+// so no wire format is hardcoded; the input parcel's read position is saved and restored. `irpc_name`
+// receives the name as read, so a bug report shows what the decision below was actually made on.
+// Defaults to TE if unreadable.
+bool GetRegIsStrongBox(AIBinder* binder, AParcel* in, std::string* irpc_name) {
   AParcel* probe = nullptr;
   if (AIBinder_prepareTransaction(binder, &probe) != STATUS_OK) return false;
   int32_t header = AParcel_getDataSize(probe);  // args begin past the interface header (cf. Redirect)
@@ -179,7 +190,8 @@ bool GetRegIsStrongBox(AIBinder* binder, AParcel* in) {
   char* name = nullptr;
   bool strongbox = false;
   if (AParcel_readString(in, &name, RkpStringAllocator) == STATUS_OK && name != nullptr) {
-    strongbox = std::strcmp(name, "strongbox") == 0;
+    strongbox = std::strcmp(IrpcInstance(name), "strongbox") == 0;
+    irpc_name->assign(name);
   }
   free(name);
   AParcel_setDataPosition(in, saved);
@@ -236,21 +248,24 @@ binder_status_t HookedTransact(AIBinder* binder, transaction_code_t code, AParce
     if (IsRkpProvisioning(binder)) {
       int32_t uid = static_cast<int32_t>(AIBinder_getCallingUid());
       if (teesim_is_target_uid(uid)) {
-        bool strongbox = GetRegIsStrongBox(binder, *in);
+        std::string irpc_name;
+        bool strongbox = GetRegIsStrongBox(binder, *in, &irpc_name);
         const char* prop = strongbox ? "remote_provisioning.strongbox.rkp_only"
                                       : "remote_provisioning.tee.rkp_only";
         const char* level = strongbox ? "strongbox" : "TE";
+        const char* irpc = irpc_name.empty() ? "<unreadable>" : irpc_name.c_str();
         char raw[PROP_VALUE_MAX] = {0};
         bool rkp_only = ReadRkpOnly(prop, raw);
         const char* val = raw[0] ? raw : "<unset>";
         if (rkp_only) {
-          LOGI("RKP: NOT denying %s getRegistration for target uid=%d (%s=%s; denial would fail key "
-               "generation on an rkp-only level)",
-               level, uid, prop, val);
+          LOGI("RKP: NOT denying %s getRegistration for target uid=%d (irpcName=%s, %s=%s; denial "
+               "would fail key generation on an rkp-only level)",
+               level, uid, irpc, prop, val);
         } else {
-          LOGI("RKP: denying %s IRemoteProvisioning transact code=%u for target uid=%d (%s=%s; "
-               "keystore2 will append no real attest-key chain; our generation stays keybox-rooted)",
-               level, code, uid, prop, val);
+          LOGI("RKP: denying %s IRemoteProvisioning transact code=%u for target uid=%d (irpcName=%s, "
+               "%s=%s; keystore2 will append no real attest-key chain; our generation stays "
+               "keybox-rooted)",
+               level, code, uid, irpc, prop, val);
           AParcel_delete(*in);  // honour AIBinder_transact's ownership of the input parcel
           *in = nullptr;
           return STATUS_FAILED_TRANSACTION;  // -> Rust `?` -> get_attest_key_info Ok(None) on hybrid
