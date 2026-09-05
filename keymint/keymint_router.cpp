@@ -439,6 +439,16 @@ bool IsAttestKeyRequest(const std::vector<KeyParameter>& params) {
   return false;
 }
 
+// True if the request asks for attestation. Without a challenge the real HAL mints the key and hands
+// back a bare self-signed placeholder certificate with no KeyMint extension in it, so there is no
+// attestation to re-root: patch mode must keep that key rather than fall through to generation.
+bool HasAttestationChallenge(const std::vector<KeyParameter>& params) {
+  for (const auto& p : params) {
+    if (p.tag == Tag::ATTESTATION_CHALLENGE) return true;
+  }
+  return false;
+}
+
 // --- auth / timestamp token marshalling --------------------------------------
 
 // Flatten an optional AIDL HardwareAuthToken into the flat C ABI struct. Returns a pointer to
@@ -1059,14 +1069,17 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
         return Simulate(ta, keyParams, std::nullopt, out);
       }
     }
-    if (real.certificateChain.empty()) {
-      // A symmetric key (AES/HMAC/3DES) never has a certificate, so an empty chain is the real HAL
-      // saying there is nothing to attest — not a failure. Keep the hardware key exactly as it came
-      // back: minting our own would move the app's key material into the software TA for no gain in
-      // attestation, and an auth-bound key would then be checked against a TA that holds no device
-      // HMAC key ("no device HMAC key; accepting auth_token on presence"), which is how fingerprint-
-      // bound keys start failing with KEY_USER_NOT_AUTHENTICATED.
-      LOGI("patch: real HAL returned no certificates (nothing to attest); keeping the real key");
+    if (real.certificateChain.empty() || !HasAttestationChallenge(keyParams)) {
+      // Nothing to attest — not a failure. A symmetric key (AES/HMAC/3DES) never has a certificate, so
+      // an empty chain is the real HAL saying so; a key requested without a challenge comes back with a
+      // self-signed placeholder leaf that carries no KeyMint extension, which says the same thing. Keep
+      // the hardware key exactly as it came back: minting our own would move the app's key material into
+      // the software TA for no gain in attestation, and an auth-bound key would then be checked against
+      // a TA that holds no device HMAC key ("no device HMAC key; accepting auth_token on presence"),
+      // which is how fingerprint-bound keys start failing with KEY_USER_NOT_AUTHENTICATED.
+      LOGI("patch: %s (nothing to attest); keeping the real key",
+           real.certificateChain.empty() ? "real HAL returned no certificates"
+                                         : "no attestation challenge in the request");
       *out = std::move(real);
       return ndk::ScopedAStatus::ok();
     }
