@@ -21,6 +21,9 @@ for f in "$MODDIR"/*/teesim-uds; do
   fi
 done
 
+# Before starting daemon, wait for system_server to be fully ready, i.e. even if it crashed and reloaded on boot.
+resetprop -w sys.boot_completed 0
+
 while true; do
   "$MODDIR/daemon" "$MODDIR"
   sleep 2
