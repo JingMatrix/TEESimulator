@@ -1,7 +1,7 @@
 [versions]
-agp = "9.3.1"
-annotation = "1.10.0"
-jdk18on = "1.85"
+agp = "9.4.1"
+annotation = "1.11.0"
+jdk18on = "1.86"
 ktfmt = "0.27.0"
 
 [libraries]
