@@ -44,7 +44,22 @@ class Injector(private val moduleDir: File) {
         SystemLogger.info("Injector: watching $procName (abi=$abi lib=$libName)")
         var failures = 0
         while (running) {
-            val pid = findPid(procName)
+            // The full /proc walk in findPid touches every process's cmdline (~1000 reads on a
+            // busy device); skip it while the pid we last injected is still alive, since it never
+            // changes between keystore restarts. Fall back to the walk only once it's gone. The
+            // fallback fires at most once per keystore restart (or per retry while injection keeps
+            // failing), so log it; the common alive-pid path stays silent to keep the loop cheap.
+            val pid =
+                if (lastPid > 0 && isNamedProcess(lastPid, procName)) {
+                    lastPid
+                } else {
+                    if (lastPid > 0) {
+                        SystemLogger.debug(
+                            "Injector: pid=$lastPid is no longer $procName; re-scanning /proc"
+                        )
+                    }
+                    findPid(procName)
+                }
             // Tell the log tail which process to capture, so the Logs panel shows the target
             // keystore's own output — even before we manage to inject it.
             LogTail.targetPid = if (pid > 0) pid else -1
@@ -124,6 +139,19 @@ class Injector(private val moduleDir: File) {
             SystemLogger.error("Injector: failed to run inject binary", e)
             false
         }
+    }
+
+    /** True if /proc/[pid]/cmdline's basename still matches [name], else false. */
+    private fun isNamedProcess(pid: Int, name: String): Boolean {
+        val cmd =
+            try {
+                File("/proc/$pid/cmdline").readBytes()
+            } catch (e: Exception) {
+                return false
+            }
+        if (cmd.isEmpty()) return false
+        val end = cmd.indexOf(0.toByte()).let { if (it < 0) cmd.size else it }
+        return String(cmd, 0, end).substringAfterLast('/') == name
     }
 
     /** Return the pid whose /proc/<pid>/cmdline basename matches [name], else -1. */
