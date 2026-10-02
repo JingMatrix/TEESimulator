@@ -5,7 +5,7 @@
 
 import { listKeyboxes, importKeybox, renameKeybox, deleteKeybox } from "../data/keybox-io.js";
 import { keyAdmin } from "../data/keyadmin.js";
-import { readRkpProps, setRkpProp } from "../data/rkp-io.js";
+import { readRkpProps, setRkpProp, deleteRkpProp, restoreRkpProp } from "../data/rkp-io.js";
 import { renderKeyboxes, renderKeyboxImport, renderKeyboxInspect, fillKeyboxInspect } from "../ui/keybox-view.js";
 import { renderRkpSection } from "../ui/rkp-view.js";
 import { el, toast, confirmDialog, promptDialog, openSheet, openOverlay } from "../ui/dom.js";
@@ -169,9 +169,23 @@ export function create(mount) {
 
   const rkpActions = {
     async toggle(name, on) {
-      // No toast: the switch is its own feedback, and refreshRkp re-reads so a failed write just
-      // snaps the knob back to the value the device actually took.
+      // enable_rkpd. No toast: the switch is its own feedback, and refreshRkp re-reads so a failed
+      // write just snaps the knob back to the value the device actually took.
       await setRkpProp(name, on);
+      return refreshRkp();
+    },
+    async del(name) {
+      // Delete an rkp_only prop. refreshRkp re-reads: on success the prop is gone and the row turns
+      // into a Restore control; on failure the trash row stays. The daemon owns the live delete.
+      const r = await deleteRkpProp(name);
+      if (!r.ok) toast("Delete failed: " + (r.error || "unknown error"));
+      return refreshRkp();
+    },
+    async restore(name) {
+      // Put a deleted rkp_only prop back. refreshRkp re-reads: on success the Restore row turns back
+      // into a trash row; on failure the Restore control stays.
+      const r = await restoreRkpProp(name);
+      if (!r.ok) toast("Restore failed: " + (r.error || "unknown error"));
       return refreshRkp();
     },
   };

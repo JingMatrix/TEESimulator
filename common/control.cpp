@@ -223,6 +223,15 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
   boot.module_hash_len = module_hash.size();
   teesim_cfg_begin(&boot);
 
+  // The rkp_only props the user deleted (device-wide, independent of the profile set). Replaces the
+  // hook's set on every push, so a restore drops out of it. An absent/empty array clears it.
+  std::vector<std::string> rkp_deleted;
+  std::vector<const char *> rkp_deleted_ptrs;
+  if (const tjson::Value *rd = msg.get("rkpDeleted"); rd && rd->is_array())
+    for (size_t i = 0; i < rd->size(); ++i) rkp_deleted.push_back(rd->at(i).as_string());
+  for (const auto &s : rkp_deleted) rkp_deleted_ptrs.push_back(s.c_str());
+  teesim_cfg_set_rkp_deleted(rkp_deleted_ptrs.data(), rkp_deleted_ptrs.size());
+
   const tjson::Value *profiles = msg.get("profiles");
   if (profiles && profiles->is_array()) {
     total = static_cast<int>(profiles->size());
@@ -383,10 +392,14 @@ void HandleConnection(int fd) {
       // Poll the router's per-caller key-usage snapshot (see control.h). The router owns the JSON
       // array; we wrap it in the reply envelope and free it.
       char* j = teesim_usage_json_alloc();
+      char* rr = teesim_rkp_reassert_json_alloc();
       std::string resp = "{\"type\":\"usage\",\"apps\":";
       resp += (j ? j : "[]");
+      resp += ",\"rkpReassert\":";
+      resp += (rr ? rr : "[]");
       resp += "}";
       free(j);
+      free(rr);
       WriteFrame(fd, resp);
     } else if (t == "ping") {
       const tjson::Value *e = msg.get("epoch");

@@ -520,6 +520,14 @@ html, body { overscroll-behavior-y: contain; }
 .toggle-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; cursor: pointer; }
 .toggle-main .field-help { margin: 0; }
 
+/* Remote Key Provision: the two rkp_only knobs are deletable — a present one carries a square trash
+   button, a deleted one is dimmed with a "removed" chip and a Restore. */
+.rkp-del { flex: none; width: 44px; height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-sm); border: 1px solid var(--danger); background: transparent; color: var(--danger); cursor: pointer; }
+.rkp-del:active { background: var(--chip); }
+.rkp-del:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+.rkp-row.deleted .field-label { color: var(--muted); }
+.rkp-row.deleted .chip { align-self: flex-start; margin-top: 2px; }
+
 /* --- scope picker page (drill-in) --------------------------------------- */
 /* Search row: a rounded field with a leading search-icon button and a trailing sort-icon button,
  * both inside the field. Sticky so it rides the top of the scrolling body. */

@@ -23,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1668,6 +1669,60 @@ extern "C" bool teesim_is_target_uid(int32_t uid) {
     }
   }
   return false;
+}
+
+// --- RKP-only delete-intent tracking -------------------------------------------------------------
+// g_rkp_deleted: the property names the user deleted, pushed with each config (full replace). The
+// hook consults it to tell a genuine rkp_only=true from one a vendor .prop reasserted after a delete.
+// g_rkp_reassert: names the hook saw reasserted since the last drain; the daemon polls and re-deletes.
+// Both guarded by g_rkp_mu — reached from the app's binder thread (hook) and the control thread (push,
+// drain), never the keystore hot path otherwise.
+static std::mutex g_rkp_mu;
+static std::set<std::string> g_rkp_deleted;
+static std::set<std::string> g_rkp_reassert;
+
+extern "C" void teesim_cfg_set_rkp_deleted(const char* const* names, size_t n) {
+  std::lock_guard<std::mutex> lk(g_rkp_mu);
+  g_rkp_deleted.clear();
+  for (size_t i = 0; i < n; ++i)
+    if (names[i]) g_rkp_deleted.insert(names[i]);
+  // Drop pending notes for props not in the new deleted set, so a restored prop is not re-deleted.
+  for (auto it = g_rkp_reassert.begin(); it != g_rkp_reassert.end();)
+    it = g_rkp_deleted.count(*it) ? std::next(it) : g_rkp_reassert.erase(it);
+}
+
+// True if [name] is a property the user deleted — i.e. a live value for it is a reassertion we should
+// undo rather than honour. Called by the hook while it holds no other lock.
+extern "C" bool teesim_rkp_is_delete_intent(const char* name) {
+  if (!name) return false;
+  std::lock_guard<std::mutex> lk(g_rkp_mu);
+  return g_rkp_deleted.count(name) != 0;
+}
+
+// Note that [name] was seen live despite a delete intent, so the daemon re-deletes it on its next
+// poll. Idempotent within a drain window; the hook re-notes on every provisioning until it is gone.
+extern "C" void teesim_rkp_note_reassert(const char* name) {
+  if (!name) return;
+  std::lock_guard<std::mutex> lk(g_rkp_mu);
+  if (g_rkp_deleted.count(name)) g_rkp_reassert.insert(name);
+}
+
+extern "C" char* teesim_rkp_reassert_json_alloc(void) {
+  std::string out = "[";
+  {
+    std::lock_guard<std::mutex> lk(g_rkp_mu);
+    bool first = true;
+    for (const auto& n : g_rkp_reassert) {
+      if (!first) out += ",";
+      first = false;
+      out += '"';
+      out += n;  // fixed property names, never user text — no JSON escaping needed
+      out += '"';
+    }
+    g_rkp_reassert.clear();
+  }
+  out += "]";
+  return strdup(out.c_str());
 }
 
 extern "C" bool teesim_cfg_resign(const char* profile_id, const uint8_t* leaf, size_t leaf_len,
