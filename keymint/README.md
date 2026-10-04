@@ -170,6 +170,16 @@ it is also ours — as does StrongBox:
   for a StrongBox request and `remote_provisioning.tee.rkp_only` for a TE one, and skip the denial when
   that level is RKP-only (there keystore2 would fail the key rather than fall back). The property is
   only *read*, never written — a global change would be an obvious detection point.
+- **RKP-only levels cannot be re-rooted in patch mode.** When the applicable
+  `remote_provisioning.<level>.rkp_only` property is true, the hook must allow
+  `getRegistration`; denying it makes keystore2 fail the request instead of falling back to no
+  attest key. If keystore2 then injects a foreign remotely provisioned key, the real HAL signs the
+  leaf and keystore2 appends that key's Google-signed RKP chain. Patch mode and values in
+  `harvested.json` do not rewrite either the leaf's root of trust or provisioning metadata in that
+  chain. The router emits an explicit warning when it observes this fresh
+  `allowed-rkp-only-level` plus foreign-attest-key combination. Supplying public certificates from
+  another device cannot fix it because the corresponding private key remains non-exportable in
+  secure hardware.
 - **A foreign attest key on a leaf** — one an app made before we covered it — is forwarded to the
   real HAL (its leaf keeps the real root of trust). The durable fix is that attest keys are now
   ours, so once regenerated the app takes the "ours" path; the startup purge deletes any
