@@ -985,6 +985,18 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
            attestationKey->issuerSubjectName.size(),
            ours ? "ours: its leaves stay keybox-rooted"
                 : "foreign: we hold no private half, so this leaf keeps the REAL root of trust");
+      // On an RKP-only level the gate cannot force keystore2 to fall back to an unattested key:
+      // denying getRegistration makes key generation fail instead.  If the key that consequently
+      // arrives here is foreign, neither patch mode nor harvested root-of-trust values can affect
+      // the leaf that the real hardware signs, or the remotely provisioned chain keystore2 appends.
+      // Call this case out separately; the ordinary "foreign" message can otherwise suggest that
+      // purging an app-created attest key will fix a freshly injected RKP key.
+      if (!ours && !rkp_stale &&
+          std::strcmp(rkp.verdict, "allowed-rkp-only-level") == 0) {
+        LOGW("generateKey: RKP-only level supplied a foreign attest key; this target's leaf and "
+             "appended RKP chain expose the REAL device state (patch mode and harvested "
+             "RootOfTrust values do not apply)");
+      }
     }
     if (!t.ta) {
       if (real_) {
