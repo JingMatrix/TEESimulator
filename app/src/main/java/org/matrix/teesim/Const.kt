@@ -14,6 +14,14 @@ object Const {
      * key). Written by the WebUI, merged over the frozen captured harvest on every push.
      */
     val overridesFile = File(DATA_DIR, "overrides.json")
+    /**
+     * The user's persisted RKP-only delete intents ({ property: value-at-deletion }). The two
+     * rkp_only props are non-persist and a vendor .prop can re-apply a default (often true) each
+     * boot (#236), so the daemon re-deletes an intent-marked prop that reappears; the stored value
+     * lets a later restore put exactly that back. enable_rkpd is persist.device_config, survives on
+     * its own, and is not managed here (the WebUI keeps it as a plain toggle).
+     */
+    val rkpFile = File(DATA_DIR, "rkp.json")
     val adminTokenFile = File(DATA_DIR, "admin.token")
 
     /**

@@ -946,6 +946,12 @@ extern "C" const char* teesim_hook_name(void) { return "keystore1"; }
 // for the scope picker, so this router reports an empty array (see control.h).
 extern "C" char* teesim_usage_json_alloc(void) { return strdup("[]"); }
 
+// RKP is a keystore2/Android-12+ construct; the keystore1 path never resolves a remotely-provisioned
+// key, so there is nothing to track here (see control.h). Accept the pushed set as a no-op and never
+// report a reassertion.
+extern "C" void teesim_cfg_set_rkp_deleted(const char* const* /*names*/, size_t /*n*/) {}
+extern "C" char* teesim_rkp_reassert_json_alloc(void) { return strdup("[]"); }
+
 // Config-staging API (see common/control.h). teesim_cfg_begin/add_profile run on
 // the control thread; only teesim_cfg_commit touches the live routing tables.
 extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
