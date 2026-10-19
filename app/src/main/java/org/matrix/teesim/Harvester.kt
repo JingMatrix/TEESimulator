@@ -706,14 +706,27 @@ object Harvester {
         }
 
     /**
-     * The device-property id [field], resolved the way the framework resolves ATTESTATION_ID_*.
-     * Source: AOSP AndroidKeyStoreKeyPairGeneratorSpi reads Build.<X>_FOR_ATTESTATION (falling back
-     * to Build.<X>), and android.os.Build.getVendorDeviceIdProperty backs the _FOR_ATTESTATION
-     * fields as: ro.product.<base>_for_attestation (unless "unknown") → else
-     * ro.product.vendor.<base> (unless empty/"unknown") → else ro.product.<base> (the plain Build
-     * value) where <base> is brand/device/name(product)/manufacturer/model. This reads the same
-     * properties directly rather than the hidden Build.<X>_FOR_ATTESTATION fields. Blank when the
-     * whole chain is unset/unknown.
+     * The device-property id [field], resolved the way ATTESTATION_ID_* is actually filled: by the
+     * framework's AndroidKeyStore provider, in the calling app's own process. keystore2 does not
+     * source these values — it receives the tags as caller params and only gates them behind the
+     * device-id permission.
+     *
+     * AOSP splits the chain across two files. android.os.Build.getVendorDeviceIdProperty backs
+     * Build.<X>_FOR_ATTESTATION with ro.product.<base>_for_attestation → else
+     * ro.product.vendor.<base>, both legs and no more. AndroidKeyStoreKeyPairGeneratorSpi adds the
+     * third: when that result is empty or "unknown" it uses the plain Build.<X>, i.e.
+     * ro.product.<base>. <base> is brand/device/name(product)/manufacturer/model. This reads the
+     * properties directly rather than the hidden Build.<X>_FOR_ATTESTATION fields.
+     *
+     * Every leg defaults to "unknown", because Build.getString does, so a chain that is unset the
+     * whole way down resolves to "unknown" and not to blank. That is the literal string the caller
+     * then asks us to attest: the provider adds all five ATTESTATION_ID_* tags whenever device
+     * properties are included and never omits one, so recording blank here would leave the TA
+     * comparing "" against "unknown" and rejecting the request with CANNOT_ATTEST_IDS.
+     *
+     * Because the framework reads Build in the CALLER's process, a per-process property spoofer can
+     * still make an app request an id this daemon never saw. Matching the chain closes the
+     * vendor/system split; it cannot close that.
      */
     private fun devicePropId(field: String): String {
         val base = attestIdBase(field) ?: return ""
@@ -724,9 +737,9 @@ object Harvester {
             }
         val resolved =
             if (forAttestation.isBlank() || forAttestation == BUILD_UNKNOWN)
-                DeviceProps.prop("ro.product.$base", "")
+                DeviceProps.prop("ro.product.$base", BUILD_UNKNOWN)
             else forAttestation
-        return resolved.trim().let { if (it == BUILD_UNKNOWN) "" else it }
+        return resolved.trim()
     }
 
     /**
@@ -1280,10 +1293,6 @@ object Harvester {
         return ""
     }
 
-    /** A device-identity value from a system property, falling back to the Build constant. */
-    private fun buildId(prop: String, fallback: String?): String =
-        DeviceProps.prop(prop, "").ifBlank { fallback ?: "" }
-
     /**
      * The verified-boot HASH override to present when the TEE reported no usable value, and whether
      * it is user-editable — editable ONLY for the last-resort random. We do NOT read
@@ -1371,11 +1380,16 @@ object Harvester {
             vendorPatchLevel = vendorPatchLevel,
             bootPatchLevel = bootPatchLevel,
             moduleHash = null,
-            brand = buildId("ro.product.brand", Build.BRAND),
-            device = buildId("ro.product.device", Build.DEVICE),
-            product = buildId("ro.product.name", Build.PRODUCT),
-            manufacturer = buildId("ro.product.manufacturer", Build.MANUFACTURER),
-            model = buildId("ro.product.model", Build.MODEL),
+            // Blank so [supplementDeviceIds] resolves all nine ids one way, as serial and the
+            // telephony ids below already rely on. Filling these here from the plain ro.product.*
+            // value instead made that path's "already set" guard skip its own [devicePropId]
+            // resolution (#258), so the chain was spelled out twice and only one copy followed the
+            // framework.
+            brand = "",
+            device = "",
+            product = "",
+            manufacturer = "",
+            model = "",
             serial = "",
             imei = "",
             meid = "",
