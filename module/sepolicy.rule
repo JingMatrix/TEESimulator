@@ -46,3 +46,10 @@ allow magisk logdr_socket sock_file write
 # an enforcing-SELinux device.
 allow crash_dump keystore process *
 allow keystore adb_data_file file *
+
+# The injector's staging fallback copies the interceptor .so to /data/local/tmp and
+# remote-dlopen()s it when the fd-passing primary path fails (e.g. seccomp blocks
+# recvmsg/SCM_RIGHTS).  The keystore daemon needs to traverse and read from
+# /data/local/tmp (shell_data_file) for that dlopen to succeed.
+allow keystore shell_data_file dir { search read open getattr }
+allow keystore shell_data_file file { read open getattr map execute }
