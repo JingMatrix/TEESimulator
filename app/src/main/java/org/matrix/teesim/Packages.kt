@@ -31,7 +31,11 @@ object Packages {
 
     private lateinit var pm: PackageManager
 
+    // Kept so [refreshPackageManager] can re-bind after the package service is replaced under us.
+    @Volatile private var appContext: Context? = null
+
     fun init(context: Context) {
+        appContext = context
         pm = context.packageManager
     }
 
@@ -48,20 +52,32 @@ object Packages {
 
     /**
      * Resolve a package name to its app uid inside [userId], or -1 when it is not installed there.
-     * User 0 goes through the public PackageManager (the path this has always taken); another user
-     * is asked of the package service directly, which is the only way to see a work profile.
+     * Both paths are tried for user 0: the public PackageManager (the path this has always taken)
+     * and the package service directly. The daemon outlives system_server on emulators and on ROMs
+     * that restart it, and either cached proxy can be the dead one, so a failure re-binds and
+     * retries once before reporting "not installed".
      */
-    fun uidForPackage(pkg: String, userId: Int = 0): Int =
-        if (userId == 0)
+    fun uidForPackage(pkg: String, userId: Int = 0): Int {
+        if (userId != 0) return applicationInfoAsUser(pkg, userId)?.uid ?: -1
+        for (attempt in 0..1) {
+            // Ask the package service first: it does not go through ActivityThread's process-wide
+            // cached proxy, so it still answers after system_server has been replaced.
+            val viaService = applicationInfoAsUser(pkg, 0)?.uid
+            if (viaService != null && viaService > 0) return viaService
             try {
-                @Suppress("DEPRECATION") pm.getPackageUid(pkg, 0)
+                @Suppress("DEPRECATION")
+                val uid = pm.getPackageUid(pkg, 0)
+                return uid
             } catch (e: PackageManager.NameNotFoundException) {
-                -1
+                return -1
             } catch (e: Exception) {
                 SystemLogger.warning("Packages.uidForPackage: $pkg failed", e)
-                -1
             }
-        else applicationInfoAsUser(pkg, userId)?.uid ?: -1
+            if (attempt == 1) break
+            refreshPackageManager()
+        }
+        return -1
+    }
 
     /** The first uid the platform hands to a normal app; anything below is a system/shell uid. */
     fun firstAppUid(): Int = Process.FIRST_APPLICATION_UID
@@ -296,6 +312,13 @@ object Packages {
                 SystemLogger.warning(
                     "Packages.installedAppsByUid: user ${user.id} enumerated no app"
                 )
+                // A ROM whose package service this process cannot read still answers `pm list
+                // packages`; the picker is more useful with package names and no icons than empty.
+                val shell = shellAppsByUid(user.id)
+                if (shell.isNotEmpty()) {
+                    out.addAll(shell)
+                    total += shell.sumOf { it.packages.size }
+                }
                 continue
             }
             total += infos.size
@@ -385,21 +408,134 @@ object Packages {
      * SDK expects and retries the other one when a ROM disagrees.
      */
     private fun installedApplications(userId: Int): List<ApplicationInfo> {
-        if (userId == 0)
-            return try {
-                @Suppress("DEPRECATION") pm.getInstalledApplications(0)
-            } catch (e: Exception) {
-                SystemLogger.warning(
-                    "Packages.installedApplications: user 0 getInstalledApplications failed",
-                    e,
-                )
-                emptyList()
+        // The package service is asked first for every user, user 0 included: uid 0 passes
+        // PackageManagerService's cross-user check, so the call is allowed, and it does not go through
+        // ActivityThread's process-wide cached proxy — the one piece of state that stays dead after
+        // system_server is replaced. The public PackageManager stays as the second opinion (an aidl
+        // one caller can use and the other cannot is a real ROM difference), and one re-bind retries
+        // the pair before giving up.
+        for (attempt in 0..1) {
+            val ipm = packageManagerService()
+            if (ipm != null) {
+                val viaService =
+                    sliceOf("getInstalledApplications(user $userId)") { wide ->
+                        if (wide) ipm.getInstalledApplications(0L, userId)
+                        else ipm.getInstalledApplications(0, userId)
+                    }
+                if (!viaService.isNullOrEmpty()) return viaService
             }
-        val ipm = packageManagerService() ?: return emptyList()
-        return sliceOf("getInstalledApplications(user $userId)") { wide ->
-            if (wide) ipm.getInstalledApplications(0L, userId)
-            else ipm.getInstalledApplications(0, userId)
-        } ?: emptyList()
+            if (userId == 0) {
+                val viaPm =
+                    try {
+                        @Suppress("DEPRECATION") pm.getInstalledApplications(0)
+                    } catch (e: Exception) {
+                        SystemLogger.warning(
+                            "Packages.installedApplications: user 0 getInstalledApplications failed",
+                            e,
+                        )
+                        null
+                    }
+                if (!viaPm.isNullOrEmpty()) return viaPm
+            }
+            if (attempt == 1) break
+            refreshPackageManager()
+        }
+        return emptyList()
+    }
+
+    /**
+     * Drop every cached PackageManager/IPackageManager reference and re-bind from the services.
+     *
+     * The daemon is a bare app_process that lives for days, while system_server - and the `package`
+     * service with it - can be replaced underneath it. MuMu restarts system_server routinely, and any
+     * module that writes system properties (which re-triggers init) does the same. ActivityThread
+     * caches the first IPackageManager proxy in the static `sPackageManager`, and ContextImpl caches
+     * the ApplicationPackageManager built on top of it, so afterwards every call fails with
+     * DeadSystemException - a DeadObjectException in disguise - for the rest of the process's life.
+     * Nothing re-read them, which is exactly how the Scope page ends up showing an empty device.
+     */
+    @Synchronized
+    private fun refreshPackageManager() {
+        ipm = null
+        try {
+            val f = android.app.ActivityThread::class.java.getDeclaredField("sPackageManager")
+            f.isAccessible = true
+            f.set(null, null)
+        } catch (e: Throwable) {
+            SystemLogger.verbose(
+                "Packages: cannot clear ActivityThread.sPackageManager: ${e.message}"
+            )
+        }
+        val ctx = appContext ?: return
+        try {
+            val base = (ctx as? android.content.ContextWrapper)?.baseContext ?: ctx
+            val f = base.javaClass.getDeclaredField("mPackageManager")
+            f.isAccessible = true
+            f.set(base, null)
+        } catch (e: Throwable) {
+            SystemLogger.verbose("Packages: cannot clear ContextImpl.mPackageManager: ${e.message}")
+        }
+        try {
+            pm = ctx.packageManager
+        } catch (e: Throwable) {
+            SystemLogger.warning("Packages: re-binding PackageManager failed", e)
+        }
+    }
+
+    /**
+     * Last-resort enumeration for a device whose package service this process cannot read at all:
+     * `pm list packages -U --user <id>` prints `package:<name> uid:<uid>` per package, needs no binder
+     * of ours, and works from any root process. Labels fall back to the package name and there are no
+     * icons, but the picker lists the real device instead of "No apps found on the device."
+     */
+    private fun shellAppsByUid(userId: Int): List<AppEntry> {
+        val text =
+            try {
+                val p =
+                    ProcessBuilder(
+                            "/system/bin/pm",
+                            "list",
+                            "packages",
+                            "-U",
+                            "--user",
+                            userId.toString(),
+                        )
+                        .redirectErrorStream(true)
+                        .start()
+                val out = p.inputStream.bufferedReader().use { it.readText() }
+                p.waitFor()
+                out
+            } catch (e: Exception) {
+                SystemLogger.warning("Packages.shellAppsByUid: pm list packages failed", e)
+                return emptyList()
+            }
+        val byUid = LinkedHashMap<Int, MutableList<String>>()
+        for (line in text.lineSequence()) {
+            val s = line.trim()
+            if (!s.startsWith("package:")) continue
+            val pkg = s.substringAfter("package:").substringBefore(' ').trim()
+            val uid = s.substringAfter("uid:", "").trim().toIntOrNull() ?: continue
+            if (pkg.isEmpty() || uid < firstAppUid()) continue
+            byUid.getOrPut(uid) { ArrayList() }.add(pkg)
+        }
+        if (byUid.isEmpty()) return emptyList()
+        SystemLogger.warning(
+            "Packages.shellAppsByUid: user $userId enumerated ${byUid.size} uid(s) via 'pm list " +
+                "packages' (the package service was unreadable)"
+        )
+        return byUid.map { (uid, pkgs) ->
+            val sorted = pkgs.sorted()
+            AppEntry(
+                uid = uid,
+                userId = userId,
+                packages = sorted,
+                label = sorted.first(),
+                system = false,
+                launchable = false,
+                enabled = true,
+                installTime = 0L,
+            )
+        }
     }
 
     /** [pkg]'s ApplicationInfo inside [userId], or null when it is not installed there. */

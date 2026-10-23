@@ -141,6 +141,11 @@ object App {
         // Written into the log itself, not only into a bundle: a log usually reaches an issue as
         // pasted text, which must identify the module version, the device and the date on its own.
         Report.logHeader()
+        // One daemon per device — see becomeSoleInstance(). The interceptor's control server serves a
+        // single client at a time (common/control.cpp: HandleConnection runs inline in the accept
+        // loop), so a second daemon is not merely redundant: its connection is never read, its first
+        // large write blocks forever, and it takes the lock that thread holds with it.
+        becomeSoleInstance()
         try {
             waitForSystemReady()
             appContext = prepareEnvironment()
@@ -225,6 +230,61 @@ object App {
             SystemLogger.error("App: fatal error in daemon main", e)
             throw e
         }
+    }
+
+    // Held for the life of the process and released by the kernel when it dies, so there is never a
+    // stale lock to clean up. Both fields are kept (not just the FileLock) because a FileLock is
+    // released when its channel is garbage-collected.
+    private var instanceLockChannel: java.nio.channels.FileChannel? = null
+    private var instanceLock: java.nio.channels.FileLock? = null
+
+    /**
+     * Make this process the one and only daemon, or park until it is.
+     *
+     * KernelSU/APatch can run module/service.sh more than once (two `busybox sh service.sh` under
+     * init on MuMu, for instance), and service.sh itself respawns the daemon in a loop. Two daemons
+     * then compete for `admin.sock` and for the interceptor's ONE control connection: the hook serves
+     * the first client and never reads the second, so the loser's write blocks inside
+     * Control.writeFrame while it holds a lock — which hangs the whole KeyAdmin surface (the WebUI
+     * then shows an empty app list, and "not attached"/"daemon unreachable" depending on which
+     * daemon owns the socket).
+     *
+     * A blocking lock, not tryLock-and-exit: exiting would just make service.sh respawn it two
+     * seconds later, in a tight loop. Parking means the second instance costs one sleeping process
+     * and takes over the moment the first one dies.
+     */
+    private fun becomeSoleInstance() {
+        val channel =
+            try {
+                java.io.RandomAccessFile(File(Const.DATA_DIR, "daemon.lock"), "rw").channel
+            } catch (e: Throwable) {
+                SystemLogger.warning(
+                    "App: cannot open the daemon lock (${e.javaClass.simpleName}: ${e.message}); " +
+                        "running without it"
+                )
+                return
+            }
+        instanceLockChannel = channel
+        val mine =
+            try {
+                channel.tryLock()
+            } catch (e: Throwable) {
+                null
+            }
+        if (mine != null) {
+            instanceLock = mine
+            return
+        }
+        SystemLogger.warning("App: another daemon holds ${Const.DATA_DIR}/daemon.lock; parking")
+        val taken =
+            try {
+                channel.lock() // blocks until the running daemon exits
+            } catch (e: Throwable) {
+                SystemLogger.error("App: daemon lock failed: ${e.message}")
+                return
+            }
+        instanceLock = taken
+        SystemLogger.info("App: previous daemon exited; this instance is now the sole daemon")
     }
 
     /**

@@ -29,6 +29,14 @@ object Control {
 
     private const val USAGE_TIMEOUT_MS = 5_000L
 
+    // How long one frame write may stay in flight before the peer is considered dead. LocalSocket
+    // has no send timeout, so a peer that stopped reading blocks write() forever; see watchdogLoop.
+    private const val WRITE_STALL_MS = 5_000L
+
+    // elapsedRealtime() at which the write currently in flight started, or 0 when none is. Written
+    // only by [writeFrame], read only by [watchdogLoop].
+    @Volatile private var writeStartedAt = 0L
+
     private val lock = Object()
     @Volatile private var latest: String? = null
     private var seq = 0L
@@ -146,6 +154,12 @@ object Control {
                 activeOut = out
 
                 val conn = Conn(socket, out)
+                // Nothing else can abort a blocked write on a LocalSocket; the watchdog is what
+                // turns "peer silently stopped reading" into a reconnect instead of a wedged daemon.
+                Thread({ watchdogLoop(conn) }, "teesim-ctl-watchdog").apply {
+                    isDaemon = true
+                    start()
+                }
                 val writer =
                     Thread({ writerLoop(conn) }, "teesim-control-writer").apply {
                         isDaemon = true
@@ -418,10 +432,50 @@ object Control {
                 (bytes.size ushr 8).toByte(),
                 bytes.size.toByte(),
             )
-        synchronized(out) {
-            out.write(hdr)
-            out.write(bytes)
-            out.flush()
+        // A write to a peer that has stopped reading never returns, and LocalSocket exposes no send
+        // timeout. Publish when this write started so [watchdogLoop] can close the socket underneath
+        // it; the IOException that follows releases whatever lock the writing thread is holding.
+        writeStartedAt = android.os.SystemClock.elapsedRealtime()
+        try {
+            synchronized(out) {
+                out.write(hdr)
+                out.write(bytes)
+                out.flush()
+            }
+        } finally {
+            writeStartedAt = 0L
+        }
+    }
+
+    /**
+     * Closes [conn] once a single frame write has been in flight for longer than [WRITE_STALL_MS].
+     *
+     * The interceptor serves one client at a time (common/control.cpp), so a second daemon's
+     * connection is queued but never read, and its writes fill the socket buffer and then block —
+     * inside whatever lock the calling thread holds. KeyAdmin's /packages calls pollUsageOnce(), which
+     * writes a getUsage frame under the usage lock: one stalled write there hung /packages forever and
+     * queued every later request behind it. Closing the socket is the only portable way to abort a
+     * blocked write on android.net.LocalSocket; supervise() then reconnects.
+     */
+    private fun watchdogLoop(conn: Conn) {
+        while (conn.alive && running) {
+            try {
+                Thread.sleep(1_000)
+            } catch (e: InterruptedException) {
+                return
+            }
+            val started = writeStartedAt
+            if (started == 0L) continue
+            if (android.os.SystemClock.elapsedRealtime() - started <= WRITE_STALL_MS) continue
+            SystemLogger.warning(
+                "Control: frame write stalled for more than ${WRITE_STALL_MS}ms; dropping the connection"
+            )
+            writeStartedAt = 0L
+            conn.alive = false
+            try {
+                conn.socket.close()
+            } catch (ignored: Exception) {}
+            return
         }
     }
 
