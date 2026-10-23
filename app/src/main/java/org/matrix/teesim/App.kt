@@ -130,11 +130,14 @@ object App {
                 )
             )
         }
+        // Taken before the first line is logged: the reader attaches to logd from this instant,
+        // so everything below is captured even though the reader is still starting.
+        val startedAt = System.currentTimeMillis()
         SystemLogger.info("App: daemon starting")
         // Start the in-process log reader first, so even the boot-time bootstrap below is captured
         // for the WebUI's Logs panel (the reader is a native thread; it does not depend on the
         // framework).
-        startLogReader(resolveModuleDir(args))
+        startLogReader(resolveModuleDir(args), startedAt)
         // Written into the log itself, not only into a bundle: a log usually reaches an issue as
         // pasted text, which must identify the module version, the device and the date on its own.
         Report.logHeader()
@@ -527,11 +530,11 @@ object App {
      * ABI is chosen exactly as the [Injector] chooses the interceptor's — the daemon's own primary
      * ABI, with a device-property fallback — since both artifacts ship side by side under `<abi>/`.
      */
-    private fun startLogReader(moduleDir: File) {
+    private fun startLogReader(moduleDir: File, startedAt: Long) {
         val abi =
             Build.SUPPORTED_ABIS?.firstOrNull()
                 ?: DeviceProps.prop("ro.product.cpu.abi", "arm64-v8a")
-        LogTail.start(File(moduleDir, "$abi/libteesim_logcat.so"))
+        LogTail.start(File(moduleDir, "$abi/libteesim_logcat.so"), startedAt)
     }
 
     /**

@@ -52,9 +52,18 @@ struct log_msg {
 struct logger;
 struct logger_list;
 
+/* liblog's own timestamp (log/log_time.h), replicated rather than included because that header is
+ * platform-only. The layout is what matters: android_logger_list_alloc_time takes it BY VALUE, so
+ * the two packed uint32_t are the calling convention, not a detail. */
+struct log_time {
+    uint32_t tv_sec;
+    uint32_t tv_nsec;
+} __attribute__((__packed__));
+
 long android_logger_get_log_size(struct logger *logger);
 int android_logger_set_log_size(struct logger *logger, unsigned long size);
 struct logger_list *android_logger_list_alloc(int mode, unsigned int tail, pid_t pid);
+struct logger_list *android_logger_list_alloc_time(int mode, struct log_time start, pid_t pid);
 void android_logger_list_free(struct logger_list *logger_list);
 int android_logger_list_read(struct logger_list *logger_list, struct log_msg *log_msg);
 struct logger *android_logger_open(struct logger_list *logger_list, log_id_t id);

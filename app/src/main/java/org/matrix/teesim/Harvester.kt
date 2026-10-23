@@ -883,6 +883,11 @@ object Harvester {
         tryLeaf(withDeviceIds = true) ?: tryLeaf(withDeviceIds = false)
 
     private fun tryLeaf(withDeviceIds: Boolean, strongBox: Boolean = false): X509Certificate? {
+        // A StrongBox probe failing is the expected answer on every device without StrongBox, not
+        // a broken TEE: probeStrongBox asks precisely so it can report the absence, and does so on
+        // the next line. Only the plain TEE attempt — the one [generateAndFetchLeaf] falls back
+        // to, after which there is nothing left to try — means the device has no working keystore.
+        val lastResort = !withDeviceIds && !strongBox
         return try {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             val gen =
@@ -905,21 +910,25 @@ object Harvester {
             val chain = ks.getCertificateChain(CHECK_ALIAS)
             ks.deleteEntry(CHECK_ALIAS) // always clean up
             if (chain.isNullOrEmpty()) {
-                if (!withDeviceIds)
+                if (lastResort)
                     SystemLogger.warning("Harvester: empty certificate chain (no working TEE?)")
                 null
             } else {
                 chain[0] as X509Certificate
             }
         } catch (e: Exception) {
-            if (withDeviceIds) {
+            if (lastResort) {
+                SystemLogger.warning(
+                    "Harvester: attested key generation failed (no working TEE?)",
+                    e,
+                )
+            } else if (withDeviceIds) {
                 SystemLogger.info(
                     "Harvester: device-properties attestation failed; retrying plain (${e.message})"
                 )
             } else {
-                SystemLogger.warning(
-                    "Harvester: attested key generation failed (no working TEE?)",
-                    e,
+                SystemLogger.debug(
+                    "Harvester: StrongBox-backed key generation rejected (${e.message})"
                 )
             }
             try {

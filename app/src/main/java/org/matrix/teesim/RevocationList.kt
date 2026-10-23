@@ -1,5 +1,6 @@
 package org.matrix.teesim
 
+import android.os.SystemClock
 import java.io.File
 import java.math.BigInteger
 import java.net.HttpURLConnection
@@ -16,7 +17,8 @@ import org.json.JSONObject
  *
  * The daemon has network, so we fetch the live list and cache it to disk (attestation_status.json),
  * serving the cached copy immediately and refreshing in the background when stale. Offline, the
- * last cached copy is used; with no cache at all, one bounded synchronous fetch is attempted. When
+ * last cached copy is used; with no cache at all, one bounded synchronous fetch is attempted and a
+ * failure then holds off the next one for [FAIL_BACKOFF_MS], so lookups stay cheap offline. When
  * nothing is available the lookups report "unknown" rather than a false "not revoked".
  */
 object RevocationList {
@@ -25,9 +27,26 @@ object RevocationList {
     private val cacheFile = File(Const.DATA_DIR, "attestation_status.json")
     private const val TTL_MS = 12 * 60 * 60 * 1000L // refresh at most twice a day
 
+    // How long a failed fetch suppresses the next unsolicited one. Without this, a device with no
+    // cached list and no network re-attempted the fetch on EVERY lookup: one keybox inspect calls
+    // available() once per <Key> plus once for the response, so opening the inspector offline
+    // blocked the KeyAdmin handler thread for a multiple of the 8s connect timeout before the page
+    // rendered. A minute is short enough that the list appears on the first inspect after the
+    // network returns.
+    private const val FAIL_BACKOFF_MS = 60 * 1000L
+
     @Volatile private var entries: JSONObject? = null
     @Volatile private var loadedAt = 0L
     @Volatile private var refreshing = false
+    // Earliest time an unsolicited fetch may be tried again, on the MONOTONIC clock. The daemon
+    // starts before the boot's time sync, so warm()'s failure is stamped with whatever the RTC
+    // said, and a sync that moves the wall clock backwards would leave a wall-clock deadline
+    // sitting in the future — suppressing every automatic fetch for the length of the correction.
+    // [loadedAt] is wall-clock on purpose: it is compared against the cache file's mtime, which
+    // outlives the process. This deadline never has to.
+    @Volatile private var nextFetchAt = 0L
+    // Whether the disk cache has been read at all; see [ensureEntries].
+    @Volatile private var diskCacheTried = false
 
     /**
      * The {status, reason} for a serial, or null if not listed. Null return != "list unavailable" —
@@ -75,7 +94,11 @@ object RevocationList {
         entries?.let { if (now - loadedAt < TTL_MS) return it }
 
         // Nothing in memory yet — try the disk cache, adopting its file mtime as the fetch time.
-        if (entries == null && cacheFile.isFile) {
+        if (entries == null && !diskCacheTried && cacheFile.isFile) {
+            // Once, not once per lookup: a cache that fails to parse leaves entries null, so the
+            // read and its warning used to repeat on every call for the life of the daemon. A
+            // successful fetch rewrites the file and fills entries, which retires this branch.
+            diskCacheTried = true
             try {
                 val parsed = JSONObject(cacheFile.readText()).getJSONObject("entries")
                 entries = parsed
@@ -89,8 +112,13 @@ object RevocationList {
         val have = entries
         val fresh = have != null && now - loadedAt < TTL_MS
         if (!fresh) {
-            if (have == null) fetchNow() // no data at all — block once (bounded)
-            else refreshAsync() // stale — serve what we have, refresh behind the scenes
+            if (have == null) {
+                // No data at all — block once (bounded), unless a recent failure is still holding
+                // us off. [forceRefresh] goes straight to fetchNow and ignores this.
+                if (SystemClock.elapsedRealtime() >= nextFetchAt) fetchNow()
+            } else {
+                refreshAsync() // stale — serve what we have, refresh behind the scenes
+            }
         }
         return entries
     }
@@ -105,6 +133,7 @@ object RevocationList {
             val parsed = JSONObject(raw).getJSONObject("entries")
             entries = parsed
             loadedAt = System.currentTimeMillis()
+            nextFetchAt = 0L
             try {
                 cacheFile.parentFile?.mkdirs()
                 cacheFile.writeText(raw)
@@ -113,12 +142,18 @@ object RevocationList {
             }
             SystemLogger.info("RevocationList: fetched ${parsed.length()} entries from $STATUS_URL")
         } catch (e: Exception) {
+            nextFetchAt = SystemClock.elapsedRealtime() + FAIL_BACKOFF_MS
             SystemLogger.warning("RevocationList: fetch failed (offline?)", e)
         }
     }
 
     private fun refreshAsync() {
         if (refreshing) return
+        // The backoff covers this path too. A stale cache that cannot be refreshed is the common
+        // offline state — the cached list outlives the TTL long before the network comes back — and
+        // without the check every lookup spawned another thread to block on the connect timeout and
+        // fail. Async, so nothing stalled; it was a steady drip of threads and connections instead.
+        if (SystemClock.elapsedRealtime() < nextFetchAt) return
         refreshing = true
         Thread(
                 {

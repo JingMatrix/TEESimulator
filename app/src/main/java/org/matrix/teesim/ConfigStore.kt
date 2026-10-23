@@ -198,8 +198,8 @@ object ConfigStore {
     private var observer: FileObserver? = null
 
     /**
-     * Watch the data dir for config.json / keybox changes and invoke [onChange]. Uses the
-     * directory-level FileObserver (editors write via a temp file + rename).
+     * Watch the data dir for config.json / keybox / overrides.json changes and invoke [onChange].
+     * Uses the directory-level FileObserver (editors write via a temp file + rename).
      */
     fun watch(onChange: () -> Unit) {
         File(Const.DATA_DIR).mkdirs()
@@ -208,13 +208,17 @@ object ConfigStore {
             object : FileObserver(File(Const.DATA_DIR), mask) {
                 override fun onEvent(event: Int, path: String?) {
                     path ?: return
-                    if (path == "config.json" || path.endsWith(".xml")) {
+                    if (
+                        path == "config.json" || path == "overrides.json" || path.endsWith(".xml")
+                    ) {
                         SystemLogger.info("ConfigStore: change detected in $path")
                         onChange()
                     }
                 }
             }
         observer?.startWatching()
-        SystemLogger.info("ConfigStore: watching ${Const.DATA_DIR} for config/keybox changes")
+        SystemLogger.info(
+            "ConfigStore: watching ${Const.DATA_DIR} for config/keybox/overrides changes"
+        )
     }
 }

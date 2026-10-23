@@ -18,6 +18,7 @@
 
 #include "logcat.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <limits.h>
@@ -91,7 +92,7 @@ void RingPush(char level, std::string_view tag, std::string_view text) {
 
 class Logcat {
 public:
-    explicit Logcat(std::string dir) : dir_(std::move(dir)) {}
+    Logcat(std::string dir, int64_t since_ms) : dir_(std::move(dir)), since_ms_(since_ms) {}
     [[noreturn]] void Run();
 
 private:
@@ -101,9 +102,12 @@ private:
     void WriteLine(std::string_view line);
     void Emit(std::string_view line);  // status line straight to the file, never back through logd
     void Process(struct log_msg* buf);
-    void OnCrash(int err);
+    void OnCrash(int ret);
 
     std::string dir_;
+    // Wall-clock ms at which the daemon started, passed in from Kotlin. The first attach asks logd
+    // for everything since this instant — see Run().
+    int64_t since_ms_;
     int fd_ = -1;
     size_t written_ = 0;
     pid_t my_pid_ = getpid();
@@ -111,6 +115,10 @@ private:
     // across a logd reconnect (OnCrash) — only a genuine boot marker resets what counts as expected.
     time_t last_sec_ = 0;
     bool have_last_sec_ = false;
+    // Consecutive failed reads, and the run length that triggers the next `ctl.restart logd`. Reset
+    // by Run() as soon as a reconnect delivers a line; see OnCrash.
+    size_t crash_count_ = 0;
+    size_t restart_wait_ = 8;
 };
 
 void Logcat::OpenCurrent() {
@@ -253,8 +261,15 @@ void Logcat::Process(struct log_msg* buf) {
     // Kept means kept in full: whatever reaches this point is written to the ring and the file at
     // whatever level it arrived at. Level filtering happens once, at display time in the WebUI; a
     // cutoff here would silently hide lines the WebUI's "show everything" setting asks for.
+    // The crash buffer is kept for crash REPORTS, which are never below WARN: a native abort and its
+    // tombstone arrive as FATAL, and a Java "FATAL EXCEPTION" as ERROR under AndroidRuntime, which
+    // the tag list already keeps whatever buffer it came in on. The floor matters because that buffer
+    // is not reserved for crashes in practice — MediaTek vendor libraries stamp three INFO lines of
+    // build ids into it from every process that loads one, which on a lagos device was ~3% of
+    // everything captured, spending ring slots and log-file bytes on other processes' build metadata.
     bool keep = std::find(kKeepTags.begin(), kKeepTags.end(), tag) != kKeepTags.end() ||
-                entry.priority == ANDROID_LOG_FATAL || buf->id() == LOG_ID_CRASH ||
+                entry.priority == ANDROID_LOG_FATAL ||
+                (buf->id() == LOG_ID_CRASH && entry.priority >= ANDROID_LOG_WARN) ||
                 (tpid > 0 && entry.pid == tpid);
     if (!keep) return;
 
@@ -308,16 +323,22 @@ void Logcat::Process(struct log_msg* buf) {
     RingPush(level, tag, line);
 }
 
-void Logcat::OnCrash(int err) {
-    static size_t crash_count = 0;
-    static size_t restart_wait = 8;
-    if (++crash_count >= restart_wait) {
+// `ret` is android_logger_list_read's own return value, not an errno: liblog returns a NEGATED errno
+// on failure and 0 when logd closed the stream (its own restart, or device shutdown), and never
+// touches the global errno. Reading errno here instead printed "Success" for every clean close, and
+// for the rest whatever android_logger_list_free's close()/free() had left behind.
+//
+// Only a run of failures with no line read in between counts towards the restart: a logd that resets
+// occasionally over a long uptime is not a logd that needs restarting, and restarting it discards the
+// whole device's log buffer.
+void Logcat::OnCrash(int ret) {
+    if (++crash_count_ >= restart_wait_) {
         Emit("\n--- logd unreadable too many times; requesting a restart ---");
         __system_property_set("ctl.restart", "logd");
-        if (restart_wait < 1024) restart_wait <<= 1; else crash_count = 0;
+        if (restart_wait_ < 1024) restart_wait_ <<= 1; else crash_count_ = 0;
     } else {
         std::string m = "\n--- logd read failed (";
-        m += strerror(err);
+        m += ret == 0 ? "stream closed" : strerror(-ret);
         m += "); retrying in 1s ---";
         Emit(m);
     }
@@ -327,15 +348,40 @@ void Logcat::OnCrash(int err) {
 void Logcat::Run() {
     OpenCurrent();
     RotateIfNewBoot();
-    unsigned int tail = 0;  // first attach: no history, just follow
+    // The first attach asks logd for a time WINDOW, not a line count, because neither count works.
+    //
+    // liblog passes `tail` straight to logd, where 0 means NO LIMIT: it dumps the opened buffers
+    // whole before following, which is how plain `logcat` prints history. That dump costs the #265
+    // flood this reader exists to avoid, and because teesim.log is opened O_APPEND so a service.sh
+    // respawn continues the same file, it re-appends lines the previous run already wrote.
+    //
+    // "Follow from here" (tail = 1) loses the other end. The daemon logs its first line and then the
+    // session header — module version, device, date, the three things that identify a log pasted
+    // into an issue — before this thread reaches the read below, and once they are only in logd's
+    // buffer nothing asks for them again. A start time is exactly the window that is ours:
+    // everything since the daemon began, nothing from before it. Taken in Kotlin ahead of that
+    // first line, so the race cannot be lost rather than merely being narrow.
+    //
+    // The anchor is only ever used for the first attach, moments after it was taken, so it cannot
+    // name a time logd has already pruned past — which would turn a window back into a whole dump.
+    // A reconnect pulls the last few lines instead, for context across a logd reset.
+    bool attached = false;
+    unsigned int tail = 1;  // fallback first attach, with no anchor: follow from here
     while (true) {
-        auto* list = android_logger_list_alloc(0 /* blocking */, tail, 0);
-        if (!list) {
-            OnCrash(errno);
-            continue;
+        struct logger_list* list;
+        if (!attached && since_ms_ > 0) {
+            struct log_time since = {static_cast<uint32_t>(since_ms_ / 1000),
+                                     static_cast<uint32_t>((since_ms_ % 1000) * 1000000)};
+            list = android_logger_list_alloc_time(0 /* blocking */, since, 0);
+        } else {
+            list = android_logger_list_alloc(0 /* blocking */, tail, 0);
         }
-        // On a reconnect after a logd reset, pull the last few lines back for context.
-        tail = 10;
+        if (!list) {
+            OnCrash(-ENOMEM);  // the only way liblog fails to allocate a reader
+            continue;          // still unattached: the next try keeps the anchor
+        }
+        attached = true;
+        tail = 10;  // a reconnect after a logd reset: pull the last few lines back for context
         for (log_id_t id : {LOG_ID_MAIN, LOG_ID_SYSTEM, LOG_ID_CRASH}) {
             auto* logger = android_logger_open(list, id);
             if (logger && android_logger_get_log_size(logger) < kLogBufferSize) {
@@ -344,10 +390,12 @@ void Logcat::Run() {
         }
 
         struct log_msg msg;
-        while (android_logger_list_read(list, &msg) > 0) {
+        int ret;
+        while ((ret = android_logger_list_read(list, &msg)) > 0) {
+            crash_count_ = 0;  // this connection is delivering; it is not part of a failure run
             // Never re-read our own reader identity. (We emit nothing through logd, so this only guards
             // against a future __android_log call from this pid slipping into the stream.)
-            if (msg.entry.pid == static_cast<uint32_t>(my_pid_)) {
+            if (msg.entry.pid == static_cast<int32_t>(my_pid_)) {
                 AndroidLogEntry peek;
                 if (android_log_processLogBuffer(&msg.entry, &peek) >= 0) {
                     std::string_view t(peek.tag, peek.tagLen > 0 ? peek.tagLen - 1 : 0);
@@ -357,19 +405,20 @@ void Logcat::Run() {
             Process(&msg);
         }
         android_logger_list_free(list);
-        OnCrash(errno);
+        OnCrash(ret);
     }
 }
 
 }  // namespace
 
 extern "C" JNIEXPORT void JNICALL Java_org_matrix_teesim_LogTail_nativeRun(JNIEnv* env, jobject,
-                                                                           jstring dir) {
+                                                                           jstring dir,
+                                                                           jlong since_ms) {
     const char* d = env->GetStringUTFChars(dir, nullptr);
     std::string dir_s = d ? d : "/data/adb/teesim/log";
     if (d) env->ReleaseStringUTFChars(dir, d);
     // Blocks for the life of the daemon; runs on the dedicated Kotlin thread that called it.
-    Logcat(dir_s).Run();
+    Logcat(dir_s, since_ms).Run();
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_matrix_teesim_LogTail_nativeSetTargetPid(JNIEnv*, jobject,

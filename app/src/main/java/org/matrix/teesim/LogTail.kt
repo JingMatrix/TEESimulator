@@ -46,7 +46,7 @@ object LogTail {
             if (loaded) runCatching { nativeSetTargetPid(value) }
         }
 
-    private external fun nativeRun(dir: String)
+    private external fun nativeRun(dir: String, sinceMillis: Long)
 
     private external fun nativeSetTargetPid(pid: Int)
 
@@ -58,8 +58,13 @@ object LogTail {
      * Load libteesim_logcat.so from [nativeLib] and start the reader on its own daemon thread.
      * Called once, from [App], with the module's per-ABI library path. If the library is missing or
      * fails to load the Logs panel simply stays empty; the daemon is otherwise unaffected.
+     *
+     * [sinceMillis] is the wall-clock instant the daemon started, taken before it logged anything.
+     * The reader attaches to logd from there rather than from wherever this thread happens to get
+     * going, so the daemon's own first lines — the session header above all — are in the log even
+     * though they were written before the reader was up.
      */
-    fun start(nativeLib: File) {
+    fun start(nativeLib: File, sinceMillis: Long) {
         if (loaded) return
         try {
             System.load(nativeLib.absolutePath)
@@ -82,7 +87,7 @@ object LogTail {
         Thread(
                 {
                     try {
-                        nativeRun(Const.logDir.absolutePath)
+                        nativeRun(Const.logDir.absolutePath, sinceMillis)
                     } catch (e: Throwable) {
                         SystemLogger.error(
                             "LogTail: native log reader thread died; Logs panel disabled",
