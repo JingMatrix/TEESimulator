@@ -130,6 +130,7 @@ object Harvester {
             "keymasterSecurityLevel",
             "attestationVersion",
             "keymasterVersion",
+            "strongBoxAttestationVersion",
         )
     /**
      * The two boot fields the user may edit ONLY when the captured value is all-zero (unlocked
@@ -285,6 +286,7 @@ object Harvester {
                 "keymasterSecurityLevel" -> keymasterSecurityLevel.toString()
                 "attestationVersion" -> attestationVersion.toString()
                 "keymasterVersion" -> keymasterVersion.toString()
+                "strongBoxAttestationVersion" -> strongBoxAttestationVersion.toString()
                 else -> ""
             }
     }
@@ -310,6 +312,25 @@ object Harvester {
      * the OS-appropriate version when there is no working hardware, else the captured pair
      * unchanged.
      */
+    /**
+     * The attestationVersion StrongBox keys report, given the TEE's presented [teeVersion].
+     *
+     * With working hardware StrongBox has a harvested value of its own, possibly clamped or
+     * user-overridden. With none it has nothing to report, so it follows the TEE's fabricated
+     * version -- but capped by whatever the 'strongbox' INSTANCE declares, which is the ceiling
+     * check_attestation_version applies to a StrongBox key and which the push path used to bypass
+     * entirely. A Pixel 11 declares KeyMint 6 for 'default' and 4 for 'strongbox', so reusing the
+     * TEE's version there had StrongBox keys attesting 500 against a declared 400. Nothing caps it
+     * when the manifest declares no strongbox instance: there is then no figure to be consistent
+     * with, and reporting below a declared version is allowed anyway.
+     */
+    fun presentedStrongBoxVersion(r: Record, teeVersion: Int): Int {
+        if (!noWorkingHardware(r))
+            return r.effectiveInt("strongBoxAttestationVersion", r.strongBoxAttestationVersion)
+        val c = Vintf.attestationVersionConstraint("strongbox") ?: return teeVersion
+        return if (c.violatedBy(teeVersion)) c.version else teeVersion
+    }
+
     fun effectiveAttestation(r: Record): Pair<Int, Int> =
         if (noWorkingHardware(r)) SEC_LEVEL_TEE to fabricatedAttestationVersion()
         else r.attestationSecurityLevel to r.attestationVersion
@@ -478,21 +499,31 @@ object Harvester {
             }
         }
 
-        // StrongBox declares its own instance constraint; fall back to the default instance's when
-        // the manifest lists no separate strongbox HAL (many devices share one HAL version across
-        // levels).
-        (Vintf.attestationVersionConstraint("strongbox")
-                ?: Vintf.attestationVersionConstraint("default"))
-            ?.let { c ->
-                val current = out.strongBoxAttestationVersion
-                if (c.violatedBy(current)) {
-                    SystemLogger.info(
-                        "Harvester: constraining strongBoxAttestationVersion $current -> ${c.version} to the " +
-                            "device's VINTF-declared StrongBox keystore HAL (${c.kind})"
-                    )
-                    out = out.copy(strongBoxAttestationVersion = c.version)
-                }
+        // StrongBox is a separate HAL service that declares its own version, so it gets its own
+        // constraint and may legitimately sit generations below the TEE's -- a Pixel 11 declares
+        // KeyMint 6 for 'default' and 4 for 'strongbox'. When the manifest lists no strongbox
+        // instance we borrow the default one's answer ONLY for an EXACT constraint, where the
+        // legacy
+        // Keymaster HIDL version maps 1:1 to an attestation version and both levels therefore share
+        // it. A CEILING is never borrowed: the TEE's is systematically the higher of the two, and
+        // exceeding the declared version is the one thing check_attestation_version forbids
+        // (reporting below it is explicitly allowed there).
+        val sbConstraint =
+            Vintf.attestationVersionConstraint("strongbox")?.let { it to "strongbox" }
+                ?: Vintf.attestationVersionConstraint("default")
+                    ?.takeIf { it.kind == Vintf.ConstraintKind.EXACT }
+                    ?.let { it to "default" }
+        sbConstraint?.let { (c, instance) ->
+            val current =
+                out.effectiveInt("strongBoxAttestationVersion", out.strongBoxAttestationVersion)
+            if (c.violatedBy(current)) {
+                SystemLogger.info(
+                    "Harvester: constraining strongBoxAttestationVersion $current -> ${c.version} to the " +
+                        "version declared for the '$instance' instance (${c.kind})"
+                )
+                out = out.withOverride("strongBoxAttestationVersion", c.version.toString())
             }
+        }
 
         return out
     }

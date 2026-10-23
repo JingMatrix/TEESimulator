@@ -66,7 +66,7 @@ object Resolver {
                 // The attestationVersion each level reports: the harvested value on a device that
                 // attested in hardware, a synthesized OS-appropriate one with no working hardware,
                 // or the user's override — all captured by effectiveInt over the synthesized
-                // default. StrongBox reuses the TEE value when it has no hardware.
+                // default. StrongBox has its own rule; see presentedStrongBoxVersion.
                 val effVersion =
                     harvest.effectiveInt(
                         "attestationVersion",
@@ -75,8 +75,7 @@ object Resolver {
                 put("attestVersionTee", effVersion)
                 put(
                     "attestVersionStrongBox",
-                    if (Harvester.noWorkingHardware(harvest)) effVersion
-                    else harvest.strongBoxAttestationVersion,
+                    Harvester.presentedStrongBoxVersion(harvest, effVersion),
                 )
             },
         )
