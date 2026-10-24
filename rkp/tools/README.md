@@ -3,10 +3,12 @@
 Inspect, verify and unpack the material TEESimulator signs with: `keybox.xml` files, the
 secure-world containers a keybox is extracted from, and RKP certificate requests.
 
-Every check here implements an acceptance relation from [`../3-detection.md`](../3-detection.md) §1,
-and every threshold is a number measured in [`../4-measurements.md`](../4-measurements.md) §2–§4 or
-in the control-plane measurements of [`../3-detection.md`](../3-detection.md) §2. `teesim-attest
-baseline` prints each constant with its provenance.
+Every check here implements an acceptance relation from [part 3
+§1](../3-detection.md#1-acceptance-criteria), and every threshold is a quantity measured in [part 4
+§2](../4-measurements.md#2-two-leaked-provisioned-keyboxes) to [part 4
+§4](../4-measurements.md#4-populations) or in the control-plane measurements of [part 3
+§2](../3-detection.md#2-the-control-plane). The command `teesim-attest baseline` prints each
+constant with its provenance.
 
 ```
 tools/
@@ -114,11 +116,10 @@ prefix is accepted only when the bytes it points at parse as a DER SEQUENCE *who
 length agrees with the prefix*. A wrong interpretation is rejected instead of yielding plausible
 garbage, and the prefix width and endianness are detected once and then held fixed.
 
-Leftover bytes are classified, not ignored: a small tail is reported as copy residue, while a
-large one — or one that itself starts with a DER SEQUENCE — is reported as a parse that stopped
-early, which is what a truncated buffer looks like. The two documented sample sizes (a 168-byte
-descriptor, an 8578-byte payload) are *reported and not required*: they describe one round, not the
-format.
+Leftover bytes are classified, not ignored: a small tail is reported as copy residue, while a large
+one — or one that itself starts with a DER SEQUENCE — is reported as a parse that stopped early,
+which is what a truncated buffer looks like. The two documented sample sizes (a 168-byte descriptor,
+an 8578-byte payload) are *reported and not required*: they describe one round, not the format.
 
 ### `verify-csr` — acceptance on an RKP v3 request
 
@@ -133,26 +134,26 @@ Verifies `AuthenticatedRequest = [1, UdsCerts, DiceCertChain, SignedData]`: walk
 public key, verifying each entry's [COSE_Sign1](https://www.rfc-editor.org/rfc/rfc9052#section-4)
 with the key the previous entry carried, then checks that `SignedData` verifies under the key the
 last entry carried. That final link ties the request to the device's measured boot, and it is the
-only reason a backend trusts anything in the request. Then `CsrPayload = [3, "keymint",
-DeviceInfo, keysToSign]`, the 14 permitted `DeviceInfo` fields with their value domains and
-field-count rules, and every `keysToSign` entry as an ES256 P-256
+only reason a backend trusts anything in the request. Then `CsrPayload = [3, "keymint", DeviceInfo,
+keysToSign]`, the 14 permitted `DeviceInfo` fields with their value domains and field-count rules,
+and every `keysToSign` entry as an ES256 P-256
 [COSE_Key](https://www.rfc-editor.org/rfc/rfc9052#section-7).
 
 Four of its findings exist because of recorded field failures rather than because the
 [CDDL](https://www.rfc-editor.org/rfc/rfc8610) demands them, and each says so in its message:
 
 - *non-[canonical CBOR](https://www.rfc-editor.org/rfc/rfc8949#section-4.2), anywhere.* A map whose
-  keys are out of RFC 8949 §4.2.1 order, or a
-field at the wrong level, is enough for the backend to answer 400.
-- *`keysToSign` as a bare map* rather than an array — the recorded cause of the backend
-answering *"Expected an array, got MAP"*.
-- *a degenerate DICE chain*: exactly two elements where the UDS public key equals the
-leaf's subject public key, so the chain is self-signed and carries no boot measurements. It
-satisfies the structural minimum and is a recorded first-line cause of 444 DeviceNotRegistered.
-Reported as a warning, not a failure — it is valid, just not registrable.
-- *the identity key appearing in `keysToSign`.* The identity key proves the request came
-from the device; the key being certified must be a different, freshly generated one. Requiring them
-to be equal judges a correct result a failure.
+  keys are out of RFC 8949 §4.2.1 order, or a field at the wrong level, is enough for the backend to
+  answer 400.
+- *`keysToSign` as a bare map* rather than an array — the recorded cause of the backend answering
+  *"Expected an array, got MAP"*.
+- *a degenerate DICE chain*: exactly two elements where the UDS public key equals the leaf's
+  subject public key, so the chain is self-signed and carries no boot measurements. It satisfies the
+  structural minimum and is a recorded first-line cause of 444 DeviceNotRegistered. Reported as a
+  warning, not a failure — it is valid, just not registrable.
+- *the identity key appearing in `keysToSign`.* The identity key proves the request came from the
+  device; the key being certified must be a different, freshly generated one. Requiring them to be
+  equal judges a correct result a failure.
 
 `--unwrap` handles the `{61: bstr}` envelope a TA returns. Posting that envelope to the backend
 instead of its contents produces the same 400 as the bare-map mistake above, which is why the error
@@ -176,9 +177,9 @@ serial in lowercase hex, and Google's own reference verifier does
 contain no `a`–`f` digit and read as decimal. They are *syntactically* valid lowercase hex, which is
 why nothing rejects them and why the failure is silent. A verifier using hex only misses roughly
 half the revoked population, most likely including the older factory-keybox entries that matter
-most. The per-form counts are printed for the reason [`../3-detection.md`](../3-detection.md) §2.3
-gives: a decimal-match counter stuck at zero over a large sample means that population is not being
-checked at all.
+most. The per-form counts are printed for the reason [part 3
+§2.3](../3-detection.md#23-serial-number-encoding) gives: a decimal-match counter that stays at zero
+over a large sample means that population is not being checked at all.
 
 Exits 1 if anything is revoked. `--offline` uses only the cache at
 `~/.cache/teesim-attest/attestation-status.json`; a live fetch refreshes it.
@@ -199,9 +200,9 @@ OK
 No network, no device. Everything runs against the synthetic fixtures in `tests/fixtures/` — freshly
 generated keys, self-signed roots and containers built to the recorded shapes, so no real keybox or
 device material is involved and the fixtures are safe to commit. The two real sample keyboxes of
-[`../4-measurements.md`](../4-measurements.md) §1.2 are checked too when a copy is available — they
-are not carried in this repository, because they hold live private keys — and then only for facts
-that are stable: shape, chain length, private-key correspondence and the extension's contents, never
+[part 4 §1.2](../4-measurements.md#12-artifacts) are checked too when a copy is available — they are
+not carried in this repository, because they hold live private keys — and then only for facts that
+are stable: shape, chain length, private-key correspondence and the extension's contents, never
 their expiry. Point `TEESIM_ATTEST_SAMPLES` at a directory holding `rkp-keybox-sample-a.xml` and
 `rkp-keybox-sample-b.xml` to enable those checks; without it they skip and the suite still reports
 success.
@@ -210,8 +211,10 @@ Regenerate the fixtures with `python3 tools/tests/make_fixtures.py` after changi
 
 ## What is deliberately not here
 
-The field routes reconstructed in [`../2-mechanisms.md`](../2-mechanisms.md) §3–§6 come with tooling
-of their own: TA and TEE-image patch builders, caller-gate and verify-branch binary patchers,
+The field routes reconstructed in [part 2
+§3](../2-mechanisms.md#3-route-a-a-signing-oracle-on-qualcomm-keymint) to [part 2
+§6](../2-mechanisms.md#6-route-d-same-boot-capture-of-the-dice-leaf-secret) come with tooling of
+their own: TA and TEE-image patch builders, caller-gate and verify-branch binary patchers,
 secure-world seed-capture probes, a client that sends raw commands to a
 [KeyMint](https://source.android.com/docs/security/features/keystore) TA, and a pipeline that mints
 Google-signed chains from a captured identity. None of that is ported here, deliberately.
