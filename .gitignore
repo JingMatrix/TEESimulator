@@ -11,3 +11,9 @@ compile_commands.json
 /app/build/
 /stub/build/
 local.properties
+
+# The RKP evidence trail: cited by URL in rkp/5-sources.md, not mirrored here
+/rkp/archive/
+
+# Research write-ups kept local; the tracked report is rkp/
+/docs/

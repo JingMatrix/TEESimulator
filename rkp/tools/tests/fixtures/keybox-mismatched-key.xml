@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AndroidAttestation>
+    <NumberOfKeyboxes>1</NumberOfKeyboxes>
+    <Keybox DeviceID="synthetic-fixture">
+        <Key algorithm="ecdsa">
+            <PrivateKey format="pem">
+                -----BEGIN EC PRIVATE KEY-----
+                MHcCAQEEIFob5qEj8WAkBtYx1tsKWjcCYVVmtPviLLGsPuIFinC/oAoGCCqGSM49
+                AwEHoUQDQgAEnCZps5kD8qQCmoMfPK2uhnUG7PlPoj1Dd4Wccm8LOSfLEK+3OXJU
+                OyCwdF/RfxGeQ+m4yvruBZeXn4n7mS2GCQ==
+                -----END EC PRIVATE KEY-----
+            </PrivateKey>
+            <CertificateChain>
+                <NumberOfCertificates>3</NumberOfCertificates>
+                <Certificate format="pem">
+                    -----BEGIN CERTIFICATE-----
+                    MIIBZTCCAQqgAwIBAgIUPbWU31iOUeOZiC9KNQ3acdHdQCowCgYIKoZIzj0EAwIw
+                    FjEUMBIGA1UEAwwLRml4dHVyZSBDQTMwHhcNMjYxMDE2MDczMzE1WhcNMjYxMDMx
+                    MDczMzE1WjAbMRkwFwYDVQQDDBBGaXh0dXJlIFJLUCBMZWFmMFkwEwYHKoZIzj0C
+                    AQYIKoZIzj0DAQcDQgAE1i695aTE8Gy7a6N256F+CbzrnAPl8vtKL00VddMXiKsu
+                    EVJ4JVg/3y19tpKHe49ya+XDuNjjOzHyuWH8iOdToKMxMC8wDwYDVR0TAQH/BAUw
+                    AwEB/zAcBgorBgEEAdZ5AgEeBA6iAQgDaVN5bnRoZXRpYzAKBggqhkjOPQQDAgNJ
+                    ADBGAiEAnuZ7riQpi0UaytazYV3qyv6LcuhjB+xVP7qiH+bTHUACIQDUgdQ4yhY0
+                    UFkGux1MHb4Fhr6CIc05ILCbpsogW+Zabw==
+                    -----END CERTIFICATE-----
+                </Certificate>
+                <Certificate format="pem">
+                    -----BEGIN CERTIFICATE-----
+                    MIIBQTCB6KADAgECAhR6ePh2B3f8laU/A4NrhCgj5lfrOzAKBggqhkjOPQQDAjAX
+                    MRUwEwYDVQQDDAxGaXh0dXJlIFJvb3QwHhcNMjYxMDE2MDczMzE1WhcNMjYxMjI2
+                    MDczMzE1WjAWMRQwEgYDVQQDDAtGaXh0dXJlIENBMzBZMBMGByqGSM49AgEGCCqG
+                    SM49AwEHA0IABB42ZI3hAnbwmOpkQn+YZraT2bzs7Sx3F2VCi0bJyvvbzyHb0QMo
+                    dcIhM+shACWpJ1ulyGzCCzf87v+axU2PMVejEzARMA8GA1UdEwEB/wQFMAMBAf8w
+                    CgYIKoZIzj0EAwIDSAAwRQIgDOk/2SgZHUSPwNvgHKUlbO4RRCV2xVej5fEN6I9k
+                    qywCIQDo+FDxJ9ekWfsoqxuu/ZmMVN1rTmWRr5RTt9F/zSdI9w==
+                    -----END CERTIFICATE-----
+                </Certificate>
+                <Certificate format="pem">
+                    -----BEGIN CERTIFICATE-----
+                    MIIBQjCB6aADAgECAhQimGcGfrhYsOQD5IMDuPRQ10i3jjAKBggqhkjOPQQDAjAX
+                    MRUwEwYDVQQDDAxGaXh0dXJlIFJvb3QwHhcNMjYxMDE2MDczMzE1WhcNNDAwNjI1
+                    MDczMzE1WjAXMRUwEwYDVQQDDAxGaXh0dXJlIFJvb3QwWTATBgcqhkjOPQIBBggq
+                    hkjOPQMBBwNCAATaOJnJ82jJxXuKaWyAd9Pxs0FxT/+YOrlOtAT5NJS2ffDaeLmL
+                    KdNJJxa0PhJUbBqtevnWX561I1t+ZN1t5QI1oxMwETAPBgNVHRMBAf8EBTADAQH/
+                    MAoGCCqGSM49BAMCA0gAMEUCIQCM++s24us2AJme0+hRstzVnlZpCvEJR1BuRlFe
+                    jmtGzQIgeSYS5ZuvhiBJhyTTdyU2NJt6Pa5Hd0uxdDh3sDJks9o=
+                    -----END CERTIFICATE-----
+                </Certificate>
+            </CertificateChain>
+        </Key>
+    </Keybox>
+</AndroidAttestation>

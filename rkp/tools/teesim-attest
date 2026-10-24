@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""Attestation-material toolkit: inspect, verify and unpack keyboxes and RKP requests.
+
+Subcommands:
+
+  inspect     describe a keybox.xml: chain facts, provisioning extension, findings
+  verify      acceptance check on a keybox.xml; exit status 1 if it would not be accepted
+  unpack      parse a secure-world keybox container (plaintext, or descriptor+payload) to PEM
+  verify-csr  acceptance check on an RKP v3 AuthenticatedRequest in CBOR
+  revocation  look up certificate serials in Google's attestation status list
+  baseline    print the measured constants these tools gate on, with provenance
+
+`verify`, `verify-csr` and `revocation` exit non-zero on a finding, so they can gate a build.
+See rkp/tools/README.md for what each check means and where the numbers came from.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from teesim_attest import cbor, csr, keybox, plaintext, provisioning, revocation
+
+CACHE = Path.home() / ".cache" / "teesim-attest" / "attestation-status.json"
+
+BULLET = "  "
+MARK = {"fail": "FAIL", "warn": "warn", "info": "info", "fact": "fact"}
+
+
+def _say(severity: str, message: str, indent: int = 1) -> None:
+    print(f"{BULLET * indent}{MARK.get(severity, severity):<4} {message}")
+
+
+# -- inspect / verify -------------------------------------------------------------------
+
+def _report_keybox(path: Path, *, verbose: bool) -> keybox.Keybox:
+    box = keybox.parse(path.read_text(encoding="utf-8", errors="replace"))
+    print(f"{path.name}")
+    print(f"{BULLET}shape      {box.shape}")
+    print(f"{BULLET}DeviceID   {box.device_id or '(none)'}")
+
+    for problem in box.problems:
+        _say("fail", problem)
+
+    for entry in box.keys:
+        bits = f"{entry.key_bits}-bit" if entry.key_bits else "unknown size"
+        print(f"{BULLET}key {entry.algorithm} ({bits}), {len(entry.chain)} certificate(s)")
+        _say(
+            "fact" if entry.private_matches_leaf else "fail",
+            "private key SPKI == leaf certificate SPKI"
+            if entry.private_matches_leaf
+            else "private key does NOT match the leaf certificate",
+            indent=2,
+        )
+        for problem in entry.problems:
+            _say("fail", problem, indent=2)
+
+        for index, link in enumerate(entry.chain):
+            expiry = (
+                f"expired {-link.days_remaining}d ago"
+                if link.days_remaining < 0
+                else f"{link.days_remaining}d left"
+            )
+            signature = {True: "sig ok", False: "SIG BAD", None: "sig unchecked"}[
+                link.signature_ok
+            ]
+            role = "root" if link.self_signed else ("leaf" if index == 0 else "intermediate")
+            print(
+                f"{BULLET * 2}[{index}] {role:<12} {signature:<13} {expiry:<20} "
+                f"{link.subject}"
+            )
+            if verbose:
+                print(
+                    f"{BULLET * 3}serial {link.serial_hex}  "
+                    f"{keybox.basic_constraints(link.certificate)}  "
+                    f"sha256 {keybox.sha256_of(keybox.der_of(link.certificate))[:16]}"
+                )
+            if link.provisioning:
+                info = link.provisioning
+                print(
+                    f"{BULLET * 3}provisioning extension {provisioning.OID}"
+                    + (f"  oem={info.oem}" if info.oem else "")
+                )
+                for severity, message in info.findings():
+                    _say(severity, message, indent=4)
+    return box
+
+
+def cmd_inspect(args) -> int:
+    for path in args.keybox:
+        _report_keybox(Path(path), verbose=args.verbose)
+        print()
+    return 0
+
+
+def cmd_verify(args) -> int:
+    worst = 0
+    for path in args.keybox:
+        box = _report_keybox(Path(path), verbose=args.verbose)
+        accepted = box.accepted
+        print(
+            f"{BULLET}=> {'ACCEPTED' if accepted else 'NOT ACCEPTED'} "
+            "(layers 1 and 2; layer 3 needs a device, see rkp/tools/README.md)"
+        )
+        print()
+        worst = max(worst, 0 if accepted else 1)
+    return worst
+
+
+# -- unpack ----------------------------------------------------------------------------
+
+def cmd_unpack(args) -> int:
+    payload = Path(args.payload).read_bytes()
+
+    if args.descriptor:
+        descriptor_bytes = Path(args.descriptor).read_bytes()
+        _descriptor, parsed, notes = plaintext.parse_descriptor_payload(
+            descriptor_bytes, payload
+        )
+        for note in notes:
+            _say("fact", note)
+    else:
+        parsed = plaintext.parse_lengthprefixed(payload)
+
+    for note in parsed.notes():
+        _say("fact", note)
+
+    if not args.out:
+        return 0
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for entry in parsed.entries:
+        stem = f"{entry.index}_{entry.algorithm}"
+        (out / f"{stem}_private.der").write_bytes(entry.private_der)
+        for n, certificate in enumerate(entry.certificates):
+            (out / f"{stem}_cert{n}.der").write_bytes(certificate)
+            (out / f"{stem}_cert{n}.pem").write_text(
+                "-----BEGIN CERTIFICATE-----\n"
+                + keybox.b64_lines(certificate)
+                + "\n-----END CERTIFICATE-----\n"
+            )
+        _say(
+            "fact",
+            f"entry {entry.index}: wrote private DER + {len(entry.certificates)} "
+            f"certificate(s) to {out}/{stem}_*",
+        )
+    if parsed.tail:
+        (out / "tail_residue.bin").write_bytes(parsed.tail)
+        _say("warn", f"wrote {parsed.tail_len} B of unconsumed tail to {out}/tail_residue.bin")
+    return 0
+
+
+# -- verify-csr ------------------------------------------------------------------------
+
+def cmd_verify_csr(args) -> int:
+    data = Path(args.request).read_bytes()
+
+    if args.unwrap:
+        value = cbor.load(data)
+        if isinstance(value, cbor.Map) and value.has(61):
+            data = value.get(61)
+            _say("fact", "unwrapped the TA response envelope {61: bstr}")
+        else:
+            _say("warn", "--unwrap given but the input is not a map with key 61")
+
+    result = csr.verify(data)
+    for message in result.failures:
+        _say("fail", message)
+    for message in result.warnings:
+        _say("warn", message)
+    if args.verbose:
+        for message in result.facts:
+            _say("fact", message)
+    print(f"{BULLET}=> {'OK' if result.ok else 'REJECTED'}")
+    return 0 if result.ok else 1
+
+
+# -- revocation ------------------------------------------------------------------------
+
+def cmd_revocation(args) -> int:
+    serials: list[int] = [int(s, 0) for s in args.serial]
+    for path in args.keybox:
+        box = keybox.parse(Path(path).read_text(encoding="utf-8", errors="replace"))
+        for entry in box.keys:
+            serials += [link.certificate.serial_number for link in entry.chain]
+
+    if not serials:
+        print("nothing to check: pass a keybox or --serial", file=sys.stderr)
+        return 2
+
+    try:
+        status = revocation.fetch(cache=CACHE, offline=args.offline)
+    except revocation.RevocationUnavailable as exc:
+        print(f"revocation list unavailable: {exc}", file=sys.stderr)
+        return 2
+
+    for line in status.shape():
+        _say("fact", line)
+
+    report = revocation.check(serials, status)
+    for entry in report.checked:
+        if entry.revoked:
+            _say(
+                "fail",
+                f"serial {entry.serial:x} is {entry.status or 'REVOKED'}"
+                f" ({entry.reason or 'no reason given'}), matched as {entry.matched_as}",
+            )
+    for line in report.summarise():
+        print(f"{BULLET}{line}")
+    return 1 if report.revoked else 0
+
+
+# -- baseline --------------------------------------------------------------------------
+
+def cmd_baseline(_args) -> int:
+    print("Measured constants these tools gate on\n")
+    print(f"certs_issued, stock baseline        {provisioning.STOCK_CERTS_ISSUED}")
+    print(f"  provenance                        {provisioning.STOCK_BASELINE_NOTE}")
+    print(f"  flagged at or above               {provisioning.CERTS_ISSUED_SUSPICIOUS_AT}")
+    print(f"provisioning extension OID          {provisioning.OID}")
+    print(f"descriptor magic                    0x{plaintext.DESCRIPTOR_MAGIC:08x}")
+    print(f"AuthenticatedRequest version        {csr.AUTHENTICATED_REQUEST_VERSION}")
+    print(f"CsrPayload version                  {csr.CSR_PAYLOAD_VERSION}")
+    print(f"DICE profile name                   {csr.DICE_PROFILE_VALUE!r}")
+    print(f"DICE minimum chain length           2 (a 2-element self-signed chain is degenerate)")
+    print(f"test-key marker label               {csr.TEST_KEY_LABEL} (must be null)")
+    print(f"revocation status list              {revocation.STATUS_URL}")
+    print(f"  cache                             {CACHE}")
+    print("\nSee rkp/3-detection.md and rkp/tools/README.md.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="teesim-attest", description=__doc__.splitlines()[0]
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("inspect", help="describe a keybox.xml")
+    p.add_argument("keybox", nargs="+")
+    p.set_defaults(run=cmd_inspect)
+
+    p = sub.add_parser("verify", help="acceptance check on a keybox.xml")
+    p.add_argument("keybox", nargs="+")
+    p.set_defaults(run=cmd_verify)
+
+    p = sub.add_parser("unpack", help="parse a secure-world keybox container")
+    p.add_argument("payload", help="plaintext buffer, or the payload half")
+    p.add_argument("--descriptor", help="descriptor half, if the container has one")
+    p.add_argument("-o", "--out", help="directory to write DER/PEM into")
+    p.set_defaults(run=cmd_unpack)
+
+    p = sub.add_parser("verify-csr", help="acceptance check on an RKP v3 request")
+    p.add_argument("request", help="AuthenticatedRequest in CBOR")
+    p.add_argument(
+        "--unwrap",
+        action="store_true",
+        help="input is the TA's {61: bstr} response envelope, not the request itself",
+    )
+    p.set_defaults(run=cmd_verify_csr)
+
+    p = sub.add_parser("revocation", help="look up serials in Google's status list")
+    p.add_argument("keybox", nargs="*")
+    p.add_argument("--serial", action="append", default=[], help="a serial, 0x-prefixed for hex")
+    p.add_argument("--offline", action="store_true", help="use only the cached list")
+    p.set_defaults(run=cmd_revocation)
+
+    p = sub.add_parser("baseline", help="print the measured constants and their provenance")
+    p.set_defaults(run=cmd_baseline)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.run(args)
+    except (plaintext.FormatError, cbor.CborError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
