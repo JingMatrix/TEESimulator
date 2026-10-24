@@ -5,9 +5,8 @@ secure-world containers a keybox is extracted from, and RKP certificate requests
 
 Every check here implements an acceptance relation from [`../3-detection.md`](../3-detection.md) §1,
 and every threshold is a number measured in [`../4-measurements.md`](../4-measurements.md) §2–§4 or
-in the control-plane measurements of [`../3-detection.md`](../3-detection.md) §2. The tools exist so
-those documents' conclusions can be run rather than read: `teesim-attest baseline` prints each
-constant with its provenance.
+in the control-plane measurements of [`../3-detection.md`](../3-detection.md) §2. `teesim-attest
+baseline` prints each constant with its provenance.
 
 ```
 tools/
@@ -75,7 +74,7 @@ $ echo $?
 1
 ```
 
-What it checks, and why each one is separate:
+What it checks:
 
 | Check | What it catches | What it does not |
 |---|---|---|
@@ -86,11 +85,10 @@ What it checks, and why each one is separate:
 | provisioning status, with unknown extension fields preserved | a `NOT_APPROVED` keybox that passes every cryptographic check | — |
 | declared counts vs. actual | hand-edited files that some parsers trust over their own content | — |
 
-*Layer 3 is not implemented and cannot be.* The third layer of the acceptance proof is: trigger a
-fresh attestation through Android KeyStore on the device and compare the resulting leaf against the
-keybox's own certificates. It is the only layer that binds the material to the handset in front of
-you, and it is the one usually skipped. On a device with the module installed, the WebUI's keybox
-inspector and stored-key view cover it.
+*Layer 3 is not implemented and cannot be.* It is: trigger a fresh attestation through Android
+KeyStore on the device and compare the resulting leaf against the keybox's own certificates. It is
+the only layer that binds the material to the handset in front of you, and the one usually skipped.
+On a device with the module installed, the WebUI's keybox inspector and stored-key view cover it.
 
 ### `unpack` — parse a secure-world container
 
@@ -109,15 +107,14 @@ $ ./tools/teesim-attest unpack payload.bin --descriptor descriptor.bin -o out/
 
 Omit `--descriptor` for a bare plaintext buffer.
 
-The reason this is a tool rather than a few lines of slicing: *fixed offsets appear to work and
-produce [DER](https://www.itu.int/rec/T-REC-X.690) fragments that look legitimate.* Certificate
-lengths change between versions, chain lengths change, and the tail of the buffer can hold uncopied
-input — one recorded sample leaves exactly 92 bytes of it. So a length prefix is accepted only when
-the bytes it points at parse as a DER SEQUENCE *whose own internal length agrees with the prefix*. A
-wrong interpretation is rejected instead of yielding plausible garbage, and the prefix width and
-endianness are detected once and then held fixed.
+Fixed offsets appear to work and produce [DER](https://www.itu.int/rec/T-REC-X.690) fragments that
+look legitimate: certificate lengths change between versions, chain lengths change, and the tail of
+the buffer can hold uncopied input — one recorded sample leaves exactly 92 bytes of it. So a length
+prefix is accepted only when the bytes it points at parse as a DER SEQUENCE *whose own internal
+length agrees with the prefix*. A wrong interpretation is rejected instead of yielding plausible
+garbage, and the prefix width and endianness are detected once and then held fixed.
 
-Leftover bytes are classified rather than ignored: a small tail is reported as copy residue, while a
+Leftover bytes are classified, not ignored: a small tail is reported as copy residue, while a
 large one — or one that itself starts with a DER SEQUENCE — is reported as a parse that stopped
 early, which is what a truncated buffer looks like. The two documented sample sizes (a 168-byte
 descriptor, an 8578-byte payload) are *reported and not required*: they describe one round, not the
@@ -135,8 +132,8 @@ Verifies `AuthenticatedRequest = [1, UdsCerts, DiceCertChain, SignedData]`: walk
 [DICE](https://trustedcomputinggroup.org/resource/dice-attestation-architecture/) chain from the UDS
 public key, verifying each entry's [COSE_Sign1](https://www.rfc-editor.org/rfc/rfc9052#section-4)
 with the key the previous entry carried, then checks that `SignedData` verifies under the key the
-last entry carried. That final link is what ties the request to the device's measured boot, and it
-is the only reason a backend trusts anything in the request. Then `CsrPayload = [3, "keymint",
+last entry carried. That final link ties the request to the device's measured boot, and it is the
+only reason a backend trusts anything in the request. Then `CsrPayload = [3, "keymint",
 DeviceInfo, keysToSign]`, the 14 permitted `DeviceInfo` fields with their value domains and
 field-count rules, and every `keysToSign` entry as an ES256 P-256
 [COSE_Key](https://www.rfc-editor.org/rfc/rfc9052#section-7).
@@ -217,8 +214,7 @@ The field routes reconstructed in [`../2-mechanisms.md`](../2-mechanisms.md) §3
 of their own: TA and TEE-image patch builders, caller-gate and verify-branch binary patchers,
 secure-world seed-capture probes, a client that sends raw commands to a
 [KeyMint](https://source.android.com/docs/security/features/keystore) TA, and a pipeline that mints
-Google-signed chains from a captured identity. *None of that is ported here, and it is a deliberate
-line, not an oversight.*
+Google-signed chains from a captured identity. None of that is ported here, deliberately.
 
 Those tools modify a boot chain, relax a loader's security decision, or produce attestation material
 for a device identity — they are device-exploitation and key-minting tools, and their value does not
@@ -227,8 +223,8 @@ acceptance relations, because that is what makes a simulation faithful and a det
 the toolkit keeps the half that parses and verifies. That split matches the series' standing scope
 note: the simulator manufactures its own keys and never needs a real one.
 
-What *is* ported is every tool whose job is to read, parse, check or classify — which is also, in
-practice, most of what the field records spend their time on. The acceptance discipline in those
-records is the transferable part: three independent layers for an extracted keybox, a same-round
-identity binding for a minted chain, length-prefix-plus-DER parsing for a container, and an explicit
-provisioning-status gate that no amount of valid signatures can override.
+What is ported is every tool whose job is to read, parse, check or classify, which is most of what
+the field records spend their time on. The transferable part is their acceptance discipline: three
+independent layers for an extracted keybox, a same-round identity binding for a minted chain,
+length-prefix-plus-DER parsing for a container, and an explicit provisioning-status gate that no
+amount of valid signatures can override.
