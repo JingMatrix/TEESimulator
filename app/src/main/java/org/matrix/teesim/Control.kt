@@ -321,11 +321,13 @@ object Control {
 
     /**
      * Ask the lib to re-sign an existing key's attestation [leaf] under profile [profileId]'s
-     * keybox, returning the patched chain (leaf first) or null if there is no live connection, the
-     * request times out, or the lib reports failure. Called from [onCommitted] on [commitExecutor];
+     * keybox for [securityLevel] (the level the leaf's own record reports), returning the patched
+     * chain (leaf first) or null if there is no live connection, the request times out, or the lib
+     * reports failure — which includes a profile that holds no keybox for that level and so
+     * declines to re-root the key at all. Called from [onCommitted] on [commitExecutor];
      * the reader thread delivers the reply, so this must not run on that thread.
      */
-    fun resign(profileId: String, leaf: ByteArray): List<ByteArray>? {
+    fun resign(profileId: String, leaf: ByteArray, securityLevel: Int): List<ByteArray>? {
         val out =
             activeOut
                 ?: run {
@@ -340,7 +342,13 @@ object Control {
                 .put("type", "resign")
                 .put("profile", profileId)
                 .put("leafB64", Base64.getEncoder().encodeToString(leaf))
-        SystemLogger.info("Control: resign request (profile=$profileId, leaf=${leaf.size} bytes)")
+                // The level this leaf's own record reports, so the lib signs it with the keybox for
+                // that level rather than whichever one the profile happens to start from.
+                .put("securityLevel", securityLevel)
+        SystemLogger.info(
+            "Control: resign request (profile=$profileId, leaf=${leaf.size} bytes, " +
+                "level=${Const.securityLevelName(securityLevel)})"
+        )
         try {
             writeFrame(out, req.toString())
         } catch (e: Exception) {

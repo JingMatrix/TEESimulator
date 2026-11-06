@@ -147,6 +147,7 @@ struct ProfileStorage {
   std::string id;
   std::string mode;
   std::vector<uint8_t> keybox;
+  std::vector<uint8_t> keybox_strongbox;  // empty when the profile names no StrongBox keybox
   std::vector<std::string> pkg_strings;
   std::vector<const char *> pkg_ptrs;
   std::vector<int32_t> pkg_users;
@@ -210,6 +211,9 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
     boot.attest_version_strongbox = bi->get("attestVersionStrongBox")
                                         ? int32_t(bi->get("attestVersionStrongBox")->as_int(300))
                                         : 300;
+    boot.strongbox_force_broken = bi->get("strongBoxForceBroken")
+                                      ? bi->get("strongBoxForceBroken")->as_bool(false)
+                                      : false;
   } else {
     boot.device_locked = true;
     boot.attest_version_tee = 400;
@@ -251,6 +255,16 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
           continue;
         }
       }
+      // The profile's optional StrongBox keybox. An undecodable one is dropped rather than failing
+      // the profile: the TEE level keeps working, and the StrongBox level falls back to sharing the
+      // profile's own keybox.
+      if (const tjson::Value *kb = pj.get("keyboxStrongBoxB64")) {
+        if (!Base64Decode(kb->as_string(), s.keybox_strongbox)) {
+          LOGE("ApplyConfig: profile %s has an undecodable StrongBox keybox; ignoring it",
+               s.id.c_str());
+          s.keybox_strongbox.clear();
+        }
+      }
       if (const tjson::Value *pkgs = pj.get("packages")) {
         for (size_t j = 0; j < pkgs->size(); ++j) s.pkg_strings.push_back(pkgs->at(j).as_string());
       }
@@ -282,6 +296,8 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       tp.id = s.id.c_str();
       tp.keybox = s.keybox.data();
       tp.keybox_len = s.keybox.size();
+      tp.keybox_strongbox = s.keybox_strongbox.empty() ? nullptr : s.keybox_strongbox.data();
+      tp.keybox_strongbox_len = s.keybox_strongbox.size();
       tp.mode = s.mode.empty() ? nullptr : s.mode.c_str();
       tp.security_level = pj.get("securityLevel") ? int32_t(pj.get("securityLevel")->as_int(1)) : 1;
       tp.os_version = pj.get("osVersion") ? uint32_t(pj.get("osVersion")->as_int(0)) : 0;
@@ -363,6 +379,11 @@ void HandleConnection(int fd) {
       const tjson::Value *pid = msg.get("profile");
       const tjson::Value *lb = msg.get("leafB64");
       std::string profile = pid ? pid->as_string() : std::string();
+      // The level the leaf's own attestation record reports, so the router signs it with the keybox
+      // for that level. An older daemon that does not send it means TEE, which is what every leaf
+      // this path saw before StrongBox had a keybox of its own.
+      const int32_t level =
+          msg.get("securityLevel") ? int32_t(msg.get("securityLevel")->as_int(1)) : 1;
       // This runs on the control thread, not an app's binder thread, and reaches the same
       // patch_attestation the KeyMint path does, so it stamps a context of its own to keep a WebUI
       // re-sign distinguishable from an app's generateKey in the TA's lines.
@@ -385,7 +406,7 @@ void HandleConnection(int fd) {
       };
       bool ok = false;
       if (lb && !profile.empty() && Base64Decode(lb->as_string(), leaf) && !leaf.empty()) {
-        ok = teesim_cfg_resign(profile.c_str(), leaf.data(), leaf.size(), sink, &sc);
+        ok = teesim_cfg_resign(profile.c_str(), level, leaf.data(), leaf.size(), sink, &sc);
       }
       std::string resp = "{\"type\":\"resigned\",\"ok\":";
       resp += ok ? "true" : "false";

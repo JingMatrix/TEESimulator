@@ -6,7 +6,8 @@
 //
 // renderSystem(mount, state, actions)
 //   state = {
-//     status,       // { daemonRunning, reachable, hookActive, hook, api, harvest, error? } | null
+//     status,       // { daemonRunning, reachable, hookActive, hook, api, harvest,
+//                   //   strongBox:{ forceBroken }, error? } | null
 //     update,       // { installedVersion, currentCode, latest:{code,tag,name,notes,htmlUrl,commit,assets}|null, updateAvailable } | null
 //     probed,       // true once the canary probe has resolved (else "checking")
 //     variant,      // "release" | "debug" — the selected asset to flash
@@ -112,9 +113,12 @@ function harvestCard(status, actions = {}) {
   // integer, "true", hex); the display formatting per field happens in fmtOverrideValue.
   const overrides = (h.overrides && typeof h.overrides === "object" && !Array.isArray(h.overrides)) ? h.overrides : {};
   const sbAvailable = !!h.strongBoxAvailable;
+  // StrongBox forced broken device-wide: no target app reaches the level, so the harvest does not
+  // offer it either — the card shows what this device presents, not what its silicon could do.
+  const sbBroken = !!(status.strongBox && status.strongBox.forceBroken);
   const modes = [
     { key: "tee", label: "TrustedEnvironment" },
-    { key: "strongbox", label: "StrongBox" },
+    ...(sbBroken ? [] : [{ key: "strongbox", label: "StrongBox" }]),
   ];
   if (failed || !modes.some((m) => m.key === harvestMode)) harvestMode = "tee";
   const chipEls = modes.map((m) =>

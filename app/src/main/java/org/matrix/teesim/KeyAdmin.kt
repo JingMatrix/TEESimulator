@@ -497,6 +497,13 @@ object KeyAdmin {
         val o = JSONObject().put("ok", true)
         o.put("version", Updater.currentVersion())
         harvest?.let { o.put("harvest", Harvester.toJson(it)) }
+        // The device-wide StrongBox policy, so the Harvest card can drop the StrongBox level
+        // entirely when it is forced broken. Read straight off config.json and never throwing, so a
+        // config the daemon is currently rejecting still reports the setting the user last wrote.
+        o.put(
+            "strongBox",
+            JSONObject().put("forceBroken", ConfigStore.strongBoxSetting().forceBroken),
+        )
         o.put(
             "lib",
             JSONObject().put("hook", Control.libHook ?: JSONObject.NULL).put("api", Control.libApi),

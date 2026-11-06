@@ -4,10 +4,12 @@
 // renderField(descriptor, value, onChange, context) -> HTMLElement
 //   value    the current value, already read at descriptor.path by the caller
 //   onChange (path, value) => ...  for scalar widgets (text/select/patch/keybox)
-//   context  { id, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
+//   context  { id, keyboxFiles, disabledFields, addApp(entry), removeApp(entry), openScope(),
 //              labelMap, installedSet, autoInclude, autoTakenBy }
 //            - id           stable element id, so a re-render can restore focus
-//            - keyboxFiles  choices for the 'keybox' widget
+//            - keyboxFiles    choices for the 'keybox' widget
+//            - disabledFields { <descriptor key>: true } for a field a device-wide setting
+//                             has taken over; rendered greyed out rather than hidden
 //            - addApp/removeApp  the applist/scope widget's structural callbacks
 //            - openScope    the scope widget's "Configure scope" jump (opens the picker)
 //            - labelMap     optional Map(package -> human label) so a scope chip can show
@@ -122,15 +124,27 @@ function keyboxWidget(d, value, onChange, ctx) {
   // a keybox we can't see right now still shows (flagged) rather than vanishing.
   const files = (ctx.keyboxFiles || []).slice();
   if (value && !files.includes(value)) files.push(value);
-  if (files.length === 0) {
+  // An optional keybox needs a "none" choice, and it stays reachable even with no keybox files, or
+  // a profile naming one we cannot see right now could never be cleared.
+  if (files.length === 0 && !d.allowNone) {
     return el("select", { id: ctx.id, class: "input", disabled: true },
       [el("option", { text: "no keybox files found" })]);
   }
+  const options = d.allowNone
+    ? [el("option", { value: "", selected: !value, text: "none" })]
+    : [];
+  for (const f of files) {
+    options.push(el("option", {
+      value: f, selected: f === value,
+      text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)"),
+    }));
+  }
+  // A field the device-wide policy has taken over renders greyed out rather than hidden, so it is
+  // visible that the choice exists and why it is not the one in force.
   return el("select", {
-    id: ctx.id, class: "input",
+    id: ctx.id, class: "input", disabled: !!ctx.disabledFields && !!ctx.disabledFields[d.key],
     onchange: (e) => onChange(d.path, e.target.value),
-  }, files.map((f) =>
-    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)") })));
+  }, options);
 }
 
 function applistWidget(d, value, ctx) {

@@ -39,6 +39,19 @@ typedef struct {
   bool strongbox_available;  // device can produce a real StrongBox-backed key; gates patch at that level
   int32_t attest_version_tee;        // harvested KeyMint HAL version at TEE (attestationVersion)
   int32_t attest_version_strongbox;  // harvested KeyMint HAL version at StrongBox (TEE value if broken)
+  // Force a broken StrongBox, device-wide. A real device's two security levels are separately
+  // provisioned secure elements with their own batch keys, and a batch certificate names the level
+  // it belongs to (`title=TEE` on a factory-provisioned key — the keybox format — or `O=TEE` on an
+  // RKP-issued one, against StrongBox for the other level). It issues every leaf it signs, so
+  // serving StrongBox from a keybox provisioned for the TEE leaves one certificate whose issuer
+  // names the TEE while its own attestation extension says StrongBox — which no hardware produces.
+  //
+  // With this set, StrongBox key CREATION that would be attested is refused for target apps: they
+  // see HARDWARE_TYPE_UNAVAILABLE, which keystore2 turns into StrongBoxUnavailableException, and
+  // fall back to the TEE. It overrides every profile's StrongBox keybox, since the point is that no
+  // app reaches the level at all. Keys without a challenge, and StrongBox keys minted earlier, keep
+  // working — only attested creation is refused.
+  bool strongbox_force_broken;
 } TsBootInfo;
 
 // One fully-resolved profile from a config push. All strings/bytes are borrowed
@@ -47,6 +60,13 @@ typedef struct {
   const char *id;
   const uint8_t *keybox;
   size_t keybox_len;
+  // An optional SECOND keybox for this profile, used only by its StrongBox TA — a keybox
+  // provisioned for StrongBox, so that level signs with a batch certificate of its own instead of
+  // the TEE one above. NULL/0 when the profile has none, and the StrongBox TA then shares `keybox`
+  // (what every version before this one did). Ignored while TsBootInfo::strongbox_force_broken is
+  // set, which refuses the level outright.
+  const uint8_t *keybox_strongbox;
+  size_t keybox_strongbox_len;
   const char *mode;  // "patch" | "generation"; NULL defaults to generation
   int32_t security_level;  // 0 Software, 1 TEE, 2 StrongBox
   uint32_t os_version;
@@ -84,13 +104,16 @@ int teesim_cfg_commit(uint64_t epoch, char *err, size_t err_len);
 
 // Re-sign an existing key's real attestation leaf under profile `profile_id`'s keybox with its
 // patched (locked/Verified) root of trust — patch mode applied to a key already stored in the
-// keystore. `leaf`/`leaf_len` is the DER leaf. `sink` is invoked once per certificate of the
-// resulting chain [patched leaf, keybox chain] with its DER bytes. Returns false if the profile is
-// unknown or the re-sign fails (the keystore1 interceptor, which has no patch mode, always returns
-// false). Runs on the control thread, against the live profile set.
+// keystore. `leaf`/`leaf_len` is the DER leaf, and `security_level` (0 Software, 1 TEE, 2 StrongBox)
+// is the level that leaf's own attestation record reports: the re-signed leaf keeps that record, so
+// it has to be signed by the keybox for THAT level or the result says StrongBox while its issuer
+// says TEE. `sink` is invoked once per certificate of the resulting chain [patched leaf, keybox
+// chain] with its DER bytes. Returns false if the profile is unknown, the profile has no keybox for
+// that level, or the re-sign fails (the keystore1 interceptor, which has no patch mode, always
+// returns false). Runs on the control thread, against the live profile set.
 typedef void (*TsCertSink)(void *ctx, const uint8_t *der, size_t der_len);
-bool teesim_cfg_resign(const char *profile_id, const uint8_t *leaf, size_t leaf_len,
-                       TsCertSink sink, void *ctx);
+bool teesim_cfg_resign(const char *profile_id, int32_t security_level, const uint8_t *leaf,
+                       size_t leaf_len, TsCertSink sink, void *ctx);
 // Which hook this lib is, for the hello message: "keymint" or "keystore1".
 const char *teesim_hook_name(void);
 

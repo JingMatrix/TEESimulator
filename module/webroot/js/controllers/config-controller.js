@@ -741,6 +741,13 @@ export function create(mount) {
       document.dispatchEvent(new CustomEvent("teesim:navigate", { detail: { panel: "system" } }));
     },
 
+    // The StrongBox note's "Change for the whole device" link: that setting is device-wide and
+    // lives beside the keyboxes it picks from, so the editor hands off to the Keyboxes screen.
+    gotoKeyboxes() {
+      closeEditor();
+      document.dispatchEvent(new CustomEvent("teesim:navigate", { detail: { panel: "keyboxes" } }));
+    },
+
     onClose() { closeEditor(); },
     onSave() { return save(); },
   };

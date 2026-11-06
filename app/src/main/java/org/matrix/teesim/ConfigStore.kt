@@ -23,6 +23,10 @@ object ConfigStore {
     data class ProfileConfig(
         val id: String,
         val keybox: String, // relative to Const.DATA_DIR
+        // An optional SECOND keybox for this profile, one provisioned for StrongBox, so that level
+        // signs with a batch certificate of its own. Empty when the profile has none, and its
+        // StrongBox level then shares [keybox] — which a verifier can tell from real hardware.
+        val keyboxStrongBox: String,
         val mode: String, // "patch" | "generation"
         val patchSystem: String,
         val patchVendor: String,
@@ -45,10 +49,48 @@ object ConfigStore {
         val autoIncludeNewApps: Boolean,
     )
 
+    /**
+     * The device-wide StrongBox policy, from config.json's top-level `"strongBox"` object.
+     *
+     * One decision: whether to present StrongBox as broken. A real device's two security levels are
+     * separately provisioned secure elements with their own batch keys, and a batch certificate
+     * names the level it belongs to, so serving StrongBox from a keybox provisioned for the TEE
+     * leaves a certificate whose issuer names the TEE while the record inside it says StrongBox.
+     * A profile with no StrongBox keybox of its own is in exactly that position; forcing the level
+     * broken takes it off the table for every app instead.
+     *
+     * [forceBroken] overrides every profile's StrongBox keybox — the point is that no target app
+     * reaches the level at all.
+     */
+    data class StrongBox(val forceBroken: Boolean)
+
     data class Config(
         val version: Int,
+        val strongBox: StrongBox,
         val profiles: List<ProfileConfig>,
     )
+
+    /** The default when config.json names no `"strongBox"` object: what the module always did. */
+    private val STRONGBOX_DEFAULT = StrongBox(forceBroken = false)
+
+    private val KEYBOX_RE = Regex("^[A-Za-z0-9._-]+\\.xml$")
+
+    /**
+     * Read the device-wide StrongBox setting without validating the rest of the config. Never
+     * throws — a missing or broken config.json just means the default — so the read-only status
+     * endpoint can report the setting even while the config as a whole is being rejected.
+     */
+    fun strongBoxSetting(): StrongBox =
+        try {
+            parseStrongBox(JSONObject(Const.configFile.readText()))
+        } catch (e: Exception) {
+            STRONGBOX_DEFAULT
+        }
+
+    private fun parseStrongBox(root: JSONObject): StrongBox {
+        val o = root.optJSONObject("strongBox") ?: return STRONGBOX_DEFAULT
+        return StrongBox(forceBroken = o.optBoolean("forceBroken", false))
+    }
 
     /** Parse and validate the on-disk config. Throws [ConfigException] if invalid. */
     fun load(): Config {
@@ -64,6 +106,8 @@ object ConfigStore {
 
         val version = root.optInt("version", 0)
         if (version != 1) throw ConfigException("unsupported config version $version (expected 1)")
+
+        val strongBox = parseStrongBox(root)
 
         val profilesObj =
             root.optJSONObject("profiles")
@@ -88,6 +132,30 @@ object ConfigStore {
             val keyboxFile = File(Const.DATA_DIR, keybox)
             if (!keyboxFile.isFile)
                 throw ConfigException("profile '$id' keybox not found: ${keyboxFile.absolutePath}")
+
+            // The profile's optional StrongBox keybox: a keybox provisioned for StrongBox, so that
+            // level signs with its own batch certificate instead of the TEE one above. It must not
+            // be the profile's own keybox — one keybox signing both levels is the very thing it
+            // exists to replace.
+            val keyboxStrongBox = p.optString("keyboxStrongBox", "").trim()
+            if (keyboxStrongBox.isNotEmpty()) {
+                if (!KEYBOX_RE.matches(keyboxStrongBox))
+                    throw ConfigException(
+                        "profile '$id' keyboxStrongBox '$keyboxStrongBox' is not a plain *.xml " +
+                            "file name"
+                    )
+                val sbFile = File(Const.DATA_DIR, keyboxStrongBox)
+                if (!sbFile.isFile)
+                    throw ConfigException(
+                        "profile '$id' keyboxStrongBox not found: ${sbFile.absolutePath}"
+                    )
+                if (keyboxStrongBox == keybox)
+                    throw ConfigException(
+                        "profile '$id' names the same file as both keybox and keyboxStrongBox; one " +
+                            "keybox signing both security levels is what a StrongBox keybox exists " +
+                            "to replace"
+                    )
+            }
 
             // Operation mode: patch (re-sign the real hardware attestation) or generation (mint the
             // whole key). Defaults to patch; a level whose hardware is unavailable still falls back
@@ -168,6 +236,7 @@ object ConfigStore {
                 ProfileConfig(
                     id = id,
                     keybox = keybox,
+                    keyboxStrongBox = keyboxStrongBox,
                     mode = mode,
                     // Defaults for an omitted field mirror the shipped config: a current-month
                     // system patch and the conventional YYYY-MM-05 vendor/boot patch; an absent
@@ -192,7 +261,7 @@ object ConfigStore {
                 )
             )
         }
-        return Config(version, profiles)
+        return Config(version, strongBox, profiles)
     }
 
     private var observer: FileObserver? = null

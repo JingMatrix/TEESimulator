@@ -81,6 +81,13 @@ export const FIELDS = [
     help: "An *.xml keybox under /data/adb/teesim to sign attestations with.",
   },
   {
+    key: "keyboxStrongBox", path: ["keyboxStrongBox"], label: "StrongBox keybox",
+    group: "attestation", type: "keybox", re: KEYBOX_RE, required: false, default: "",
+    allowNone: true,
+    help: "A keybox provisioned for StrongBox, so that level signs with its own certificate. " +
+      "Without one it shares the keybox above — a TEE signer, which is detectable.",
+  },
+  {
     key: "mode", path: ["mode"], label: "Operation mode", group: "attestation",
     type: "select", options: ["patch", "generation"], required: true, default: "patch",
     re: MODE_RE,
@@ -135,6 +142,38 @@ export const FIELDS = [
   },
 ];
 
+// --- the device-wide StrongBox policy ------------------------------------
+// One decision, device-wide: present StrongBox as broken. Each security level of a device is a
+// separately provisioned secure element with its own batch key, and that key's certificate names
+// the level it belongs to — so a profile serving StrongBox from its TEE keybox leaves a certificate
+// whose issuer names the TEE while the record inside it says StrongBox, which no hardware produces.
+// A profile can answer that with a StrongBox keybox of its own (the keyboxStrongBox field above);
+// forcing the level broken is the answer for every profile that cannot.
+//
+// Lives at config.json's top level as `{ "strongBox": { "forceBroken": false } }`; an absent object
+// means the default, which is what the module did before the setting existed.
+export const STRONGBOX_DEFAULT = { forceBroken: false };
+
+/** A fresh copy of the default policy, so two configs never share one object. */
+export function emptyStrongBox() {
+  return { ...STRONGBOX_DEFAULT };
+}
+
+/**
+ * The policy as read off a config, defaults filled in. Never returns null, so a config written
+ * before the setting existed simply takes the defaults.
+ */
+export function strongBoxOf(config) {
+  const raw = config && config.strongBox;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyStrongBox();
+  return { forceBroken: raw.forceBroken === true };
+}
+
+/** True while StrongBox is forced broken, which overrides every profile's StrongBox keybox. */
+export function strongBoxBroken(config) {
+  return strongBoxOf(config).forceBroken;
+}
+
 // Clone a default so two profiles never share the same array/object reference.
 const cloneDefault = (v) => (Array.isArray(v) ? v.slice() : v && typeof v === "object" ? JSON.parse(JSON.stringify(v)) : v);
 
@@ -147,5 +186,5 @@ export function emptyProfile() {
 
 // Build a blank, valid-shaped config.
 export function emptyConfig() {
-  return { version: VERSION, profiles: {} };
+  return { version: VERSION, strongBox: emptyStrongBox(), profiles: {} };
 }

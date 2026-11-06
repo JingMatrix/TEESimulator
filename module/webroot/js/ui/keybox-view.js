@@ -133,8 +133,15 @@ function keyBlock(k) {
     : linkage === "broken" ? el("span", { class: "chip warn", text: "chain broken" })
     : linkage === "single" ? el("span", { class: "chip", text: "single cert" })
     : null;
+  // The level this batch key was provisioned for, as written into its certificate (O=TEE /
+  // O=StrongBox). It is what decides which slot of a profile the keybox belongs in: a TEE keybox
+  // signing a StrongBox attestation leaves a leaf whose issuer contradicts its own record.
+  const levelChip = k.batchLevel
+    ? el("span", { class: "chip", title: "The level this batch key was provisioned for", text: k.batchLevel })
+    : null;
   const head = el("div", { class: "kbi-head" }, [
     el("span", { class: "chip mono", text: (k.algorithm || "?").toUpperCase() }),
+    levelChip,
     el("span", { class: "chip", text: (k.chainLength || 0) + (k.chainLength === 1 ? " cert" : " certs") }),
     linkChip,
     k.privateKeyPresent

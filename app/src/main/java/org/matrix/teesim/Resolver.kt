@@ -13,9 +13,10 @@ import org.json.JSONObject
  *
  * Field names mirror control.cpp exactly: top level: type, epoch, bootInfo, profiles bootInfo:
  * verifiedBootKey(b64), verifiedBootHash(b64), moduleHash(b64, optional), deviceLocked,
- * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox profile: id,
- * keyboxB64, mode, securityLevel(int), osVersion, osPatchLevel, vendorPatchLevel, bootPatchLevel,
- * deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name entry verbatim
+ * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox,
+ * strongBoxForceBroken profile: id, keyboxB64, keyboxStrongBoxB64 (optional), mode,
+ * securityLevel(int), osVersion, osPatchLevel, vendorPatchLevel, bootPatchLevel, deviceIds{...},
+ * packages[], uids[]. packages[] is every explicit package-name entry verbatim
  * (kept even when not installed, since a name-match still fires on a later install); uids[] is the
  * independent effective caller-uid set (resolved packages + raw uid:N tokens + autoIncludeNewApps
  * expansion, never -1). The router matches package name first, uid second, so the two arrays need
@@ -78,6 +79,9 @@ object Resolver {
                     if (Harvester.noWorkingHardware(harvest)) effVersion
                     else harvest.strongBoxAttestationVersion,
                 )
+                // Force a broken StrongBox device-wide: the router refuses attested StrongBox
+                // key creation for target apps, so no app reaches a level we have no keybox for.
+                put("strongBoxForceBroken", config.strongBox.forceBroken)
             },
         )
 
@@ -122,6 +126,17 @@ object Resolver {
 
         val keyboxBytes = File(Const.DATA_DIR, p.keybox).readBytes()
         o.put("keyboxB64", b64.encodeToString(keyboxBytes))
+
+        // The profile's StrongBox keybox, when it names one: the router builds that level's TA from
+        // it, so the two levels present different batch certificates the way two separately
+        // provisioned secure elements do. Without one the StrongBox level shares the keybox above —
+        // a signer a verifier can read off a single StrongBox leaf, whose issuer would name the TEE
+        // while its own record says StrongBox.
+        if (p.keyboxStrongBox.isNotEmpty()) {
+            val sbBytes = File(Const.DATA_DIR, p.keyboxStrongBox).readBytes()
+            o.put("keyboxStrongBoxB64", b64.encodeToString(sbBytes))
+        }
+
 
         // Operation mode: "patch" re-signs the real hardware attestation, "generation" mints the
         // whole key in our TA. The router still forces generation for a level whose hardware is

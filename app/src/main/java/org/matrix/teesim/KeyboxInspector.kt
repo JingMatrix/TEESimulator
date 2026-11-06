@@ -8,6 +8,9 @@ import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
 import java.util.Base64
 import javax.xml.parsers.DocumentBuilderFactory
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x500.style.BCStyle
+import org.bouncycastle.asn1.x500.style.IETFUtils
 import org.json.JSONArray
 import org.json.JSONObject
 import org.w3c.dom.Element
@@ -139,6 +142,35 @@ object KeyboxInspector {
     fun canonicalDn(p: javax.security.auth.x500.X500Principal): String =
         p.getName(javax.security.auth.x500.X500Principal.CANONICAL)
 
+    /**
+     * The security level a batch certificate was provisioned for, as Google's attestation
+     * provisioning writes it into the certificate's own subject. Each security level of a device is
+     * a separately provisioned secure element with its own batch key, and the level is named in the
+     * subject: `TEE` for a TrustedEnvironment batch key, `StrongBox` for a StrongBox one.
+     *
+     * Two spellings are in the field, so both are read. A factory-provisioned batch key puts it in
+     * `title` (OID 2.5.4.12) beside a `serialNumber`; a remotely provisioned (RKP) one puts it in
+     * `O` (2.5.4.10) beside a `CN`. Both forms turn up in keyboxes, and both levels occur in each
+     * form — a Pixel 7 reads `O=TEE,CN=94968d0f…` and `O=StrongBox,CN=c6172164…`, while a Pixel 6's
+     * StrongBox is factory-provisioned and reads `title=StrongBox,serialNumber=06842f84…`.
+     *
+     * This is also what a verifier reads: an attested key's leaf is issued by the batch key, so its
+     * issuer names a level, and the attestation record inside that same leaf names one too. A leaf
+     * that says TEE in its issuer and StrongBox in its record could not have come from hardware.
+     *
+     * Returns the level verbatim, or "" when the certificate names none (the oldest keyboxes carry
+     * a bare `serialNumber` and nothing else).
+     */
+    fun batchLevel(cert: X509Certificate): String =
+        try {
+            val name = X500Name.getInstance(cert.subjectX500Principal.encoded)
+            val rdn =
+                name.getRDNs(BCStyle.O).firstOrNull() ?: name.getRDNs(BCStyle.T).firstOrNull()
+            rdn?.first?.value?.let { IETFUtils.valueToString(it) }.orEmpty()
+        } catch (e: Exception) {
+            ""
+        }
+
     private fun inspectKey(ke: Element): JSONObject {
         val out = JSONObject().put("algorithm", ke.getAttribute("algorithm").ifBlank { "?" })
 
@@ -210,6 +242,11 @@ object KeyboxInspector {
         val topIndex = parsed.indexOfLast { it != null }
         if (topIndex >= 0) certs.optJSONObject(topIndex)?.put("rootAuthority", authority)
 
+        // The level this chain's batch (signing) certificate was provisioned for, so the WebUI can
+        // say whether a keybox belongs in a profile's keybox slot or in the device-wide StrongBox
+        // setting. Only the signing certificate carries it; the intermediates above are shared
+        // across levels.
+        out.put("batchLevel", valid.firstOrNull()?.let { batchLevel(it) }.orEmpty())
         out.put("chainLength", certNodes.length)
         out.put("certs", certs)
         out.put("linkage", linkage(valid))

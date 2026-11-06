@@ -49,9 +49,11 @@ A schema version and a map of named profiles. Each targeted package must appear 
 ```jsonc
 {
   "version": 1,
+  "strongBox": { "forceBroken": false },         // device-wide; see "StrongBox needs its own keybox"
   "profiles": {
     "default": {
-      "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa + ecdsa, chains >= 2)
+      "keybox": "keybox.xml",                // relative to /data/adb/teesim; signs the TEE level
+      "keyboxStrongBox": "",                 // optional second keybox for the StrongBox level
       "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",                       // empty = harvested | system_property | "16" | "16.0.0" | 160000
       "brand": "", "device": "", "product": "",
@@ -91,6 +93,48 @@ A keybox carries the private keys and certificate chains the simulator signs wit
 ```
 
 A profile names its keybox by relative path, so several profiles can sign with different keyboxes. An app that is in no profile is transparent to the module — its keys go straight to the real hardware.
+
+### StrongBox needs its own keybox
+
+A device with StrongBox runs *two* independent KeyMint instances, each provisioned with its own batch key — and **that key's certificate names the level it belongs to**. One key per level on a Pixel 7:
+
+```
+TEE key,       chain[0].issuer = O=TEE,       CN=94968d0f1f1ed5511eeb20f339231bda
+StrongBox key, chain[0].issuer = O=StrongBox, CN=c61721642b4b9c019cf679eda12f7a30
+```
+
+The level is spelled two ways, and which one appears says how it was provisioned:
+
+| | factory-provisioned | remotely provisioned (RKP) |
+| --- | --- | --- |
+| subject | `title=TEE`, `serialNumber=<hex>` | `O=TEE`, `CN=<hex>` |
+| chain above it | 3 certs, to the self-signed `serialNumber=f92009e853b6b045` | 4 certs, via `Droid CA3` / `Droid CA2` to `Key Attestation CA1` |
+| validity | 10 years, dated at manufacture | ~2 weeks, issued days ago |
+
+Either way the keybox names a level, and that certificate issues every leaf it signs. Serving StrongBox from a keybox provisioned for the TEE therefore yields a certificate that contradicts itself — issuer names the TEE, the record inside it says StrongBox. No hardware produces that, and one generated key reveals it. (The weaker form: generate at both levels and compare `chain[1]` — distinct on hardware, byte-identical with one keybox.)
+
+So a profile may name a **second keybox** for StrongBox, and the module builds that level's KeyMint instance from it:
+
+```jsonc
+"keybox": "keybox.xml",            // signs the TEE level
+"keyboxStrongBox": "strongbox.xml" // signs the StrongBox level; "" to share the keybox above
+```
+
+StrongBox keyboxes are scarcer than TEE ones, so for profiles that have none there is one device-wide escape hatch — **force StrongBox broken**:
+
+```jsonc
+"strongBox": { "forceBroken": false }
+```
+
+With it set, a StrongBox key that would be *attested* is refused with `HARDWARE_TYPE_UNAVAILABLE`, which apps see as `StrongBoxUnavailableException`: they fall back to the TEE, and no chain is emitted to compare. Keys without a challenge, and StrongBox keys minted earlier, keep working. It overrides every profile's StrongBox keybox, so the profile editor greys that field out and the Harvest card stops offering the StrongBox level at all — the device presents as one without it.
+
+| | StrongBox attestations |
+| --- | --- |
+| `forceBroken` | refused; apps fall back to the TEE |
+| profile names `keyboxStrongBox` | signed with it — two levels, two batch certificates, as on hardware |
+| neither (default) | signed with the profile's own keybox — detectable, as above |
+
+Android 12+ only. The legacy Android 10/11 `keystore` path is hooked above the point where the level is chosen, so it cannot see which level a request asked for; both settings are logged and ignored there.
 
 ### WebUI
 

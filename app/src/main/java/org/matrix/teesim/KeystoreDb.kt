@@ -9,6 +9,9 @@ import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.interfaces.ECPublicKey
 import java.security.interfaces.RSAPublicKey
+import org.bouncycastle.asn1.ASN1Enumerated
+import org.bouncycastle.asn1.ASN1OctetString
+import org.bouncycastle.asn1.ASN1Sequence
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -138,9 +141,36 @@ object KeystoreDb {
     }
 
     /**
-     * One pre-existing key to re-attest: its owning app uid, keyentry id, and leaf certificate DER.
+     * One pre-existing key to re-attest: its owning app uid, keyentry id, leaf certificate DER, and
+     * the security level the leaf's own attestation record reports (0 Software, 1 TEE, 2 StrongBox).
+     * Re-signing keeps that record, so the level decides which of the profile's keyboxes may sign
+     * it — a StrongBox record re-rooted under a TEE keybox contradicts itself.
      */
-    data class AttestedKey(val uid: Int, val id: Long, val leaf: ByteArray)
+    data class AttestedKey(
+        val uid: Int,
+        val id: Long,
+        val leaf: ByteArray,
+        val securityLevel: Int,
+    )
+
+    /**
+     * The attestationSecurityLevel of a leaf's KeyDescription — field 1 of the extension sequence.
+     * Defaults to TEE for a leaf whose record will not parse: that is the level every attestation
+     * this path saw before StrongBox could have a keybox of its own, so an unreadable record keeps
+     * the behaviour it already had rather than silently taking the StrongBox branch.
+     */
+    private fun attestationLevel(leaf: X509Certificate): Int =
+        try {
+            val raw = leaf.getExtensionValue(ATTEST_EXT_OID)
+            val kd = ASN1Sequence.getInstance(ASN1OctetString.getInstance(raw).octets)
+            ASN1Enumerated.getInstance(kd.getObjectAt(1)).value.toInt()
+        } catch (e: Throwable) {
+            SystemLogger.warning(
+                "KeystoreDb: could not read the attestation security level off a leaf; assuming TEE",
+                e,
+            )
+            Const.SECLEVEL_TEE
+        }
 
     /**
      * Every stored key of the given app [uids] that carries a hardware attestation leaf and is NOT
@@ -212,7 +242,7 @@ object KeystoreDb {
                     skippedRooted++
                     continue
                 }
-                out.add(AttestedKey(uid, id, leaf.encoded))
+                out.add(AttestedKey(uid, id, leaf.encoded, attestationLevel(leaf)))
             }
             SystemLogger.info(
                 "KeystoreDb.attestedKeys: ${idToUid.size} non-marker candidate(s) across ${uids.size} uid(s) -> " +

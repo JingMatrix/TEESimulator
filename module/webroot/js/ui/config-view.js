@@ -14,7 +14,7 @@
 
 import { el, clear, disclosure } from "./dom.js";
 import { renderField } from "./field.js";
-import { FIELDS, PROFILE_RE } from "../domain/schema.js";
+import { FIELDS, PROFILE_RE, strongBoxBroken } from "../domain/schema.js";
 import { getPath } from "../domain/path.js";
 
 // Groups render top to bottom. `fold: true` collapses the group behind a disclosure so
@@ -46,6 +46,16 @@ function foldSummary(group, fields, profile, hasErrors) {
   }
   if (hasErrors) nodes.push(el("span", { class: "chip warn small", text: "!" }));
   return nodes;
+}
+
+// Why the StrongBox keybox picker is greyed out: the device-wide policy forces StrongBox broken, so
+// no target app reaches that level and a keybox for it would sign nothing.
+function strongBoxBrokenNote(actions) {
+  return el("p", { class: "field-help" }, [
+    "StrongBox is forced broken for the whole device, so this is not in use. ",
+    el("button", { type: "button", class: "linklike", onclick: () => actions.gotoKeyboxes() }, "Change"),
+    ".",
+  ]);
 }
 
 // A cue under a level / identity field: what an empty value resolves to — the harvested value,
@@ -153,6 +163,7 @@ export function renderProfileEditor(host, state, actions) {
     byField.get(k).push(e.msg);
   }
   const errFor = (field) => byField.get(field) || [];
+  const sbBroken = strongBoxBroken(config);
 
   // Header: a back control that closes the drill-in, and the section title.
   host.appendChild(el("div", { class: "drill-head" }, [
@@ -197,6 +208,9 @@ export function renderProfileEditor(host, state, actions) {
     const value = getPath(profile, d.path);
     const ctx = {
       id: fieldId(name, d.key), keyboxFiles,
+      // The StrongBox keybox is the profile's choice only while the device-wide policy leaves the
+      // level alive; a forced-broken StrongBox takes it over, so the picker greys out.
+      disabledFields: { keyboxStrongBox: sbBroken },
       addApp: (pkg) => actions.onAddApp(name, pkg),
       removeApp: (pkg) => actions.onRemoveApp(name, pkg),
       // The scope widget only shows the current picks and a button that opens the picker;
@@ -217,6 +231,7 @@ export function renderProfileEditor(host, state, actions) {
     };
     const onChange = (path, v) => actions.onFieldChange(name, path, v);
     const fieldEl = renderField(d, value, onChange, ctx);
+    if (d.key === "keyboxStrongBox" && sbBroken) fieldEl.appendChild(strongBoxBrokenNote(actions));
     const hint = resolveHint(d, value, resolved);
     if (hint) fieldEl.appendChild(hint);
     for (const m of errFor(d.key)) fieldEl.appendChild(el("div", { class: "err", text: m }));

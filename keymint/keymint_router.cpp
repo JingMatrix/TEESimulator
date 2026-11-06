@@ -76,6 +76,9 @@ struct Profile {
   // auto-included one. Only used to name the caller in the log — routing never reads it.
   std::vector<std::string> uid_names;
   bool patch_mode = false;
+  // This profile named a StrongBox keybox, so ta_strongbox signs with a batch key distinct from
+  // ta_tee's. Only the staged-profile log line reads it; routing never does.
+  bool strongbox_own_keybox = false;
 
   // The TA that serves requests arriving at `level`. Software-level KeyMint is never wrapped, so any
   // non-StrongBox level maps to the TrustedEnvironment instance.
@@ -91,6 +94,10 @@ std::vector<Profile> g_profiles;
 // failing while the daemon has not pushed a config yet; see WaitForDefaultTa.
 std::condition_variable g_cfg_cv;
 bool g_strongbox_ok = false;  // device can patch real StrongBox keys; else StrongBox forces generation
+// Force a broken StrongBox, device-wide (see TsBootInfo in common/control.h): the level refuses to
+// create an attested key at all, overriding any profile's StrongBox keybox. Guarded by g_cfg_mu,
+// swapped by teesim_cfg_commit alongside the profile set.
+bool g_strongbox_force_broken = false;
 // The device-wide MODULE_HASH to seed a freshly built TA with, so a generation-mode key carries the
 // tag keystore2 only sends once per boot (and never resends to a TA built afterwards). Preference:
 // the exact bytes keystore2 pushed via setAdditionalAttestationInfo, captured below; the daemon's own
@@ -108,6 +115,7 @@ int32_t g_stage_vb_state = 0;
 bool g_stage_strongbox_ok = false;
 int32_t g_stage_attest_version_tee = 400;
 int32_t g_stage_attest_version_strongbox = 300;
+bool g_stage_strongbox_force_broken = false;
 
 // --- Per-caller usage stats --------------------------------------------------
 // Every app that asks us for a key this boot is recorded here from generateKey,
@@ -185,7 +193,20 @@ struct RequestTarget {
   // The profile's id, for the log: on a device with more than one profile it says which keybox
   // signed a chain.
   std::string id;
+  // We decline to attest at the level this request arrived on: there is no keybox for that level,
+  // and signing with the other level's would be visible in the leaf (see RefuseLevel). Set only for
+  // StrongBox — a profile's own keybox is a TEE keybox, and always serves the TEE level.
+  bool refuse_attestation = false;
 };
+
+// Whether we decline to attest at `level`. Only StrongBox can be declined, and only when the user
+// asked for a broken StrongBox: the point of that setting is that no target app reaches the level,
+// so it overrides a profile's StrongBox keybox rather than deferring to it.
+//
+// Device-wide, like the StrongBox it speaks for. Callers must hold g_cfg_mu.
+bool RefusesAttestationAt(SecurityLevel level) {
+  return level == SecurityLevel::STRONGBOX && g_strongbox_force_broken;
+}
 
 RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t caller_uid,
                                 SecurityLevel level) {
@@ -215,7 +236,7 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
                pkg.name.c_str(), prof.id.c_str(), pkg.user_id, caller_user);
           continue;
         }
-        return {prof.TaFor(level), prof.patch_mode, prof.id};
+        return {prof.TaFor(level), prof.patch_mode, prof.id, RefusesAttestationAt(level)};
       }
     }
   }
@@ -225,7 +246,8 @@ RequestTarget ProfileForRequest(const std::vector<KeyParameter>& params, uid_t c
   if (caller_uid != static_cast<uid_t>(-1)) {
     for (const auto& prof : g_profiles) {
       for (int32_t uid : prof.uids) {
-        if (static_cast<uid_t>(uid) == caller_uid) return {prof.TaFor(level), prof.patch_mode, prof.id};
+        if (static_cast<uid_t>(uid) == caller_uid)
+          return {prof.TaFor(level), prof.patch_mode, prof.id, RefusesAttestationAt(level)};
       }
     }
   }
@@ -506,6 +528,23 @@ ndk::ScopedAStatus NoRealHal(const char* what) {
   LOGW("%s: FAILED, not ours to serve and no real HAL to forward to; reporting rc=-100(%s)", what,
        teesim_km_err_name(-100));
   return Status(-100);
+}
+
+// ErrorCode::HARDWARE_TYPE_UNAVAILABLE. The answer a KeyMint instance gives when it cannot serve the
+// security level asked of it; keystore2's framework layer turns it into the
+// StrongBoxUnavailableException an app already handles, which is why refusing reads to the caller as
+// "this device has no StrongBox for you" rather than as a broken key store.
+constexpr int32_t kHardwareTypeUnavailable = -68;
+
+// The reply to a request that would attest at a level this profile holds no keybox for. Declining is
+// the quieter answer: the alternatives are to sign the StrongBox leaf with the TEE batch key (whose
+// subject then contradicts the level inside that same leaf) or to let the real StrongBox serve it
+// (an authentic chain, but carrying the device's real, unlocked root of trust).
+ndk::ScopedAStatus RefuseLevel(const char* what, const char* level) {
+  LOGI("%s: %s is forced broken; refusing to attest there with rc=%d(%s) so the caller falls back "
+       "to a level we can sign for",
+       what, level, kHardwareTypeUnavailable, teesim_km_err_name(kHardwareTypeUnavailable));
+  return Status(kHardwareTypeUnavailable);
 }
 
 // The reply to an operation on one of our keys that arrives with no TA to serve it.
@@ -1022,6 +1061,15 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
       }
       return NoRealHal(__func__);
     }
+    // A level this profile has no keybox for. Only a request that would EMIT an attestation is
+    // refused: an attestation is the only thing that carries a batch certificate, so a plain
+    // StrongBox-backed key (no challenge) stays available and keeps working. An ATTEST_KEY is
+    // refused with them — it carries no challenge itself, but it exists to sign later leaves, and
+    // its own keybox chain would reach them.
+    if (t.refuse_attestation &&
+        (HasAttestationChallenge(keyParams) || IsAttestKeyRequest(keyParams))) {
+      return RefuseLevel(__func__, LevelName(level_));
+    }
     // Creating an ATTESTATION KEY (ATTEST_KEY purpose) always mints it in the TA (ours). Unless the
     // caller named one of our keys as its attest key (the "ours" case just below), we ignore any
     // injected attest key and self-attest the new key under the keybox. This MUST come before the
@@ -1127,6 +1175,12 @@ class TeesimKeyMintDevice : public BnKeyMintDevice {
         return st;
       }
       return NoRealHal(__func__);
+    }
+    // As in generateKey, a level this profile holds no keybox for refuses the requests that would
+    // emit an attestation under it.
+    if (t.refuse_attestation &&
+        (HasAttestationChallenge(keyParams) || IsAttestKeyRequest(keyParams))) {
+      return RefuseLevel(__func__, LevelName(level_));
     }
     // As in generateKey: a foreign attest key can't be used by our TA — forward instead.
     if (attestationKey && !IsOurs(attestationKey->keyBlob)) {
@@ -1603,16 +1657,32 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
   g_stage_strongbox_ok = boot->strongbox_available;
   g_stage_attest_version_tee = boot->attest_version_tee;
   g_stage_attest_version_strongbox = boot->attest_version_strongbox;
+  g_stage_strongbox_force_broken = boot->strongbox_force_broken;
+  LOGI("teesim_cfg_begin: StrongBox = %s",
+       g_stage_strongbox_force_broken
+           ? "forced broken (attested StrongBox keys are refused for target apps)"
+           : "served per profile");
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   // A real device runs a separate KeyMint instance per security level; we mirror that with one fixed-
-  // level TA per level. Both are built from the same keybox and boot state, so their key-encryption
-  // keys match and any of our blobs decrypts under either — but each stamps its own level into the
-  // keys it mints, so operations read a key's characteristics at the level it was minted at with no
-  // per-request override. `p->security_level` is retained only for the staged-profile log line.
+  // level TA per level. Both share the boot state, so their key-encryption keys match and any of our
+  // blobs decrypts under either — but each stamps its own level into the keys it mints, so operations
+  // read a key's characteristics at the level it was minted at with no per-request override.
+  // `p->security_level` is retained only for the staged-profile log line.
+  //
+  // The StrongBox instance signs with this profile's StrongBox keybox when it names one. A real
+  // device's two levels are separately provisioned secure elements with their own batch keys, and
+  // the batch certificate names its level, so a shared keybox is visible in one leaf. Without one
+  // the instance still exists and still shares `keybox` — it has to decrypt and operate on
+  // StrongBox blobs this profile minted before, and a forced-broken StrongBox refuses attestation
+  // above it regardless.
+  const bool sb_own_keybox = p->keybox_strongbox && p->keybox_strongbox_len > 0;
   auto buildTa = [&](int32_t level) -> ::Ta* {
-    return teesim_km_init_ex(p->keybox, p->keybox_len, level, p->os_version, p->os_patchlevel,
+    const bool sb = level == static_cast<int32_t>(SecurityLevel::STRONGBOX);
+    const uint8_t* kb = (sb && sb_own_keybox) ? p->keybox_strongbox : p->keybox;
+    const size_t kb_len = (sb && sb_own_keybox) ? p->keybox_strongbox_len : p->keybox_len;
+    return teesim_km_init_ex(kb, kb_len, level, p->os_version, p->os_patchlevel,
                              p->vendor_patchlevel, p->boot_patchlevel, g_stage_vb_key.data(),
                              g_stage_vb_key.size(), g_stage_vb_hash.data(), g_stage_vb_hash.size(),
                              g_stage_locked, g_stage_vb_state, g_stage_attest_version_tee,
@@ -1631,6 +1701,7 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   prof.ta_tee = WrapTa(ta_tee);
   prof.ta_strongbox = WrapTa(ta_sb);
   prof.patch_mode = p->mode && std::string(p->mode) == "patch";
+  prof.strongbox_own_keybox = sb_own_keybox;
   // Seed both instances with the device-wide MODULE_HASH so a generation-mode key either mints carries
   // the tag, independent of keystore2's one-shot delivery. Prefer keystore2's captured bytes; fall
   // back to the daemon's computed value when we never saw that call. The reference TA emits the tag
@@ -1656,10 +1727,13 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
     const char* name = (p->uid_packages && p->uid_packages[i]) ? p->uid_packages[i] : "";
     prof.uid_names.emplace_back(name);
   }
-  LOGI("teesim_cfg_add_profile: staged profile '%s' (mode=%s, security_level=%s, %zu package(s), "
-       "%zu uid(s))",
+  LOGI("teesim_cfg_add_profile: staged profile '%s' (mode=%s, security_level=%s, strongbox=%s, "
+       "%zu package(s), %zu uid(s))",
        prof.id.c_str(), prof.patch_mode ? "patch" : "generation",
        LevelName(static_cast<SecurityLevel>(p->security_level)),
+       g_stage_strongbox_force_broken ? "forced broken"
+                                      : (prof.strongbox_own_keybox ? "own keybox"
+                                                                   : "shares the profile keybox"),
        prof.packages.size(), prof.uids.size());
   for (const auto& pkg : prof.packages)
     LOGD("teesim_cfg_add_profile:   package '%s' in user %d", pkg.name.c_str(), pkg.user_id);
@@ -1674,6 +1748,7 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
     g_profiles = std::move(g_staging);
     g_staging.clear();
     g_strongbox_ok = g_stage_strongbox_ok;
+    g_strongbox_force_broken = g_stage_strongbox_force_broken;
     n = static_cast<int>(g_profiles.size());
   }
   // Release anything parked in WaitForDefaultTa now that there is a TA to serve it.
@@ -1749,23 +1824,38 @@ extern "C" char* teesim_rkp_reassert_json_alloc(void) {
   return strdup(out.c_str());
 }
 
-extern "C" bool teesim_cfg_resign(const char* profile_id, const uint8_t* leaf, size_t leaf_len,
-                                  TsCertSink sink, void* ctx) {
+extern "C" bool teesim_cfg_resign(const char* profile_id, int32_t security_level,
+                                  const uint8_t* leaf, size_t leaf_len, TsCertSink sink,
+                                  void* ctx) {
   if (!profile_id || !leaf || leaf_len == 0 || !sink) return false;
-  LOGI("teesim_cfg_resign: request for profile '%s' (leaf %zu bytes)", profile_id, leaf_len);
+  const SecurityLevel level = static_cast<SecurityLevel>(security_level);
+  LOGI("teesim_cfg_resign: request for profile '%s' at level=%s (leaf %zu bytes)", profile_id,
+       LevelName(level), leaf_len);
   TaPtr ta;
+  bool known = false;
+  bool refused = false;
   {
     std::lock_guard<std::mutex> lk(g_cfg_mu);
+    // Patching keeps the leaf's own attestation record, security level included, so the keybox that
+    // signs it has to be the one for that level: a StrongBox record re-rooted under a TEE keybox is
+    // the very chain a StrongBox keybox exists to avoid.
+    refused = RefusesAttestationAt(level);
     for (const auto& prof : g_profiles) {
-      if (prof.id == profile_id) {
-        // Re-signing is level-independent (same keybox and patched root of trust at either level).
-        ta = prof.ta_tee;
-        break;
-      }
+      if (prof.id != profile_id) continue;
+      known = true;
+      if (!refused) ta = prof.TaFor(level);
+      break;
     }
   }
+  if (refused) {
+    LOGI("teesim_cfg_resign: %s is forced broken; leaving this key on its real attestation rather "
+         "than re-rooting a %s record under a keybox",
+         LevelName(level), LevelName(level));
+    return false;
+  }
   if (!ta) {
-    LOGW("teesim_cfg_resign: unknown profile '%s'", profile_id);
+    LOGW("teesim_cfg_resign: %s profile '%s'", known ? "no TA for the level of" : "unknown",
+         profile_id);
     return false;
   }
   // Re-sign the existing leaf exactly as patch mode does for a fresh key: keep its public key and

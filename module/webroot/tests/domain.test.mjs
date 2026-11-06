@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import {
   emptyProfile, emptyConfig,
   PKG_RE, PKG_USER_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, UID_RE, APP_ENTRY_RE,
-  splitEntry, entryToken,
+  splitEntry, entryToken, strongBoxOf, strongBoxBroken, emptyStrongBox,
 } from "../js/domain/schema.js";
 import { validateConfig, validateProfile } from "../js/domain/validate.js";
 
@@ -212,6 +212,61 @@ test("exactly one profile auto-including new apps is fine", () => {
 });
 
 // --- regex whitelists ----------------------------------------------------
+// ---- StrongBox: a per-profile keybox plus one device-wide policy ---------
+
+test("emptyConfig defaults to the behaviour the module always had", () => {
+  const c = emptyConfig();
+  assert.deepEqual(c.strongBox, { forceBroken: false });
+  assert.equal(strongBoxBroken(c), false);
+  assert.equal(emptyProfile().keyboxStrongBox, "");
+  // Each call gets its own object, so two configs can never share one.
+  assert.notEqual(emptyStrongBox(), emptyStrongBox());
+});
+
+test("a config written before the setting existed reads as the default, not an error", () => {
+  const c = { version: 1, profiles: { p: validProfile() } };
+  assert.deepEqual(strongBoxOf(c), { forceBroken: false });
+  assert.equal(validateConfig(c).ok, true);
+});
+
+test("strongBoxOf tolerates junk in place of the policy", () => {
+  for (const junk of [null, undefined, 7, "x", [], { forceBroken: "yes" }]) {
+    assert.deepEqual(strongBoxOf({ strongBox: junk }), { forceBroken: false });
+  }
+});
+
+test("a non-object StrongBox policy is rejected, not thrown", () => {
+  const r = validateConfig({ version: 1, strongBox: [], profiles: { p: validProfile() } });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.field === "strongBox"));
+});
+
+test("a profile's StrongBox keybox is optional but format-checked", () => {
+  const ok = validProfile();
+  ok.keyboxStrongBox = "strongbox.xml";
+  assert.equal(validateConfig(configWith({ p: ok })).ok, true);
+
+  const bad = validProfile();
+  bad.keyboxStrongBox = "strongbox.txt";
+  const r = validateConfig(configWith({ p: bad }));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.field === "keyboxStrongBox"));
+});
+
+test("a profile may not name its own keybox as its StrongBox keybox", () => {
+  const p = validProfile();
+  p.keyboxStrongBox = p.keybox;
+  const r = validateConfig(configWith({ p }));
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.field === "keyboxStrongBox" && /differ/i.test(e.msg)));
+});
+
+test("two profiles may share one StrongBox keybox", () => {
+  const a = validProfile(["com.a"]); a.keyboxStrongBox = "sb.xml";
+  const b = validProfile(["com.b"]); b.keyboxStrongBox = "sb.xml";
+  assert.equal(validateConfig(configWith({ a, b })).ok, true);
+});
+
 const cases = [
   [PKG_RE, ["com.foo", "com.foo.bar", "a_b.c", "A9._"], ["", "com foo", "com;rm -rf", "com/foo", "com-foo"]],
   [UID_RE, ["uid:0", "uid:10123", "uid:2000"], ["", "uid:", "uid:x", "uid: 10", "uid:-1", "uid:10.0", "10123", "com.foo"]],

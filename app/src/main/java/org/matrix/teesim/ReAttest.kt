@@ -97,10 +97,12 @@ object ReAttest {
         for (key in keys) {
             val profileId = uidToProfile[key.uid] ?: continue
             val chain =
-                Control.resign(profileId, key.leaf)
+                Control.resign(profileId, key.leaf, key.securityLevel)
                     ?: run {
                         SystemLogger.warning(
-                            "ReAttest: key id=${key.id} uid=${key.uid} — resign failed; skipping"
+                            "ReAttest: key id=${key.id} uid=${key.uid} " +
+                                "level=${Const.securityLevelName(key.securityLevel)} — resign " +
+                                "failed or declined; skipping"
                         )
                         continue
                     }

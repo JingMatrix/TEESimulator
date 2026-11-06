@@ -50,6 +50,17 @@ export function validateProfile(name, profile) {
       continue;
     }
 
+    // The StrongBox keybox exists to give the two levels DIFFERENT batch certificates, so naming
+    // the profile's own keybox again would be the shared signer it replaces, only spelled out.
+    if (f.key === "keyboxStrongBox" && value && value === profile.keybox) {
+      errors.push({
+        field: f.key,
+        msg: "The StrongBox keybox must differ from the keybox above; one keybox signing both " +
+          "security levels is what it exists to replace.",
+      });
+      continue;
+    }
+
     // A toggle carries a boolean, not a string, so it is never format-checked (its regex-less
     // descriptor already skips the scalar branch below, but guard explicitly so a future
     // required/re on a non-string type can't misfire against the empty-string check).
@@ -91,6 +102,13 @@ export function validateConfig(config) {
     for (const e of validateProfile(name, profiles[name])) {
       errors.push({ profile: name, field: e.field, msg: e.msg });
     }
+  }
+
+  // The device-wide StrongBox policy. An absent object is the default, not an error, so a config
+  // written before the setting existed stays valid.
+  const sbRaw = config.strongBox;
+  if (sbRaw !== undefined && (typeof sbRaw !== "object" || sbRaw === null || Array.isArray(sbRaw))) {
+    errors.push({ profile: null, field: "strongBox", msg: "config.strongBox must be an object." });
   }
 
   // Cross-profile: which profiles claim each package? Dedup within a profile

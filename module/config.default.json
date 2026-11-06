@@ -1,8 +1,10 @@
 {
   "version": 1,
+  "strongBox": { "forceBroken": false },
   "profiles": {
     "default": {
       "keybox": "keybox.xml",
+      "keyboxStrongBox": "",
       "mode": "patch",
       "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",

@@ -964,9 +964,23 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
   g_stage_vb_state = boot->verified_boot_state;
   g_stage_attest_version_tee = boot->attest_version_tee;
   g_stage_attest_version_strongbox = boot->attest_version_strongbox;
+  // The legacy IKeystoreService is intercepted above the point where keystore picks a keymaster
+  // instance, so this path never learns which security level a request asked for: one TA per profile
+  // serves at the harvested level (TEE in practice), and a StrongBox-backed request is answered
+  // there too. Neither the forced-broken policy nor a profile's StrongBox keybox has anything to
+  // attach to here, so they are reported and ignored rather than silently half-applied.
+  if (boot->strongbox_force_broken) {
+    LOGW("teesim_cfg_begin: StrongBox is forced broken, but the legacy keystore path cannot see the "
+         "level a request asked for; ignoring it");
+  }
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
+  if (p->keybox_strongbox && p->keybox_strongbox_len > 0) {
+    LOGW("teesim_cfg_add_profile: profile %s names a StrongBox keybox; the legacy keystore path has "
+         "one TA per profile and cannot see the requested level, so it is ignored",
+         p->id ? p->id : "?");
+  }
   Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
                              p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
                              g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
@@ -1003,8 +1017,9 @@ extern "C" int teesim_cfg_commit(uint64_t /*epoch*/, char* /*err*/, size_t /*err
 }
 
 // The legacy keystore interceptor has no patch mode, so it re-signs nothing.
-extern "C" bool teesim_cfg_resign(const char* /*profile_id*/, const uint8_t* /*leaf*/,
-                                  size_t /*leaf_len*/, TsCertSink /*sink*/, void* /*ctx*/) {
+extern "C" bool teesim_cfg_resign(const char* /*profile_id*/, int32_t /*security_level*/,
+                                  const uint8_t* /*leaf*/, size_t /*leaf_len*/,
+                                  TsCertSink /*sink*/, void* /*ctx*/) {
   return false;
 }
 

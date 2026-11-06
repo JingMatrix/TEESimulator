@@ -4,10 +4,13 @@
 // every name it forwards is re-validated there before a path is built.
 
 import { listKeyboxes, importKeybox, renameKeybox, deleteKeybox } from "../data/keybox-io.js";
+import { load as loadConfig, save as saveConfig } from "../data/config-io.js";
 import { keyAdmin } from "../data/keyadmin.js";
 import { readRkpProps, setRkpProp, deleteRkpProp, restoreRkpProp } from "../data/rkp-io.js";
+import { strongBoxOf } from "../domain/schema.js";
 import { renderKeyboxes, renderKeyboxImport, renderKeyboxInspect, fillKeyboxInspect } from "../ui/keybox-view.js";
 import { renderRkpSection } from "../ui/rkp-view.js";
+import { renderStrongBoxSection } from "../ui/strongbox-view.js";
 import { el, toast, confirmDialog, promptDialog, openSheet, openOverlay } from "../ui/dom.js";
 import { attachPullToRefresh } from "../ui/pull-refresh.js";
 
@@ -21,6 +24,12 @@ export function create(mount) {
   let inspectOverlay = null; // { close } while the inspect drill-in is open
   let rkpRows = [];         // the Remote Key Provision knobs this device defines (empty => no section)
   let rkpWrap = null;       // the <section> hosting that panel, recreated on every full render
+  // The device-wide StrongBox policy, read off config.json and written back the same way. Held as
+  // the plain { forceBroken } flag rather than the whole config: every write re-reads the file
+  // first (see writeStrongBox), so this screen can never clobber a profile edit made elsewhere.
+  let strongBox = strongBoxOf(null);
+  let sbAvailable = true;   // whether this device has working StrongBox hardware (harvest)
+  let sbWrap = null;        // the <section> hosting the StrongBox panel
 
   function render() {
     renderKeyboxes(mount, { files }, actions); // clears mount, paints the Keyboxes panel
@@ -29,6 +38,18 @@ export function create(mount) {
     // so recreate the wrapper — only when the device actually exposes one of the RKP properties.
     rkpWrap = rkpRows.length ? el("section", { class: "rkp-section" }) : null;
     if (rkpWrap) { mount.appendChild(rkpWrap); paintRkp(); }
+    // Always present: unlike the RKP knobs this is our own setting, not a device property that may
+    // or may not exist, and "shared signer" is worth showing even where StrongBox never reports in.
+    sbWrap = el("section", { class: "rkp-section" });
+    mount.appendChild(sbWrap);
+    paintStrongBox();
+  }
+
+  function paintStrongBox() {
+    if (sbWrap) {
+      renderStrongBoxSection(
+        sbWrap, { forceBroken: strongBox.forceBroken, available: sbAvailable }, sbActions);
+    }
   }
 
   function paintRkp() {
@@ -52,7 +73,46 @@ export function create(mount) {
   async function refresh() {
     files = await listKeyboxes();
     rkpRows = await readRkpProps();
+    strongBox = await readStrongBox();
+    sbAvailable = await readStrongBoxAvailable();
     render();
+  }
+
+  // The setting as config.json currently has it. A config we cannot read leaves the defaults, which
+  // is also what the daemon falls back to, so the panel never claims a state the daemon is not in.
+  async function readStrongBox() {
+    const res = await loadConfig();
+    return strongBoxOf(res && res.ok ? res.config : null);
+  }
+
+  // Whether the device has working StrongBox hardware, from the daemon's harvest. Unknown counts as
+  // available: the panel then simply omits the "this changes nothing today" note.
+  async function readStrongBoxAvailable() {
+    try {
+      const r = await keyAdmin("status");
+      return !(r && r.harvest && r.harvest.strongBoxAvailable === false);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  // Read-modify-write the setting against a FRESH config. The Config screen holds its own copy of
+  // config.json, so writing a stale whole-file from here would silently revert a profile edit; this
+  // only ever changes the one top-level key.
+  async function writeStrongBox(next) {
+    const res = await loadConfig();
+    if (!res.ok) {
+      toast("Cannot save: " + (res.error || "config.json is unreadable"));
+      return false;
+    }
+    res.config.strongBox = { forceBroken: next.forceBroken };
+    const w = await saveConfig(res.config);
+    if (!w.ok) {
+      toast("Save failed: " + (w.error || "unknown error"));
+      return false;
+    }
+    strongBox = next;
+    return true;
   }
 
   function openImport() {
@@ -187,6 +247,15 @@ export function create(mount) {
       const r = await restoreRkpProp(name);
       if (!r.ok) toast("Restore failed: " + (r.error || "unknown error"));
       return refreshRkp();
+    },
+  };
+
+  const sbActions = {
+    async setForceBroken(on) {
+      // No toast: the switch and the "broken" chip are their own feedback, and a failed write
+      // repaints from the value we still hold, so the switch snaps back.
+      await writeStrongBox({ forceBroken: on });
+      paintStrongBox();
     },
   };
 
