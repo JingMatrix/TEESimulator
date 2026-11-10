@@ -454,6 +454,10 @@ html, body { overscroll-behavior-y: contain; }
 .kbi-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .kbi-cert { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .kbi-key .kbi-cert:first-of-type { border-top: 0; padding-top: 0; }
+/* Section label inside a key block (the private-key group), so it is not mistaken for a cert. */
+.kbi-subhead { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+/* A kv value that carries newline-separated entries (CRL points, access descriptions). */
+.kbi-cert .kv-hex { white-space: pre-wrap; }
 
 /* Chain verdict banner — the headline "is this keybox genuine / revoked" status. */
 .kbi-verdict { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--chip); border: 1px solid var(--line); border-left: 4px solid var(--muted); }

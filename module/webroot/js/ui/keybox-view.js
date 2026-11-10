@@ -140,48 +140,44 @@ function keyBlock(k) {
     k.privateKeyPresent
       ? el("span", { class: "chip good", text: "private key" })
       : el("span", { class: "chip warn", text: "no private key" }),
+    // The TA matches this attribute exactly, so a different spelling means the key is invisible
+    // to the thing that signs with it — the one defect a chain-level verdict cannot show.
+    k.algorithmRecognized === false
+      ? el("span", { class: "chip danger", text: "algorithm not 'rsa'/'ecdsa'" })
+      : null,
+    k.countMismatch
+      ? el("span", { class: "chip warn", text: "declares " + k.declaredCerts })
+      : null,
   ]);
   const certs = Array.isArray(k.certs) ? k.certs : [];
-  return el("div", { class: "card kbi-key" }, [verdictBanner(k), head, ...certs.map(certBlock)]);
+  return el("div", { class: "card kbi-key" }, [
+    verdictBanner(k),
+    head,
+    privateKeyBlock(k.privateKey),
+    ...certs.map(certBlock),
+  ]);
 }
 
-// The headline verdict for a chain: is this a genuine, live keybox that would pass hardware
-// attestation, or a revoked / software / broken one? Built from the daemon's chain-level fields.
-function verdictOf(k) {
-  const unchecked = k.revocationChecked === false;
-  if (k.revoked) {
-    return { tier: "bad", icon: "✕", title: "Revoked by Google",
-      sub: "A certificate in this chain is on Google's revocation list — attestations it signs are rejected by Play Integrity." };
-  }
-  if (k.chainVerified === false) {
-    return { tier: "bad", icon: "✕", title: "Chain does not verify",
-      sub: "A certificate signature in this chain is invalid, so it is not a usable attestation chain." };
-  }
-  const revNote = unchecked ? " · revocation list unavailable" : " · not revoked";
-  switch (k.rootAuthority) {
-    case "google":
-      return { tier: "good", icon: "✓", title: "Signed by Google",
-        sub: "Roots in the Google Hardware Attestation key" + revNote + "." };
-    case "knox":
-      return { tier: "good", icon: "✓", title: "Samsung Knox root",
-        sub: "Roots in a Samsung Knox attestation key" + revNote + "." };
-    case "aosp":
-      return { tier: "warn", icon: "!", title: "AOSP software root",
-        sub: "Rooted in the AOSP software test key — not a hardware-backed keybox; fails hardware attestation." };
-    default:
-      return { tier: "warn", icon: "?", title: "Unknown root",
-        sub: "Chain does not root in a recognized attestation authority" + (unchecked ? " · revocation list unavailable" : "") + "." };
-  }
-}
-
-function verdictBanner(k) {
-  const v = verdictOf(k);
-  return el("div", { class: "kbi-verdict kbi-verdict--" + v.tier }, [
-    el("span", { class: "kbi-verdict-icon", "aria-hidden": "true", text: v.icon }),
-    el("div", { class: "kbi-verdict-text" }, [
-      el("div", { class: "kbi-verdict-title", text: v.title }),
-      el("div", { class: "kbi-verdict-sub", text: v.sub }),
-    ]),
+// What the <PrivateKey> block holds, and the question the file itself cannot answer: does this key
+// belong to the leaf certificate? A keybox pairs the two with nothing tying them together, so a
+// mismatched pair looks perfect here and fails later, at signing time, with no explanation.
+function privateKeyBlock(pk) {
+  if (!pk || !pk.present) return null;
+  const chips = el("div", { class: "chips" }, [
+    el("span", { class: "chip mono", text: (pk.type || "?") + (pk.size ? " " + pk.size : "") }),
+    pk.encoding ? el("span", { class: "chip", text: pk.encoding }) : null,
+    pk.matchesLeaf === true ? el("span", { class: "chip good", text: "matches the leaf" }) : null,
+    pk.matchesLeaf === false ? el("span", { class: "chip danger", text: "does not match the leaf" }) : null,
+    pk.algorithmAgrees === false ? el("span", { class: "chip warn", text: "not the declared algorithm" }) : null,
+  ]);
+  return el("div", { class: "kbi-cert" }, [
+    el("div", { class: "kbi-subhead", text: "private key" }),
+    chips,
+    pk.pemLabel ? kv("pem", pk.pemLabel) : null,
+    pk.error ? el("div", { class: "err", text: pk.error }) : null,
+    pk.matchesLeaf === false
+      ? el("div", { class: "err", text: "Every attestation signed with this key would carry a chain that cannot verify." })
+      : null,
   ]);
 }
 
@@ -207,7 +203,31 @@ function certBlock(c) {
     c.revoked ? kv("revocation", (c.revocationStatus || "REVOKED") + (c.revocationReason ? " · " + c.revocationReason : "")) : null,
     kv("valid", fmtDate(c.notBefore) + "  →  " + fmtDate(c.notAfter)),
     kv("sigAlg", c.sigAlg),
+    // The identifier is recomputable (RFC 5280 method 1: SHA-1 of the subjectPublicKey), so a
+    // certificate whose identifier does not match the key it carries has had one of the two swapped.
+    c.ski ? kv("subject key id", c.ski.value + (c.ski.isPublicKeySha1 === false ? "  ✕ not the SHA-1 of this key" : "")) : null,
+    c.aki ? kv("authority key id", [c.aki.value, c.aki.issuer, c.aki.serial].filter(Boolean).join(" · ")) : null,
+    c.keyUsage ? kv("key usage", c.keyUsage.join(", ")) : null,
+    c.extendedKeyUsage ? kv("extended key usage", c.extendedKeyUsage.join(", ")) : null,
+    c.isCa ? kv("path length", c.pathLen === -1 || c.pathLen == null ? "unlimited" : String(c.pathLen)) : null,
+    c.crl ? kv("crl", c.crl.join("\n")) : null,
+    c.aia ? kv("authority info", c.aia.join("\n")) : null,
+    c.san ? kv("alt names", c.san.join(", ")) : null,
+    c.policies ? kv("policies", c.policies.join(", ")) : null,
+    // Google's RKP certificates carry this; the build fingerprint inside is the most identifying
+    // thing in a keybox, and it is invisible unless something decodes the CBOR.
+    c.provisioning ? el("div", { class: "kbi-subhead", text: "provisioning" }) : null,
+    ...provisioningRows(c.provisioning),
+    c.hasAttestation ? kv("extension", "carries an Android key attestation record") : null,
+    c.otherExtensions ? kv("other extensions", c.otherExtensions.join(", ")) : null,
+    c.fingerprint ? kv("sha-256", c.fingerprint) : null,
   ]);
+}
+
+function provisioningRows(p) {
+  if (!p) return [];
+  // No summary line: it could only restate the rows below it.
+  return (Array.isArray(p.fields) ? p.fields : []).map((f) => kv("  " + f.label, f.value));
 }
 
 function authorityLabel(a) {

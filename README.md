@@ -68,7 +68,7 @@ A schema version and a map of named profiles. Each targeted package must appear 
   "version": 1,
   "profiles": {
     "default": {
-      "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa + ecdsa, chains >= 2)
+      "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa and/or ecdsa, chains >= 2)
       "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",                       // empty = harvested | system_property | "16" | "16.0.0" | 160000
       "brand": "", "device": "", "product": "",
@@ -84,7 +84,7 @@ Patch and OS levels accept a small mini-language the daemon resolves against the
 
 ### `keybox.xml`
 
-A keybox carries the private keys and certificate chains the simulator signs with. It must contain *both* an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` and its `CertificateChain`:
+A keybox carries the private keys and certificate chains the simulator signs with. It must contain *at least one* of an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` and a `CertificateChain` of two certificates or more — a factory keybox carries both, while one extracted from RKP carries only the EC key. An attested key is signed by the batch key of its own algorithm where the keybox has it, and by the other one where it does not:
 
 ```xml
 <?xml version="1.0"?>
