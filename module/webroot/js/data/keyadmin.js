@@ -85,9 +85,14 @@ const SOCK = DIR + "/admin.sock";
 const HELPER = DIR + "/teesim-uds";
 const TOKEN_FILE = DIR + "/admin.token";
 
-// The admin token gates every request. It is a root-only file, so we read it once
-// through the bridge (the single path that has root) and memoize it for the life
-// of the page. A concurrent second call reuses the same in-flight promise.
+// The admin token gates every request. It is a root-only file, so we read it through the bridge
+// (the single path that has root) and memoize it — but NOT for the life of the page: the daemon
+// mints a fresh token every time it starts (KeyAdmin.kt) and writes it to this file, so the token
+// identifies a daemon INSTANCE, not the device. A daemon that restarts under an open page — a
+// late-load, a hot install, this page's own canary update, or a plain crash-and-respawn — leaves
+// the memoized copy stale, and a request carrying a stale token is DROPPED without a response
+// (tokensMatch -> return), which arrives here as a transport failure rather than a 401. So the
+// memo is invalidated and re-read whenever that happens; see request().
 let tokenPromise = null;
 function getToken() {
   if (!tokenPromise) {
@@ -100,6 +105,20 @@ function getToken() {
   return tokenPromise;
 }
 
+// Drop the memoized token so the next getToken() re-reads the file. Called when the daemon stops
+// answering, which is the only symptom a replaced daemon gives us.
+function forgetToken() {
+  tokenPromise = null;
+}
+
+// No answer at all: the helper exited non-zero AND printed no body. That covers both things a
+// replaced daemon does to us — nothing listening on the socket (errno 1), and a token the new
+// daemon does not know, which it drops without a response rather than refusing with a status
+// (errno 2, empty stdout; KeyAdmin.kt checks the token before it routes or even logs). It
+// deliberately does NOT cover a non-2xx that carries { ok:false, error }, which is the daemon
+// answering properly and must reach the caller unchanged.
+const noAnswer = (r) => r.errno !== 0 && !(r.stdout && String(r.stdout).trim());
+
 // GET /icon?pkg=<package>&user=<userId> -> raw PNG (the daemon renders the app icon and caches it).
 // There is no fetchable URL for an <img src> any more — the bytes come back over the root bridge — so
 // this returns a self-contained data: URL the view can drop straight into an <img>, or null when the
@@ -109,7 +128,13 @@ export async function iconDataUrl(pkg, userId) {
   if (!pkg) return null;
   const token = await getToken();
   const path = "/icon?pkg=" + encodeURIComponent(pkg) + "&user=" + encodeURIComponent(userId || 0);
-  const r = await run([HELPER, SOCK, "GET", path, token, "--b64"]);
+  let r = await run([HELPER, SOCK, "GET", path, token, "--b64"]);
+  // Same stale-token trap as request(): without this, every icon on the page silently falls back to
+  // a letter-avatar for as long as the page lives after a daemon swap.
+  if (noAnswer(r)) {
+    forgetToken();
+    r = await run([HELPER, SOCK, "GET", path, await getToken(), "--b64"]);
+  }
   // errno 0 = HTTP 2xx (a PNG); anything else (no icon, transport error) -> fall back to the avatar.
   if (r.errno !== 0 || !r.stdout) return null;
   return "data:image/png;base64," + r.stdout.trim();
@@ -119,24 +144,39 @@ export async function iconDataUrl(pkg, userId) {
 // convert a transport failure or a daemon { ok:false } into a thrown Error carrying the daemon's
 // message when there is one. The helper's exit code encodes the HTTP status class (0 = 2xx, 2 = other
 // status with the body still on stdout, 1 = connect/transport failure).
+
 async function request(method, path, body) {
-  const token = await getToken();
   const t0 = Date.now();
-  console.log("[keyAdmin] → %s %s%s", method, path, token ? "" : " (NO TOKEN)");
+  console.log("[keyAdmin] → %s %s", method, path);
   // A request body can be large (e.g. a full log dump for logsWrite), so it is handed to the helper
   // through a root-only temp file rather than the command line. The helper streams it with a
   // Content-Length; we delete it afterwards.
   let bodyFile = null;
-  const argv = [HELPER, SOCK, method, path, token];
   if (body != null) {
     bodyFile = DIR + "/req-" + Math.random().toString(36).slice(2) + ".tmp";
     await writeFileAtomic(bodyFile, String(body));
-    argv.push("--body-file", bodyFile);
   }
+  const attempt = async () => {
+    const token = await getToken();
+    if (!token) console.warn("[keyAdmin] %s %s has NO TOKEN", method, path);
+    const argv = [HELPER, SOCK, method, path, token];
+    if (bodyFile) argv.push("--body-file", bodyFile);
+    return run(argv);
+  };
   try {
-    const r = await run(argv);
-    if (r.errno === 1 || r.errno === -1) {
-      console.error("[keyAdmin] ✗ %s %s transport error in %dms: %o", method, path, Date.now() - t0, r.stderr);
+    let r = await attempt();
+    if (noAnswer(r)) {
+      // Either the daemon is gone or the token in hand belongs to a daemon that no longer exists.
+      // Drop the memo so this and every later call re-read the file, and retry — but only a GET.
+      // A write must not be replayed: a daemon that died mid-request may already have acted on it,
+      // and canaryInstall in particular would flash a second time. The refreshed token makes the
+      // user's next attempt work, which is the right amount of magic for a write.
+      console.warn("[keyAdmin] %s %s got no answer; re-reading the admin token", method, path);
+      forgetToken();
+      if (method === "GET") r = await attempt();
+    }
+    if (noAnswer(r)) {
+      console.error("[keyAdmin] ✗ %s %s no answer in %dms: %o", method, path, Date.now() - t0, r.stderr);
       throw new Error("daemon unreachable" + (r.stderr ? ": " + String(r.stderr).trim() : ""));
     }
     // Response body — a distinct name from the `body` REQUEST parameter above (re-declaring a parameter

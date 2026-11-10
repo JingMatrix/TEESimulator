@@ -38,6 +38,23 @@ The module ships a default `config.json` that targets Google Play services and t
 
 Killing the keystore daemon (`su -c 'kill $(pidof keystore2)'` on Android 12+, `keystore` on 10/11) is the recovery path: a fresh daemon starts clean, with no interception, until the module re-injects it.
 
+### Without a reboot
+
+Nothing the module installs waits for a boot stage — it mounts no partition and ships no `system.prop`, and the daemon injects whatever keystore process it finds — so an install can take effect on the system that is already running. Which path a device has depends on its root manager:
+
+* *KernelSU* installs it in place. The installer asks for a hot install, `ksud` swaps the module directory and runs `hotinstall.sh`, and the daemon takes over from there.
+* *Magisk, APatch,* and a KernelSU too old for that path need one command:
+
+  ```sh
+  su -c /data/adb/modules/teesim/late-load.sh
+  ```
+
+  `ksud late-load` runs the same script by itself. `--stop` is the reverse: it stops the daemon and restarts the keystore service, leaving the system carrying no interceptor at all.
+
+Both arm the running system, and both have one thing a reboot does not: the keystore process in front of them may already carry an interceptor, which no library is ever unloaded from or injected over. When that one is *this* build's — a daemon that crashed and respawned, or a second `late-load.sh` — the daemon adopts it and nothing restarts. When it is an older build's, as after an update, the daemon restarts the keystore service and injects the new one into the fresh process, and apps may see a transient keystore error as it goes down. The stage prints which of the two happened — and when `ksud` runs it for you, at boot or on a hot install, there is no shell for it to print to, so the same lines go to the device log and show up in the daemon's log and the WebUI's Logs panel.
+
+A reboot is still needed for one case the installer reports: a *TrickyStore* that was active on this boot keeps its own keystore hook until the keystore daemon restarts, so the installer disables it and asks for the reboot rather than hot-installing over it.
+
 ## Configuration
 
 Everything lives in `/data/adb/teesim/`, owned and validated by the daemon. The keybox files carry private keys and are never shipped with the module.
@@ -121,7 +138,7 @@ The whole build is one Gradle graph. `zipRelease` (or `zipDebug`, which bundles 
 | `keymint/` | The Android 12+ interceptor: the `AIBinder_transact` hook and the router that decides, per request, whether to simulate or forward. |
 | `keystore/` | The Android 10/11 interceptor: the libbinder `ioctl` hook and the `IKeystoreService` handler that serves a target's key lifecycle from the TA. |
 | `rust/teesim-km/` | The in-process TA — the reference KeyMint TA wired to BoringSSL and keybox-based attestation, behind a small C ABI. |
-| `module/` | The flashable module: boot service, installer, `sepolicy.rule`, the default configuration, and the WebUI. |
+| `module/` | The flashable module: the stage scripts (`service.sh` at boot, `late-load.sh` and `hotinstall.sh` on a running system, all forwarding to `stage.sh`), installer, `sepolicy.rule`, the default configuration, and the WebUI. |
 | `third_party/` | Submodules: the reference KeyMint, the AIDL interfaces, `frameworks/native`, BoringSSL, and LSPlt. |
 
 ## License

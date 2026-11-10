@@ -7,11 +7,15 @@ if [ "$ARCH" != "arm64" ] && [ "$ARCH" != "x64" ]; then
 fi
 
 # TrickyStore intercepts the same keystore path; running both would double-hook it. Disable it via
-# its manager's marker (kept, not deleted, so removing us lets the user re-enable it).
+# its manager's marker (kept, not deleted, so removing us lets the user re-enable it). A
+# TrickyStore that was live on this boot keeps its hook until the keystore daemon restarts, so
+# disabling one here is also what rules out the hot install below.
+DISABLED_TRICKY_STORE=
 for ts in /data/adb/modules/tricky_store /data/adb/modules_update/tricky_store; do
   if [ -d "$ts" ] && [ ! -f "$ts/disable" ]; then
     ui_print "- Disabling TrickyStore (it hooks the same keystore path)"
     touch "$ts/disable"
+    DISABLED_TRICKY_STORE=1
   fi
 done
 
@@ -38,3 +42,24 @@ for abi in arm64-v8a x86_64; do
   [ -f "$MODPATH/$abi/inject" ] && set_perm "$MODPATH/$abi/inject" 0 0 0755
   [ -f "$MODPATH/$abi/teesim-uds" ] && set_perm "$MODPATH/$abi/teesim-uds" 0 0 0755
 done
+
+# The stage scripts. A manager runs the one whose name it knows, and they all forward to stage.sh;
+# late-load.sh is the one a user runs by hand, to arm the module without rebooting.
+for s in stage.sh supervise.sh service.sh late-load.sh hotinstall.sh uninstall.sh; do
+  [ -f "$MODPATH/$s" ] && set_perm "$MODPATH/$s" 0 0 0755
+done
+
+# Nothing TEESimulator installs waits for a boot stage: it mounts no partition and ships no
+# system.prop, and its daemon injects whatever keystore process it finds, so hotinstall.sh can
+# apply this build in place. KernelSU is the only manager with that path; elsewhere, and whenever a
+# live TrickyStore has to be rebooted out of the keystore daemon first, the module is armed by the
+# next boot — or by late-load.sh, run by hand.
+if [ "$KSU" ] && [ -z "$DISABLED_TRICKY_STORE" ]; then
+  ui_print "- Applying without a reboot"
+  export MODULE_HOT_INSTALL_REQUEST=true
+  export MODULE_HOT_RUN_SCRIPT=hotinstall.sh
+elif [ "$DISABLED_TRICKY_STORE" ]; then
+  ui_print "- Reboot to apply: TrickyStore was active and keeps its keystore hook until then"
+else
+  ui_print "- Reboot to apply, or run late-load.sh from the module directory"
+fi

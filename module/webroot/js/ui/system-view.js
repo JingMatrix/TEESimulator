@@ -340,7 +340,7 @@ function updateCard(s, actions) {
   card.appendChild(el("div", { class: "update-actions" }, [
     installing
       ? el("span", { class: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { class: "muted small", text: "Downloading & flashing…" })])
-      : el("span", { class: "muted small", text: "Flashes " + variant + " over the current module, then reboot to apply." }),
+      : el("span", { class: "muted small", text: "Flashes " + variant + " over the current module. KernelSU applies it without a reboot; elsewhere, reboot to apply." }),
     el("button", {
       class: "btn primary", text: installing ? "Installing…" : "Install",
       disabled: installing, onclick: () => actions.onInstall(),
