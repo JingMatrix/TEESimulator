@@ -158,6 +158,52 @@ function keyBlock(k) {
   ]);
 }
 
+// The headline verdict for a chain: is this a genuine, live keybox that would pass hardware
+// attestation, or a revoked / software / broken one? Built from the daemon's chain-level fields.
+function verdictOf(k) {
+  const unchecked = k.revocationChecked === false;
+  if (k.revoked) {
+    return { tier: "bad", icon: "✕", title: "Revoked by Google",
+      sub: "A certificate in this chain is on Google's revocation list — attestations it signs are rejected by Play Integrity." };
+  }
+  if (k.chainVerified === false) {
+    return { tier: "bad", icon: "✕", title: "Chain does not verify",
+      sub: "A certificate signature in this chain is invalid, so it is not a usable attestation chain." };
+  }
+  // The chain can be impeccable and still be paired with the wrong private key, in which case every
+  // signature made with it fails to verify against the leaf that accompanies it.
+  if (k.privateKey && k.privateKey.matchesLeaf === false) {
+    return { tier: "bad", icon: "✕", title: "Private key is not the leaf's",
+      sub: "The key in this keybox does not belong to the certificate paired with it, so nothing it signs verifies against this chain." };
+  }
+  const revNote = unchecked ? " · revocation list unavailable" : " · not revoked";
+  switch (k.rootAuthority) {
+    case "google":
+      return { tier: "good", icon: "✓", title: "Signed by Google",
+        sub: "Roots in the Google Hardware Attestation key" + revNote + "." };
+    case "knox":
+      return { tier: "good", icon: "✓", title: "Samsung Knox root",
+        sub: "Roots in a Samsung Knox attestation key" + revNote + "." };
+    case "aosp":
+      return { tier: "warn", icon: "!", title: "AOSP software root",
+        sub: "Rooted in the AOSP software test key — not a hardware-backed keybox; fails hardware attestation." };
+    default:
+      return { tier: "warn", icon: "?", title: "Unknown root",
+        sub: "Chain does not root in a recognized attestation authority" + (unchecked ? " · revocation list unavailable" : "") + "." };
+  }
+}
+
+function verdictBanner(k) {
+  const v = verdictOf(k);
+  return el("div", { class: "kbi-verdict kbi-verdict--" + v.tier }, [
+    el("span", { class: "kbi-verdict-icon", "aria-hidden": "true", text: v.icon }),
+    el("div", { class: "kbi-verdict-text" }, [
+      el("div", { class: "kbi-verdict-title", text: v.title }),
+      el("div", { class: "kbi-verdict-sub", text: v.sub }),
+    ]),
+  ]);
+}
+
 // What the <PrivateKey> block holds, and the question the file itself cannot answer: does this key
 // belong to the leaf certificate? A keybox pairs the two with nothing tying them together, so a
 // mismatched pair looks perfect here and fails later, at signing time, with no explanation.
