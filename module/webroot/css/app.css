@@ -449,31 +449,85 @@ html, body { overscroll-behavior-y: contain; }
 .ov-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 .btn.small { padding: 5px 10px; font-size: 12px; flex: none; }
 
-/* --- keybox inspector --------------------------------------------------- */
-.kbi-key { gap: 12px; }
-.kbi-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.kbi-cert { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-.kbi-key .kbi-cert:first-of-type { border-top: 0; padding-top: 0; }
-/* Section label inside a key block (the private-key group), so it is not mistaken for a cert. */
-.kbi-subhead { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-/* A kv value that carries newline-separated entries (CRL points, access descriptions). */
-.kbi-cert .kv-hex { white-space: pre-wrap; }
+/* --- keybox inspector ---------------------------------------------------
+ * The page is a chain drawn as a chain: a rail down the left, one numbered node per certificate
+ * from leaf to root, and between two nodes the signature that joins them. A node carries what
+ * names a certificate and whether it is usable now; the rest folds open under it. */
+.kbi-file { display: flex; flex-direction: column; gap: 4px; }
+.kbi-file-name { font-size: 15px; font-weight: 600; word-break: break-all; }
+.kbi-file-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
+.warn-text { color: var(--warn); }
 
-/* Chain verdict banner — the headline "is this keybox genuine / revoked" status. */
-.kbi-verdict { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--chip); border: 1px solid var(--line); border-left: 4px solid var(--muted); }
-.kbi-verdict--good { border-left-color: var(--ok); }
-.kbi-verdict--warn { border-left-color: var(--warn); }
-.kbi-verdict--bad { border-left-color: var(--danger); }
-.kbi-verdict-icon { flex: none; width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: var(--muted); }
-.kbi-verdict--good .kbi-verdict-icon { background: var(--ok); }
-.kbi-verdict--warn .kbi-verdict-icon { background: var(--warn); }
-.kbi-verdict--bad .kbi-verdict-icon { background: var(--danger); }
-.kbi-verdict-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.kbi-verdict-title { font-weight: 700; font-size: 14px; }
-.kbi-verdict--good .kbi-verdict-title { color: var(--ok); }
-.kbi-verdict--warn .kbi-verdict-title { color: var(--warn); }
-.kbi-verdict--bad .kbi-verdict-title { color: var(--danger); }
-.kbi-verdict-sub { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.kbi-key { display: flex; flex-direction: column; gap: 12px; }
+/* The headline card, tinted down its left edge by the verdict it carries. */
+.kbi-head { gap: 12px; border-left: 4px solid var(--muted); }
+.kbi-head--good { border-left-color: var(--ok); }
+.kbi-head--warn { border-left-color: var(--warn); }
+.kbi-head--bad { border-left-color: var(--danger); }
+.kbi-verdict { display: flex; gap: 12px; align-items: flex-start; }
+.kbi-verdict-icon { flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: var(--muted); }
+.kbi-head--good .kbi-verdict-icon { background: var(--ok); }
+.kbi-head--warn .kbi-verdict-icon { background: var(--warn); }
+.kbi-head--bad .kbi-verdict-icon { background: var(--danger); }
+.kbi-verdict-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.kbi-verdict-title { font-weight: 700; font-size: 15px; }
+.kbi-head--good .kbi-verdict-title { color: var(--ok); }
+.kbi-head--warn .kbi-verdict-title { color: var(--warn); }
+.kbi-head--bad .kbi-verdict-title { color: var(--danger); }
+.kbi-verdict-sub { color: var(--muted); font-size: 12px; line-height: 1.45; }
+/* The private key belongs to the <Key> element, not to any certificate, so it sits in the head
+ * card under a rule of its own. */
+.kbi-pk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.kbi-pk-label { font-size: 12px; color: var(--muted); }
+
+/* The chain. The rail is drawn behind the nodes; the last node's segment stops at its own dot so
+ * the chain visibly ends at the root. */
+.kbi-chain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.kbi-node { position: relative; padding-left: 30px; padding-bottom: 6px; }
+.kbi-node::before { content: ""; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--line); }
+.kbi-node:first-child::before { top: 18px; }
+.kbi-node:last-child::before { bottom: auto; height: 18px; }
+.kbi-node-dot {
+  position: absolute; left: 1px; top: 8px; z-index: 1;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-weak); color: var(--accent); border: 2px solid var(--bg);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+.kbi-node-dot--bad { background: var(--danger); color: var(--danger-fg); }
+.kbi-cert-card { gap: 8px; padding: 14px; }
+.kbi-node--bad .kbi-cert-card { border-color: var(--danger); }
+.kbi-cert-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.kbi-role { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.kbi-cert-name { font-size: 14px; font-weight: 600; word-break: break-all; }
+.kbi-cert-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
+.kbi-dot-sep { color: var(--line); }
+/* The edge between two nodes: it sits on the rail, between the cards it joins. */
+.kbi-link { display: flex; align-items: center; gap: 6px; padding: 7px 0 9px; font-size: 12px; color: var(--muted); }
+.kbi-link-mark { flex: none; width: 15px; text-align: center; font-weight: 700; }
+.kbi-link--ok .kbi-link-mark { color: var(--ok); }
+.kbi-link--bad { color: var(--danger); font-weight: 600; }
+.kbi-node:last-child .kbi-link { padding-bottom: 0; }
+
+/* The per-certificate fold. Flat and quiet when closed -- it is a way in, not a control. */
+.kbi-fold { display: flex; flex-direction: column; gap: 10px; }
+.kbi-fold-head {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 8px;
+  border: 0; background: transparent; padding: 0 2px; margin: -2px 0; min-height: 44px;
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer;
+}
+.kbi-fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.kbi-fold-chevron { flex: none; width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.kbi-fold-head.open .kbi-fold-chevron { transform: rotate(45deg); }
+.kbi-detail { display: flex; flex-direction: column; gap: 10px; padding-top: 2px; border-top: 1px solid var(--line); }
+.kbi-detail .kv-hex { white-space: pre-wrap; }
+
+/* A map decoded out of a certificate extension: its rows sit indented behind a rule, so a nested
+ * map reads as part of the one above it, and the block is visibly over where the rule stops. */
+.kbi-map { display: flex; flex-direction: column; gap: 8px; padding-left: 10px; border-left: 2px solid var(--line); }
+.kbi-map-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Section label inside a key block, so it is not mistaken for a certificate. */
+.kbi-subhead { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 
 /* A revoked cert deserves a stronger signal than the amber warn chips. */
 .chip.danger { color: var(--danger); font-weight: 700; }

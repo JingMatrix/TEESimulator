@@ -301,6 +301,10 @@ object KeyboxInspector {
                 // it does not know as hex DER, and Google's DNs are mostly those types.
                 .put("subject", KeyboxDetail.dn(cert.subjectX500Principal))
                 .put("issuer", KeyboxDetail.dn(cert.issuerX500Principal))
+                // The common names as well as the full DNs: a chain is read by who signed whom, and
+                // that is the part of a name a reader recognises. The DN stays, in the detail.
+                .putOpt("subjectCn", KeyboxDetail.commonName(cert.subjectX500Principal))
+                .putOpt("issuerCn", KeyboxDetail.commonName(cert.issuerX500Principal))
                 .put("serial", cert.serialNumber.toString(16))
                 .put("notBefore", cert.notBefore.time)
                 .put("notAfter", cert.notAfter.time)

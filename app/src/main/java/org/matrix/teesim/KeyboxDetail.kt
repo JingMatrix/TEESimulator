@@ -130,14 +130,29 @@ object KeyboxDetail {
      * running total. Key 3 names the device's manufacturer — not its brand, which on some devices
      * is a different string entirely — and is only ever present where no fingerprint is.
      */
+    /**
+     * provisioningInfo keys. Only 1 and 4 are documented by Google, and the map is explicitly
+     * unversioned, so the rest are readings and say so with a question mark. A key with no reading
+     * at all is shown by its number rather than guessed at.
+     */
     private val PROVISIONING_FIELDS =
         mapOf(
-            1L to "keys in this batch?",
-            2L to "attested entity?",
-            3L to "manufacturer",
-            5L to "checked at provisioning",
+            // Documented: "an approximate number of certificates issued to the device in the last
+            // 30 days", offered to relying parties as an abuse signal.
+            1L to "certificates issued in the last 30 days",
+            3L to "manufacturer?",
+            // Documented: the certified origin of the attested key, vouched for by the chipset
+            // manufacturer — STRONG_BOX or TEE. (Keyboxes seen in the wild carry it in the leaf's
+            // subject instead and omit this.)
+            4L to "validated attested entity",
+            5L to "validated attributes?",
         )
 
+    /**
+     * The entries of key 5, which read as two (verdict, subject) pairs: the issuer approving an
+     * attribute of the device, and the value it passed that verdict on. The pairing is inference
+     * from the ordering; only the fingerprint's content is self-evident.
+     */
     private val PROVISIONING_SUBFIELDS =
         mapOf(
             1L to "verified boot verdict",
@@ -387,20 +402,30 @@ object KeyboxDetail {
                         .put(row("raw", hex(raw, 16))),
                 )
         }
-        val fields = JSONArray()
-        for ((k, v) in decoded) {
-            val label = PROVISIONING_FIELDS[k as? Long] ?: "key $k"
+        return JSONObject().put("fields", provisioningFields(decoded, 0))
+    }
+
+    /**
+     * One level of the provisioningInfo map, as rows. A key whose value is itself a map becomes a
+     * row carrying its own `fields` rather than a value, so the shape of the extension survives
+     * into the view instead of being flattened into a list with a count standing in for the
+     * nesting. [depth] selects the labels: the map's own keys at the top, the entries of key 5
+     * below it, and nothing documented or read any deeper, where a key is shown by its number.
+     */
+    private fun provisioningFields(map: Map<*, *>, depth: Int): JSONArray {
+        val out = JSONArray()
+        for ((k, v) in map) {
+            val names = if (depth == 0) PROVISIONING_FIELDS else PROVISIONING_SUBFIELDS
+            val label = (if (depth <= 1) names[k as? Long] else null) ?: "key $k"
             if (v is Map<*, *>) {
-                fields.put(row(label, "${v.size} field(s)"))
-                for ((sk, sv) in v) {
-                    val sub = PROVISIONING_SUBFIELDS[sk as? Long] ?: "key $sk"
-                    fields.put(row("  $sub", value(sv)))
-                }
+                out.put(
+                    JSONObject().put("label", label).put("fields", provisioningFields(v, depth + 1))
+                )
             } else {
-                fields.put(row(label, value(v)))
+                out.put(row(label, value(v)))
             }
         }
-        return JSONObject().put("fields", fields)
+        return out
     }
 
     private fun row(label: String, value: String) =
@@ -598,6 +623,24 @@ object KeyboxDetail {
             if (parts.isEmpty()) "(empty)" else parts.joinToString(", ")
         } catch (_: Exception) {
             principal.name // better the name Java gives than nothing at all
+        }
+
+    /**
+     * The common name out of [principal], which is what a certificate is called when it is named
+     * rather than spelled out: "Droid CA3" for an issuer, the batch id for a keybox leaf. Null when
+     * the name carries no CN at all, where only the full DN says anything.
+     */
+    fun commonName(principal: X500Principal): String? =
+        try {
+            X500Name.getInstance(principal.encoded)
+                .rdNs
+                .asSequence()
+                .flatMap { it.typesAndValues.asSequence() }
+                .firstOrNull { it.type == BCStyle.CN }
+                ?.let { IETFUtils.valueToString(it.value) }
+                ?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
         }
 
     // --- Shared helpers -----------------------------------------------------------------
