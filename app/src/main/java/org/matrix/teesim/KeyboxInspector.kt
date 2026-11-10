@@ -38,6 +38,31 @@ object KeyboxInspector {
         return name
     }
 
+    /**
+     * What the keybox named [rawName] states about the device it was provisioned for, or null when
+     * it states nothing — a factory keybox carries no provisioningInfo, and a refused issuance
+     * carries a verdict without the hash. Read from disk on each call, which is once per config
+     * push; the file is small and the parse is not on any hot path.
+     */
+    fun provisioning(rawName: String): KeyboxDetail.Provisioning? {
+        val name = safeName(rawName) ?: return null
+        val file = File(Const.DATA_DIR, name)
+        if (!file.isFile) return null
+        return try {
+            val root = newSafeBuilder().parse(file).documentElement
+            val scope = firstChild(root, "Keybox") ?: root
+            val nodes = scope.getElementsByTagName("Certificate")
+            val certs = ArrayList<X509Certificate>(nodes.length)
+            for (i in 0 until nodes.length) parsePem(nodes.item(i).textContent)?.let {
+                certs.add(it)
+            }
+            KeyboxDetail.provisioningOf(certs)
+        } catch (e: Exception) {
+            SystemLogger.warning("KeyboxInspector: could not read provisioning info from $name", e)
+            null
+        }
+    }
+
     fun inspect(rawName: String, forceRefresh: Boolean = false): JSONObject {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)

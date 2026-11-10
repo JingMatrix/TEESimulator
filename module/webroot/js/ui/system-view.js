@@ -213,7 +213,7 @@ const ORDER = [
   "serial", "imei", "imei2", "meid",
 ];
 
-const SOURCE_LABEL = { required: "required", supplement: "supplement", synthesized: "synthesized" };
+const SOURCE_LABEL = { required: "required", supplement: "supplement", synthesized: "synthesized", keybox: "from keybox" };
 const HEX_FIELDS = new Set(["verifiedBootKey", "verifiedBootHash", "moduleHash"]);
 
 function overrideRow(field, o, actions) {

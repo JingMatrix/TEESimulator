@@ -440,6 +440,8 @@ html, body { overscroll-behavior-y: contain; }
 .badge-required { color: var(--warn); border-color: var(--warn); }
 .badge-supplement { color: var(--accent); border-color: var(--accent); }
 .badge-synthesized { color: var(--danger); border-color: var(--danger); }
+/* A value the keybox in force states, which this device does not get to choose. */
+.badge-keybox { color: var(--ok); border-color: var(--ok); }
 .badge-edited { color: var(--fg); border-color: var(--fg); }
 /* The inline editor for an editable override: input/select on its own line with Save + reset trailing. */
 .ov-edit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

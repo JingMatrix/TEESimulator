@@ -174,7 +174,15 @@ object Resolver {
         putId(ids, "imei", p.imei, harvest.effective("imei"))
         putId(ids, "imei2", p.imei2, harvest.effective("imei2"))
         putId(ids, "meid", p.meid, harvest.effective("meid"))
-        putId(ids, "manufacturer", p.manufacturer, harvest.effective("manufacturer"))
+        // An RKP keybox names the manufacturer it was provisioned for; attesting this device's
+        // instead contradicts the keybox signing the chain, so it sits between the profile's own
+        // value (which still wins) and the harvest baseline.
+        putId(
+            ids,
+            "manufacturer",
+            p.manufacturer.ifBlank { KeyboxInspector.provisioning(p.keybox)?.manufacturer ?: "" },
+            harvest.effective("manufacturer"),
+        )
         putId(ids, "model", p.model, harvest.effective("model"))
         if (ids.length() > 0) o.put("deviceIds", ids)
 

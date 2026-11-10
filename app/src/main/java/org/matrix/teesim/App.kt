@@ -363,14 +363,8 @@ object App {
      */
     @Synchronized
     private fun resolveAndPush(): Int {
-        // Re-layer the user's overrides.json over the frozen capture — an override edit trips the
-        // same DATA_DIR watcher that calls us, so this is where a changed override becomes live.
-        // Refresh the record the WebUI reads, and reflect any boot key/hash override into
-        // ro.boot.vbmeta.*.
-        harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
-        KeyAdmin.updateHarvest(harvest)
-        applyBootProps(harvest)
-        applyRkpDeletions()
+        // The config is read first because it is what names the keybox, and the keybox has the
+        // last word on the boot hash below.
         try {
             lastGoodConfig = ConfigStore.load()
         } catch (e: ConfigStore.ConfigException) {
@@ -378,6 +372,18 @@ object App {
         } catch (e: Exception) {
             SystemLogger.error("App: config.json read failed; keeping last-good", e)
         }
+        // Re-layer the user's overrides.json over the frozen capture — an override edit trips the
+        // same DATA_DIR watcher that calls us, so this is where a changed override becomes live.
+        // Refresh the record the WebUI reads, and reflect the boot key/hash into ro.boot.vbmeta.*,
+        // which is how the framework comes to agree with what is attested.
+        harvest =
+            Harvester.applyKeyboxBootHash(
+                Harvester.applyUserOverrides(capturedBase, OverrideStore.load()),
+                keyboxBootHash(lastGoodConfig),
+            )
+        KeyAdmin.updateHarvest(harvest)
+        applyBootProps(harvest)
+        applyRkpDeletions()
         val cfg =
             lastGoodConfig
                 ?: run {
@@ -513,6 +519,38 @@ object App {
      * verification-disabled / OEM AVB, #228), stale, or changed by another module. A match is left
      * untouched, so a steady state does no work.
      */
+    /** The keybox-stated boot hash in force at the last push, for logging a change only once. */
+    private var keyboxHashHex: String? = null
+
+    /**
+     * The verified boot hash an RKP keybox states, when one is in force. Unlike the device ids this
+     * is NOT a per-profile choice: the hash keys the TA's blob encryption and every profile derives
+     * the same key from it, so it follows one profile — the one named `default`, or the only one a
+     * single-profile configuration has. A keybox that states nothing (a factory keybox, or an
+     * issuance that was refused) leaves the computed hash in place.
+     */
+    private fun keyboxBootHash(cfg: ConfigStore.Config?): ByteArray? {
+        val profiles = cfg?.profiles ?: return null
+        val chosen =
+            profiles.firstOrNull { it.id == "default" } ?: profiles.singleOrNull() ?: return null
+        val hash = KeyboxInspector.provisioning(chosen.keybox)?.bootHash
+        val hex = hash?.toHex()
+        if (hex != keyboxHashHex) {
+            keyboxHashHex = hex
+            if (hex == null) {
+                SystemLogger.info(
+                    "App: no keybox-stated boot hash in profile '${chosen.id}'; attesting the harvested one"
+                )
+            } else {
+                SystemLogger.info(
+                    "App: profile '${chosen.id}' keybox states boot hash $hex; attesting that instead of " +
+                        "the harvested one, which also re-keys stored blobs until it is dropped again"
+                )
+            }
+        }
+        return hash
+    }
+
     private fun applyBootProps(h: Harvester.Record) {
         for ((prop, value) in Harvester.bootPropValues(h)) {
             val live = DeviceProps.prop(prop, "")

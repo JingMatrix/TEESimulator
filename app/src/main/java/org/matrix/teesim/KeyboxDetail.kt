@@ -297,6 +297,51 @@ object KeyboxDetail {
      * map's entries indented by their label. There is no one-line summary — it could only repeat
      * rows that are listed here anyway.
      */
+    /**
+     * What an RKP keybox states about the device it was provisioned for, in the two fields that the
+     * module can be consistent with: the verified boot hash its issuer recorded, and the
+     * manufacturer. Both are optional — a factory keybox carries no provisioningInfo at all, and an
+     * issuance that was refused carries the verdict without the hash.
+     */
+    data class Provisioning(val bootHash: ByteArray?, val manufacturer: String?) {
+        // ByteArray in a data class compares by identity; these are compared field-wise when the
+        // resolver decides whether anything changed.
+        override fun equals(other: Any?): Boolean =
+            other is Provisioning &&
+                manufacturer == other.manufacturer &&
+                (bootHash?.contentEquals(other.bootHash ?: ByteArray(0))
+                    ?: (other.bootHash == null))
+
+        override fun hashCode(): Int =
+            31 * (bootHash?.contentHashCode() ?: 0) + manufacturer.hashCode()
+    }
+
+    /**
+     * The first provisioningInfo in [certs], read for those two fields. The extension sits on
+     * whichever certificate the issuer attached it to — the keybox's own leaf, or the RKP-issued
+     * certificate above an attested key — so every certificate is tried in order and the first that
+     * decodes wins.
+     */
+    fun provisioningOf(certs: List<X509Certificate>): Provisioning? {
+        for (cert in certs) {
+            val raw = extensionOctets(cert, OID_PROVISIONING) ?: continue
+            val decoded = Cbor.decode(raw) as? Map<*, *> ?: continue
+            val device = decoded[5L] as? Map<*, *>
+            // 5.2 is the hash as 64 lowercase hex characters; anything else is not one.
+            val hash =
+                (device?.get(2L) as? String)
+                    ?.takeIf { HEX64.matches(it) }
+                    ?.let { hex ->
+                        ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+                    }
+            val manufacturer = (decoded[3L] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+            if (hash != null || manufacturer != null) return Provisioning(hash, manufacturer)
+        }
+        return null
+    }
+
+    private val HEX64 = Regex("^[0-9a-f]{64}$")
+
     private fun provisioning(cert: X509Certificate): JSONObject? {
         val raw = extensionOctets(cert, OID_PROVISIONING) ?: return null
         val decoded = Cbor.decode(raw)
