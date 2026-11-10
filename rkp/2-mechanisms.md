@@ -367,6 +367,24 @@ request ([part 1 §2.4](1-protocol.md#24-key-generation-and-the-authenticated-pu
 The post reports that the verification routine, `parseMacTags`, is cross-referenced only from the
 version-1 request path and from a fixed-variant command. The ordinary path never calls it.
 
+*That cross-reference has been read independently.* [Appendix C](C-screening-second-platform.md)
+screens a different handset — a mid-range Motorola on a Qualcomm `SM6475` in place of the record's
+`SM8750` tablet — and finds the ordinary version-2 handler and its fixed variant differing by
+exactly one call, that call being `parseMacTags`, with four of 778 recovered functions able to reach
+the verification at all. Thirty-two firmware lines of three unrelated handset makers were then
+screened over fifty-eight images: fourteen carry the same structure in at least one build, two of
+those with no tag-verification routine in the image at all; six implement no version-2 command on
+any build read and seven carry no certificate-request path at all; thirteen answer the command with
+a two-instruction stub returning the unimplemented code; and two have replaced the application
+outright with the upstream reference one, which verifies on every path. The commonest fix removes
+the unverified command rather than wiring the verification into it, and both its stub shape and that
+replacement recur across makers, which places the defect and its repair alike in the shared platform
+source
+([appendix C
+§C.5](C-screening-second-platform.md#c5-the-same-reading-across-three-vendors-and-the-fix)). The
+screening is static and executes nothing, so it corroborates the structure of this claim and not its
+outcome; what it removes is this subsection's dependence on a single account.
+
 The surrounding validation is not weak. The challenge carries a hard 64-byte bound enforced by an
 explicit compare-and-branch, every memory copy is clamped to a minimum, and the CBOR cursor is
 tracked; the post found no out-of-bounds read anywhere on the surface. One function is simply not

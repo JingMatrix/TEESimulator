@@ -17,3 +17,6 @@ local.properties
 
 # Research write-ups kept local; the tracked report is rkp/
 /docs/
+
+# Vendor firmware held for reference, cited by digest in rkp/D-working-record-mitee.md
+/rkp/D-artifacts/*.bin

@@ -876,7 +876,10 @@ does not transfer. Anti-rollback is not absent from the platform, however: the
 secure-operating-system image carries an old-version marker and the loader maintains a separate
 version store, so the rollback question is where the version is tracked rather than whether it is,
 and that store resides in a secure-world service rather than in a normal-world file a root process
-could delete.
+could delete. [Appendix D §D.2](D-working-record-mitee.md#d2-the-secure-world-read-off-the-handset)
+locates it: the application manager inside the environment image holds a version-check routine, an
+old-version error carrying both compared values, and read, write and update paths for a persistent
+object in secure storage, with an explicit exemption for an application declaring version zero.
 
 *Application bodies ship unencrypted.* The container is a 336-byte header followed by a plain
 AArch64 ELF object: the magic appears at offset 336, the object is a 64-bit little-endian shared

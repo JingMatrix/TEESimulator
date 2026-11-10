@@ -73,6 +73,33 @@ absent from the static HTML. The appendices set down their technical substance �
 structures, negative results and the authors' own qualifications — so that the claims remain
 checkable if the sources become unavailable.
 
+[Appendix D](D-working-record-mitee.md) is the first section written from a handset rather than from
+firmware archives: a unit of the platform of [part 4 §6](4-measurements.md#6-the-measured-platform),
+locked and verified-boot intact, read under the transient privilege of [part 4
+§6.5](4-measurements.md#65-normal-world-root). It records the unit's own measurements, decodes an
+operator account of how the secure world is modified on this model, and locates the loader decision
+that [part 2 §6.2](2-mechanisms.md#62-exact-frame-patching) turns on — the application manager
+fetches a container through a sibling service and then verifies it itself, so both decisions an
+operator could reach sit on the same side of the channel as the bytes, which resolves a
+terminological difference between this report's two sources for Route D. It also finds the secure-OS
+partition to be a certificate-bearing container whose per-image digests reproduce, which settles in
+the affirmative a question the locked route would otherwise have had to assume. It writes nothing to
+the device, keeps its own corrections in
+[§D.10](D-working-record-mitee.md#d10-corrections-made-in-the-course-of-this-record),
+and states in [§D.6](D-working-record-mitee.md#d6-measurement-binding-and-a-tension-with-part-4-63)
+a tension between its source record and [part 4
+§6.3](4-measurements.md#63-storage-of-the-dice-secret) that neither reading resolves.
+
+[Appendix C](C-screening-second-platform.md) is not a record of a source but a measurement of this
+project's own: a static screening of the omitted verification of [part 2
+§3.4](2-mechanisms.md#34-the-omitted-verification) across three handset makers' firmware, read from
+public archives with no device and no contact with the provisioning backend. It is separate from
+[part 4](4-measurements.md) because it measures a vendor binary's call structure rather than a
+certificate, and it states in [§C.8](C-screening-second-platform.md#c8-what-this-does-not-establish)
+what a static reading cannot settle. It also records, in the same place as its results, the two
+readings it got wrong and had to correct — which is the point of keeping a screening record rather
+than only its conclusions.
+
 ---
 
 ### Toolkit: [the toolkit](tools/README.md)
