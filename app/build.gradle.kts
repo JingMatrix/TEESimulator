@@ -226,6 +226,13 @@ androidComponents {
                 group = "TEESimulator Module Packaging"
                 description = "Prepares all files for the ${variant.name} module zip."
 
+                // The version stamped into module.prop below is an expand() argument, and Gradle
+                // does not track those as inputs: with the template unchanged the task stays
+                // up-to-date across a commit and the module keeps reporting the hash it was first
+                // staged at — in the manager, in the WebUI and in a bug report. Declaring it makes
+                // a new commit re-stage the file.
+                inputs.property("moduleVersion", "$gitCommitCount-$gitCommitHash")
+
                 // Reject a WebUI JS syntax error before it ships (no-op when node is absent).
                 dependsOn(checkWebrootJs)
 
