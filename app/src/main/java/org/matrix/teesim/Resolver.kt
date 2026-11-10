@@ -15,11 +15,12 @@ import org.json.JSONObject
  * verifiedBootKey(b64), verifiedBootHash(b64), moduleHash(b64, optional), deviceLocked,
  * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox profile: id,
  * keyboxB64, mode, securityLevel(int), osVersion, osPatchLevel, vendorPatchLevel, bootPatchLevel,
- * deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name entry verbatim
- * (kept even when not installed, since a name-match still fires on a later install); uids[] is the
- * independent effective caller-uid set (resolved packages + raw uid:N tokens + autoIncludeNewApps
- * expansion, never -1). The router matches package name first, uid second, so the two arrays need
- * not be the same length. See [Scope].
+ * deviceIds{...}, verifiedBootHash(b64, only when it differs from bootInfo's), packages[], uids[].
+ * packages[] is every explicit package-name entry verbatim (kept even when not installed, since a
+ * name-match still fires on a later install); uids[] is the independent effective caller-uid set
+ * (resolved packages + raw uid:N tokens + autoIncludeNewApps expansion, never -1). The router
+ * matches package name first, uid second, so the two arrays need not be the same length. See
+ * [Scope].
  */
 object Resolver {
 
@@ -162,29 +163,28 @@ object Resolver {
             o.put("bootPatchLevel", it)
         }
 
-        // Device IDs: an explicit profile value overrides; otherwise fall back to the harvest
-        // baseline — the real captured id, else the value read from the OS at harvest
-        // (serial/imei/meid, and brand/device/product/manufacturer/model when the leaf carried
-        // none), exposed via effective(). Omitted when neither is set (declines that id).
+        // Device IDs and the verified boot hash: an explicit profile value wins; everything it
+        // leaves empty takes the default [ProfileDefaults] resolves — what this profile's own
+        // keybox states about the device it was provisioned for, else the harvest baseline (the
+        // real captured id, else the value read from the OS at harvest). An id with neither is
+        // omitted, which declines it.
+        val defaults = ProfileDefaults.of(p.keybox, harvest)
         val ids = JSONObject()
-        putId(ids, "brand", p.brand, harvest.effective("brand"))
-        putId(ids, "device", p.device, harvest.effective("device"))
-        putId(ids, "product", p.product, harvest.effective("product"))
-        putId(ids, "serial", p.serial, harvest.effective("serial"))
-        putId(ids, "imei", p.imei, harvest.effective("imei"))
-        putId(ids, "imei2", p.imei2, harvest.effective("imei2"))
-        putId(ids, "meid", p.meid, harvest.effective("meid"))
-        // An RKP keybox names the manufacturer it was provisioned for; attesting this device's
-        // instead contradicts the keybox signing the chain, so it sits between the profile's own
-        // value (which still wins) and the harvest baseline.
-        putId(
-            ids,
-            "manufacturer",
-            p.manufacturer.ifBlank { KeyboxInspector.provisioning(p.keybox)?.manufacturer ?: "" },
-            harvest.effective("manufacturer"),
-        )
-        putId(ids, "model", p.model, harvest.effective("model"))
+        for (field in ProfileDefaults.FIELDS) {
+            if (field == "verifiedBootHash") continue
+            val v = ProfileDefaults.effective(p, field, defaults)
+            if (v.isNotBlank()) ids.put(field, v)
+        }
         if (ids.length() > 0) o.put("deviceIds", ids)
+
+        // The root of trust this profile attests, when it is not the device-wide one in bootInfo: a
+        // spoof the profile names, or the hash its keybox states. It is also an input to the TA's
+        // key-encryption key, so the profile's generation-mode blobs follow it (see
+        // ConfigStore.ProfileConfig.verifiedBootHash); patch mode keeps the real key untouched.
+        val bootHash = ProfileDefaults.bootHash(p, harvest, defaults)
+        if (!bootHash.contentEquals(harvest.effectiveBootHash())) {
+            o.put("verifiedBootHash", b64.encodeToString(bootHash))
+        }
 
         // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[]
         // (caller-uid fallback, effective set with no -1) resolved centrally by Scope, which also
@@ -207,10 +207,5 @@ object Resolver {
         o.put("uids", uids)
         o.put("uidPackages", uidPackages)
         return o
-    }
-
-    private fun putId(o: JSONObject, key: String, override: String, harvested: String) {
-        val v = override.ifBlank { harvested }
-        if (v.isNotBlank()) o.put(key, v)
     }
 }

@@ -25,7 +25,7 @@ const GROUPS = [
   { id: "levels", title: "Patch & OS levels", fold: true },
   {
     id: "identity", title: "Device identity", fold: true,
-    note: "Each overrides one attested device id. Leave a field empty to use the value harvested from the device.",
+    note: "Each overrides one value attested about this device. Leave a field empty to take the default under it — what this profile's keybox states about the device it was provisioned for, else what was harvested here.",
   },
   { id: "apps", title: "Target apps" },
 ];
@@ -48,19 +48,25 @@ function foldSummary(group, fields, profile, hasErrors) {
   return nodes;
 }
 
-// A cue under a level / identity field: what an empty value resolves to — the harvested value,
-// meaning the raw capture OR the value fabricated at harvest (e.g. a serial/imei/meid read from the
-// OS because the leaf never carries it) — or, when neither exists, that the tag will be omitted. A
+// A cue under a level / identity field: what an empty value resolves to, and which of the two
+// sources says it. The keybox comes first — an RKP keybox records the device it was provisioned for,
+// and attesting this device's own value under it contradicts the keybox signing the chain — then the
+// harvest, meaning the raw capture OR the value fabricated at harvest (e.g. a serial/imei/meid read
+// from the OS because the leaf never carries it). When neither has it, the tag is omitted. A
 // `system_property` value gets its own cue. Mirrors the keybox "(missing)" cue.
+//
+// `resolved[key]` is { value, source }; source is "keybox" or "harvest".
 function resolveHint(d, value, resolved) {
   if (!Object.prototype.hasOwnProperty.call(resolved, d.key)) return null;
   const v = value == null ? "" : String(value).trim();
   if (v === "") {
-    const rv = resolved[d.key];
+    const rd = resolved[d.key] || {};
+    const rv = rd.value;
     const has = rv != null && rv !== "";
+    const from = rd.source === "keybox" ? "keybox provision → " : "harvested → ";
     return el("div", {
-      class: "field-help resolve-hint" + (has ? "" : " missing"),
-      text: has ? "harvested → " + rv : "not harvested — this tag will be omitted",
+      class: "field-help resolve-hint" + (has ? "" : " missing") + (has && rd.source === "keybox" ? " from-keybox" : ""),
+      text: has ? from + rv : "not harvested — this tag will be omitted",
     });
   }
   if (v === "system_property") {
@@ -184,10 +190,11 @@ export function renderProfileEditor(host, state, actions) {
   for (const m of errFor("__name")) renameField.appendChild(el("div", { class: "err", text: m }));
   body.appendChild(renameField);
 
-  // One line for the whole editor: an empty patch / OS / identity field falls back to the
-  // value harvested from this device, shown on the System screen.
+  // One line for the whole editor: an empty patch / OS / identity field takes a default, and the
+  // cue under each one names it. Only the harvest gets a link — it is a screen in this UI; what a
+  // keybox states is read off the keybox itself, in the Keyboxes panel.
   body.appendChild(el("p", { class: "field-help editor-note" }, [
-    "Leave a patch, OS, or identity field empty to use the value ",
+    "Leave a patch, OS, or identity field empty to take what its keybox states, else the value ",
     el("button", { type: "button", class: "linklike", onclick: () => actions.gotoSystem() }, "harvested from this device"),
     ".",
   ]));

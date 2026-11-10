@@ -298,29 +298,57 @@ object KeyboxDetail {
      * rows that are listed here anyway.
      */
     /**
-     * What an RKP keybox states about the device it was provisioned for, in the two fields that the
-     * module can be consistent with: the verified boot hash its issuer recorded, and the
-     * manufacturer. Both are optional — a factory keybox carries no provisioningInfo at all, and an
-     * issuance that was refused carries the verdict without the hash.
+     * What an RKP keybox states about the device it was provisioned for, in the fields the module
+     * can be consistent with: the verified boot hash its issuer recorded, the manufacturer, and the
+     * build fingerprint. Every field is optional — a factory keybox carries no provisioningInfo at
+     * all, and an issuance that was refused carries the verdict without the value it was passed on.
+     *
+     * [ids] is what the fingerprint spells out, keyed by the same field names a profile and the
+     * harvest use, so a caller resolving a device id reads it the same way it reads the others.
      */
-    data class Provisioning(val bootHash: ByteArray?, val manufacturer: String?) {
-        // ByteArray in a data class compares by identity; these are compared field-wise when the
-        // resolver decides whether anything changed.
+    data class Provisioning(
+        val bootHash: ByteArray?,
+        val manufacturer: String?,
+        val fingerprint: String?,
+    ) {
+        /**
+         * The device ids this statement names: the manufacturer it carries in its own field, plus
+         * the three a fingerprint spells out. A fingerprint is
+         * `brand/product/device:release/id/incremental:type/tags`, so the model is not among them —
+         * nothing in a keybox states it.
+         */
+        val ids: Map<String, String> = buildMap {
+            manufacturer?.let { put("manufacturer", it) }
+            val head = fingerprint?.substringBefore(':')?.split('/').orEmpty()
+            if (head.size == 3 && head.none { it.isBlank() }) {
+                put("brand", head[0])
+                put("product", head[1])
+                put("device", head[2])
+            }
+        }
+
+        /** Whether this statement is empty, which is what a keybox stating nothing parses to. */
+        fun isEmpty() = bootHash == null && ids.isEmpty()
+
+        // ByteArray in a data class compares by identity; these are compared field-wise when a
+        // caller decides whether anything changed.
         override fun equals(other: Any?): Boolean =
             other is Provisioning &&
                 manufacturer == other.manufacturer &&
+                fingerprint == other.fingerprint &&
                 (bootHash?.contentEquals(other.bootHash ?: ByteArray(0))
                     ?: (other.bootHash == null))
 
         override fun hashCode(): Int =
-            31 * (bootHash?.contentHashCode() ?: 0) + manufacturer.hashCode()
+            31 * (31 * (bootHash?.contentHashCode() ?: 0) + manufacturer.hashCode()) +
+                fingerprint.hashCode()
     }
 
     /**
-     * The first provisioningInfo in [certs], read for those two fields. The extension sits on
-     * whichever certificate the issuer attached it to — the keybox's own leaf, or the RKP-issued
-     * certificate above an attested key — so every certificate is tried in order and the first that
-     * decodes wins.
+     * The first provisioningInfo in [certs], read for those fields. The extension sits on whichever
+     * certificate the issuer attached it to — the keybox's own leaf, or the RKP-issued certificate
+     * above an attested key — so every certificate is tried in order and the first that decodes
+     * wins.
      */
     fun provisioningOf(certs: List<X509Certificate>): Provisioning? {
         for (cert in certs) {
@@ -335,7 +363,12 @@ object KeyboxDetail {
                         ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
                     }
             val manufacturer = (decoded[3L] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-            if (hash != null || manufacturer != null) return Provisioning(hash, manufacturer)
+            // 5.4 is the build fingerprint the issuance was passed on. A refusal carries 5.3, the
+            // verdict, with no fingerprint under it, so this is absent exactly when there is no
+            // build the issuer vouched for.
+            val fingerprint = (device?.get(4L) as? String)?.trim()?.takeIf { it.isNotEmpty() }
+            val stated = Provisioning(hash, manufacturer, fingerprint)
+            if (!stated.isEmpty()) return stated
         }
         return null
     }

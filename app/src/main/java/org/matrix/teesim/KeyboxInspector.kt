@@ -63,6 +63,31 @@ object KeyboxInspector {
         }
     }
 
+    /**
+     * What the keybox named [rawName] states, as the WebUI's profile editor needs it: the default
+     * every field a profile leaves empty takes, and whether the keybox or this device is the one
+     * saying it. The editor asks per keybox rather than per profile because it asks about a DRAFT —
+     * the keybox a profile has just been pointed at, before any of it is saved or pushed.
+     */
+    fun states(rawName: String, harvest: Harvester.Record?): JSONObject {
+        val name = safeName(rawName) ?: return fail("invalid keybox name")
+        if (harvest == null) return fail("no harvest yet")
+        val stated = provisioning(name)
+        val out = JSONObject().put("ok", true).put("name", name)
+        stated?.fingerprint?.let { out.put("fingerprint", it) }
+        val fields = JSONObject()
+        for ((field, d) in ProfileDefaults.from(stated, harvest)) {
+            fields.put(
+                field,
+                JSONObject()
+                    .put("value", d.value)
+                    .put("source", if (d.fromKeybox) "keybox" else "harvest"),
+            )
+        }
+        out.put("defaults", fields)
+        return out
+    }
+
     fun inspect(rawName: String, forceRefresh: Boolean = false): JSONObject {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)

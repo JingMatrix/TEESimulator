@@ -59,6 +59,9 @@ export const PATCH_RE = /^(today|no|harvested|system_property|(\d{4}|YYYY)-(0[1-
 export const OSVER_RE = /^(harvested|system_property|\d+(\.\d+){0,2})$/;
 // Per-profile operation mode.
 export const MODE_RE = /^(patch|generation)$/;
+// A spoofed verified boot hash: SHA-256 as 64 hex characters, the shape of the real one. Empty
+// means the default -- what the profile's keybox states, else what this device harvested.
+export const HASH_RE = /^[0-9a-fA-F]{64}$/;
 
 // Field descriptors, in render order. Each one is:
 //   key      unique id, also the inline-error key
@@ -121,6 +124,13 @@ export const FIELDS = [
   { key: "imei", path: ["imei"], label: "IMEI", group: "identity", type: "text", required: false, default: "" },
   { key: "meid", path: ["meid"], label: "MEID", group: "identity", type: "text", required: false, default: "" },
   { key: "imei2", path: ["imei2"], label: "IMEI2", group: "identity", type: "text", required: false, default: "" },
+  // No help line: it sits among the identity fields, which carry none, and the cue under it
+  // already names the value it takes when left empty. What spoofing it costs a generation-mode
+  // profile (its stored blobs are keyed by this hash) is in the README, not in the form.
+  {
+    key: "verifiedBootHash", path: ["verifiedBootHash"], label: "Verified boot hash",
+    group: "identity", type: "text", re: HASH_RE, required: false, default: "",
+  },
   // --- targeting ----------------------------------------------------------
   {
     key: "apps", path: ["apps"], label: "Apps", group: "apps", type: "scope",

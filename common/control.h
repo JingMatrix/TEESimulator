@@ -68,6 +68,13 @@ typedef struct {
   // keystore1 rebuilds an attestation application id from it, since downstream of that hook the
   // caller's own is already gone. NULL means "no names known".
   const char *const *uid_packages;
+  // The verified boot hash THIS profile attests, when it is not the device-wide one above: a value
+  // the profile spoofs, or the one its RKP keybox states about the device it was provisioned for.
+  // NULL/0 means "the device-wide hash". It is the profile's root of trust and an input to its TA's
+  // key-encryption key, so a profile attesting its own hash also encrypts its generation-mode blobs
+  // under its own key -- they stop decrypting if it changes, and come back when it returns.
+  const uint8_t *verified_boot_hash;
+  size_t verified_boot_hash_len;
 } TsProfile;
 
 // --- staging API, implemented by each router ---------------------------------

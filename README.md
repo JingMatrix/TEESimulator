@@ -74,13 +74,16 @@ A schema version and a map of named profiles. Each targeted package must appear 
       "brand": "", "device": "", "product": "",
       "manufacturer": "", "model": "",
       "serial": "", "imei": "", "meid": "", "imei2": "",
+      "verifiedBootHash": "",                // empty = the keybox's, else this device's; or 64 hex characters
       "apps": ["com.google.android.gms", "com.android.vending"]
     }
   }
 }
 ```
 
-Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Device-identity fields fall back to the values captured from the real TEE at harvest, so an app that asks the keystore to attest the device's real ids gets a matching answer; a non-empty field overrides that, and both are omitted only when neither is set. The root of trust is never listed here — it comes from the harvest.
+Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Every other field states what this profile attests, and what it leaves empty takes a default from one of two places. An RKP keybox records the device it was *provisioned* for — its verified boot hash, its manufacturer, and a build fingerprint, which spells out the brand, product and device names — and that comes first, because attesting this device's own values under such a keybox contradicts the keybox signing the chain. Everything it does not state falls back to the harvest: the value captured from the real TEE, or the one read from the OS when the attested leaf carried none, so an app asking the keystore to attest the device's real ids gets a matching answer. A field with neither is omitted rather than sent as a made-up default, and the editor's hint under each empty field names the value and which of the two sources it came from.
+
+`verifiedBootHash` is the profile's root of trust. It is also an input to the key-encryption key the simulator's TA derives, so a profile that changes it cannot read back the generation-mode keys minted under the previous hash — they return when it does, and patch mode keeps the real hardware key and is unaffected. One `ro.boot.vbmeta.digest` cannot agree with several profiles at once, so the property follows the profile named `default` (or the only one a single-profile configuration has).
 
 ### `keybox.xml`
 

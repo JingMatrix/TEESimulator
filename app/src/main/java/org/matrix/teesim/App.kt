@@ -374,15 +374,11 @@ object App {
         }
         // Re-layer the user's overrides.json over the frozen capture — an override edit trips the
         // same DATA_DIR watcher that calls us, so this is where a changed override becomes live.
-        // Refresh the record the WebUI reads, and reflect the boot key/hash into ro.boot.vbmeta.*,
-        // which is how the framework comes to agree with what is attested.
-        harvest =
-            Harvester.applyKeyboxBootHash(
-                Harvester.applyUserOverrides(capturedBase, OverrideStore.load()),
-                keyboxBootHash(lastGoodConfig),
-            )
+        // The capture is never rewritten on anything else's word: it is what this device is, and a
+        // keybox or a profile that attests something else does so in the profile, not here.
+        harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
         KeyAdmin.updateHarvest(harvest)
-        applyBootProps(harvest)
+        applyBootProps(harvest, lastGoodConfig)
         applyRkpDeletions()
         val cfg =
             lastGoodConfig
@@ -510,6 +506,21 @@ object App {
             }
         }
 
+    /** The boot hash reflected into ro.boot.vbmeta.digest last, for logging a change only once. */
+    private var bootPropHashHex: String? = null
+
+    /**
+     * The profile whose root of trust the device-wide properties follow: the one named `default`,
+     * or the only one a single-profile configuration has. Every profile may attest its own verified
+     * boot hash, but there is exactly one ro.boot.vbmeta.digest for the framework to read, so it
+     * cannot agree with all of them at once — it follows this one, and a configuration with several
+     * profiles that disagree leaves the others' hash visible in attestation alone.
+     */
+    private fun bootPropProfile(cfg: ConfigStore.Config?): ConfigStore.ProfileConfig? {
+        val profiles = cfg?.profiles ?: return null
+        return profiles.firstOrNull { it.id == "default" } ?: profiles.singleOrNull()
+    }
+
     /**
      * Force the matching ro.boot.vbmeta.* property to the boot key/hash we actually PRESENT (the
      * override when one is active, else the real captured value), so anything reading those props
@@ -519,40 +530,21 @@ object App {
      * verification-disabled / OEM AVB, #228), stale, or changed by another module. A match is left
      * untouched, so a steady state does no work.
      */
-    /** The keybox-stated boot hash in force at the last push, for logging a change only once. */
-    private var keyboxHashHex: String? = null
-
-    /**
-     * The verified boot hash an RKP keybox states, when one is in force. Unlike the device ids this
-     * is NOT a per-profile choice: the hash keys the TA's blob encryption and every profile derives
-     * the same key from it, so it follows one profile — the one named `default`, or the only one a
-     * single-profile configuration has. A keybox that states nothing (a factory keybox, or an
-     * issuance that was refused) leaves the computed hash in place.
-     */
-    private fun keyboxBootHash(cfg: ConfigStore.Config?): ByteArray? {
-        val profiles = cfg?.profiles ?: return null
-        val chosen =
-            profiles.firstOrNull { it.id == "default" } ?: profiles.singleOrNull() ?: return null
-        val hash = KeyboxInspector.provisioning(chosen.keybox)?.bootHash
-        val hex = hash?.toHex()
-        if (hex != keyboxHashHex) {
-            keyboxHashHex = hex
-            if (hex == null) {
-                SystemLogger.info(
-                    "App: no keybox-stated boot hash in profile '${chosen.id}'; attesting the harvested one"
-                )
-            } else {
-                SystemLogger.info(
-                    "App: profile '${chosen.id}' keybox states boot hash $hex; attesting that instead of " +
-                        "the harvested one, which also re-keys stored blobs until it is dropped again"
-                )
-            }
+    private fun applyBootProps(h: Harvester.Record, cfg: ConfigStore.Config?) {
+        // The hash to reflect is the one the governing profile actually attests, which it may spoof
+        // or take from its keybox; with no config to read, the harvest's own.
+        val chosen = bootPropProfile(cfg)
+        val bootHash = chosen?.let { ProfileDefaults.bootHash(it, h) } ?: h.effectiveBootHash()
+        val hex = bootHash.toHex()
+        if (hex != bootPropHashHex) {
+            bootPropHashHex = hex
+            SystemLogger.info(
+                "App: ro.boot.vbmeta.digest follows profile '${chosen?.id ?: "-"}' at $hex" +
+                    if (bootHash.contentEquals(h.effectiveBootHash())) " (the harvested hash)"
+                    else " (spoofed; the harvested hash is ${h.effectiveBootHash().toHex()})"
+            )
         }
-        return hash
-    }
-
-    private fun applyBootProps(h: Harvester.Record) {
-        for ((prop, value) in Harvester.bootPropValues(h)) {
+        for ((prop, value) in Harvester.bootPropValues(h, bootHash)) {
             val live = DeviceProps.prop(prop, "")
             if (live != value) {
                 SysProp.set(prop, value)

@@ -62,6 +62,11 @@
 //       "aosp" (software root), "knox", "unknown", or "none". googleSigned/chainVerified/revoked are the
 //       chain-level verdicts the inspector's status banner is built from; revocationChecked is false when
 //       Google's revocation list could not be fetched (so revoked is not authoritative).
+//   keyAdmin("keyboxDefaults", { name }) -> { ok, name, fingerprint?,
+//                                          defaults:{ <field>:{ value, source } } }
+//       What a profile signing with this keybox reports for each field it leaves EMPTY, and whether
+//       the keybox states it ("keybox" — its provisioningInfo records the device it was provisioned
+//       for) or this device does ("harvest"). The profile editor's resolution hints are this.
 //   keyAdmin("canary")               -> { ok, currentCode, latest:{ code, tag, name,
 //                                          notes, htmlUrl, assets:[{ name, size }] }|null,
 //                                          updateAvailable }
@@ -299,6 +304,11 @@ export async function keyAdmin(action, args = {}) {
       // refresh:true has the daemon re-fetch Google's revocation list (fresh, cache-busted) before
       // re-checking — the keybox inspector's pull-to-refresh sets it.
       return request("GET", "/keybox/inspect" + nameQuery(args) + (args.refresh ? "&refresh=1" : ""));
+    case "keyboxDefaults":
+      // What a profile signing with this keybox reports for every field it leaves empty, and
+      // whether the keybox or this device is the source. Asked per KEYBOX, not per profile: the
+      // editor asks about a draft, before the profile naming it is saved or pushed.
+      return request("GET", "/keybox/defaults" + nameQuery(args));
     case "canary":
       return request("GET", "/canary");
     case "canaryInstall":

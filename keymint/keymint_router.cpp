@@ -1606,6 +1606,16 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
+  // The root of trust this profile attests: its own when it carries one (a spoofed hash, or the one
+  // its keybox states), else the device-wide hash every other profile shares. It also keys the TA's
+  // blob encryption, so a profile with its own hash has its own key-encryption key -- which is why
+  // both of its levels are built from the SAME hash below.
+  const uint8_t* vb_hash =
+      p->verified_boot_hash && p->verified_boot_hash_len ? p->verified_boot_hash
+                                                         : g_stage_vb_hash.data();
+  const size_t vb_hash_len = p->verified_boot_hash && p->verified_boot_hash_len
+                                 ? p->verified_boot_hash_len
+                                 : g_stage_vb_hash.size();
   // A real device runs a separate KeyMint instance per security level; we mirror that with one fixed-
   // level TA per level. Both are built from the same keybox and boot state, so their key-encryption
   // keys match and any of our blobs decrypts under either — but each stamps its own level into the
@@ -1614,8 +1624,8 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   auto buildTa = [&](int32_t level) -> ::Ta* {
     return teesim_km_init_ex(p->keybox, p->keybox_len, level, p->os_version, p->os_patchlevel,
                              p->vendor_patchlevel, p->boot_patchlevel, g_stage_vb_key.data(),
-                             g_stage_vb_key.size(), g_stage_vb_hash.data(), g_stage_vb_hash.size(),
-                             g_stage_locked, g_stage_vb_state, g_stage_attest_version_tee,
+                             g_stage_vb_key.size(), vb_hash, vb_hash_len, g_stage_locked,
+                             g_stage_vb_state, g_stage_attest_version_tee,
                              g_stage_attest_version_strongbox, p->ids);
   };
   ::Ta* ta_tee = buildTa(static_cast<int32_t>(SecurityLevel::TRUSTED_ENVIRONMENT));
@@ -1657,10 +1667,11 @@ extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
     prof.uid_names.emplace_back(name);
   }
   LOGI("teesim_cfg_add_profile: staged profile '%s' (mode=%s, security_level=%s, %zu package(s), "
-       "%zu uid(s))",
+       "%zu uid(s), root of trust %s)",
        prof.id.c_str(), prof.patch_mode ? "patch" : "generation",
        LevelName(static_cast<SecurityLevel>(p->security_level)),
-       prof.packages.size(), prof.uids.size());
+       prof.packages.size(), prof.uids.size(),
+       p->verified_boot_hash && p->verified_boot_hash_len ? "its own" : "device-wide");
   for (const auto& pkg : prof.packages)
     LOGD("teesim_cfg_add_profile:   package '%s' in user %d", pkg.name.c_str(), pkg.user_id);
   g_staging.push_back(std::move(prof));

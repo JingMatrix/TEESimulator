@@ -95,12 +95,6 @@ object Harvester {
          */
         SUPPLEMENT,
         /**
-         * Stated by the keybox in force rather than by this device: an RKP keybox records the
-         * verified boot hash of the device it was provisioned for, and attesting anything else
-         * under it contradicts the keybox itself. Locked — the value is not ours to choose.
-         */
-        KEYBOX,
-        /**
          * Synthesized because there is no working hardware (level/version on a software-only
          * device).
          */
@@ -149,41 +143,27 @@ object Harvester {
         )
 
     /**
-     * The ro.boot.vbmeta.* values to reflect for [h]: the PRESENTED boot key and hash — the
-     * override when one is active, else the real captured bytes. Unlike a plain read of the
-     * override map, this includes a genuinely captured value, so ro.boot.vbmeta.digest tracks the
-     * attested verifiedBootHash even on a device whose bootloader never populated the property
-     * (#228). A field whose presented value is not a real 32-byte value is skipped — we never write
-     * an all-zero prop.
+     * The ro.boot.vbmeta.* values to reflect: the PRESENTED boot key and hash — the override when
+     * one is active, else the real captured bytes. Unlike a plain read of the override map, this
+     * includes a genuinely captured value, so ro.boot.vbmeta.digest tracks the attested
+     * verifiedBootHash even on a device whose bootloader never populated the property (#228). A
+     * field whose presented value is not a real 32-byte value is skipped — we never write an
+     * all-zero prop.
+     *
+     * [bootHash] is the hash actually being attested, which a profile may spoof away from this
+     * record's own ([ProfileDefaults.bootHash]); there is one property for a device that may be
+     * attesting several hashes, so the caller decides which profile it follows.
      */
-    fun bootPropValues(h: Record): Map<String, String> = buildMap {
+    fun bootPropValues(
+        h: Record,
+        bootHash: ByteArray = h.effectiveBootHash(),
+    ): Map<String, String> = buildMap {
         h.effectiveBootKey()
             .takeIf { isUsableBootValue(it) }
             ?.let { put(BOOT_PROP.getValue("verifiedBootKey"), it.toHex()) }
-        h.effectiveBootHash()
+        bootHash
             .takeIf { isUsableBootValue(it) }
             ?.let { put(BOOT_PROP.getValue("verifiedBootHash"), it.toHex()) }
-    }
-
-    /**
-     * Shadow verifiedBootHash with the one an RKP keybox states, so what is attested agrees with
-     * the keybox signing it. [hash] is null when no such keybox is in force, and then the record is
-     * returned untouched: every push re-layers from the frozen capture, so dropping the keybox
-     * restores the computed hash by itself, with nothing to remember or put back.
-     *
-     * This value also feeds KeyMint's key-encryption key, so changing it re-keys the blobs the TA
-     * stores: keys minted under one keybox's hash cannot be decrypted while another is in force,
-     * and come back when it returns. Patch-mode profiles are unaffected — they keep the real key.
-     */
-    fun applyKeyboxBootHash(base: Record, hash: ByteArray?): Record {
-        if (hash == null || !isUsableBootValue(hash)) return base
-        val hex = hash.toHex()
-        if (base.overrides["verifiedBootHash"]?.value == hex) return base
-        return base.copy(
-            overrides =
-                base.overrides +
-                    ("verifiedBootHash" to Override(hex, OverrideSource.KEYBOX, editable = false))
-        )
     }
 
     private fun sourceFor(field: String): OverrideSource =
