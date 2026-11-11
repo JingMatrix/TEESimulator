@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 
 import {
   emptyProfile, emptyConfig,
-  PKG_RE, PKG_USER_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, UID_RE, APP_ENTRY_RE,
+  PKG_RE, PKG_USER_RE, PROFILE_RE, KEYBOX_RE, PATCH_RE, OSVER_RE, MODE_RE, HASH_RE, UID_RE,
+  APP_ENTRY_RE,
   splitEntry, entryToken,
 } from "../js/domain/schema.js";
 import { validateConfig, validateProfile } from "../js/domain/validate.js";
@@ -211,6 +212,23 @@ test("exactly one profile auto-including new apps is fine", () => {
   assert.equal(r.ok, true, JSON.stringify(r.errors));
 });
 
+test("two profiles both applying system properties is an error on BOTH", () => {
+  const a = validProfile(["com.a"]); a.applyProperties = true;
+  const b = validProfile(["com.b"]); b.applyProperties = true;
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, false);
+  const errs = r.errors.filter((e) => e.field === "applyProperties");
+  assert.ok(errs.some((e) => e.profile === "a"));
+  assert.ok(errs.some((e) => e.profile === "b"));
+});
+
+test("exactly one profile applying system properties is fine", () => {
+  const a = validProfile(["com.a"]); a.applyProperties = true;
+  const b = validProfile(["com.b"]);
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
 // --- regex whitelists ----------------------------------------------------
 const cases = [
   [PKG_RE, ["com.foo", "com.foo.bar", "a_b.c", "A9._"], ["", "com foo", "com;rm -rf", "com/foo", "com-foo"]],
@@ -223,6 +241,8 @@ const cases = [
   [PATCH_RE, ["today", "no", "harvested", "system_property", "2024-01", "2024-12", "2024-01-15", "2024-12-31", "YYYY-MM", "YYYY-MM-05", "YYYY-MM-DD"], ["2024", "2024-1", "2024-1-1", "yesterday", "", "2024-00", "2024-13", "2024-01-00", "2024-01-32", "2024-13-01", "MM-05", "YYYY-13-01"]],
   [OSVER_RE, ["harvested", "system_property", "16", "16.0", "16.0.0", "160000"], ["16.0.0.0", "v16", "", "16."]],
   [MODE_RE, ["patch", "generation"], ["", "Patch", "GENERATION", "patched", "gen", "auto"]],
+  [HASH_RE, ["0".repeat(64), "f".repeat(64), "F".repeat(64), "4d7dbe175510629ec6b2e9b725dfbc7fd54199cbae8058f0a8ee1eb61ab2fa65"],
+    ["", "0".repeat(63), "0".repeat(65), "g".repeat(64), "0x" + "0".repeat(62), " " + "0".repeat(64)]],
 ];
 for (const [re, good, bad] of cases) {
   test(`regex ${re} accepts its allowed set`, () => {

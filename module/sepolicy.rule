@@ -40,6 +40,16 @@ allow magisk logd unix_stream_socket connectto
 allow su logdr_socket sock_file write
 allow magisk logdr_socket sock_file write
 
+# Both the daemon and the stage scripts decide what to do by reading /proc/<keystore pid>/maps:
+# whether the running keystore daemon already carries an interceptor, which says whether to inject,
+# adopt what is in there, or restart the service to clear a previous build out of it. Those /proc
+# entries carry the keystore domain's own label, so grant the root-manager domain (ksu on KernelSU,
+# su on APatch, magisk on Magisk) the read. Best-effort per manager, as above; without it the
+# decision degrades to "inject", which is what this module did before.
+allow ksu keystore file { read open getattr }
+allow su keystore file { read open getattr }
+allow magisk keystore file { read open getattr }
+
 # The `inject` binary attaches to the keystore process with PTRACE_ATTACH (it runs
 # in the crash_dump domain), and keystore then dlopen()s the interceptor .so that
 # lives under /data/adb (adb_data_file). Both are required for injection to work on

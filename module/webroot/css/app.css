@@ -92,8 +92,11 @@
   padding: 14px 16px; min-height: 60px; font: inherit; color: var(--fg); cursor: pointer;
 }
 .list-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.list-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.list-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .list-title { font-weight: 700; font-size: 15px; }
+/* One muted line of facts under a profile's name: its keybox, its app count. */
+.list-sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .list-chevron { flex: none; width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); }
 
 /* --- chips -------------------------------------------------------------- */
@@ -118,11 +121,23 @@
 .pill.warn { background: var(--warn); color: var(--accent-fg); }
 
 /* --- forms -------------------------------------------------------------- */
-.group { border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
-.group legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+/* A form section: the same card as a collapsed .disclosure, so an open group and a folded one
+   read as one kind of thing down the editor. */
+.group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.group-head { margin: 0; font-size: 15px; font-weight: 600; color: var(--fg); }
+.group-note { margin: -4px 0 0; }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
+/* Label on the left, the source of this field's default on the right: one row instead of a line
+   of prose under every field. */
+.field-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 18px; }
 .field-label { font-size: 13px; font-weight: 600; }
+.field-tag { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--muted); background: var(--chip); border-radius: 999px; padding: 2px 8px; }
+.field-tag.keybox { color: var(--accent); background: var(--accent-weak); }
+/* The profile's own value: not a default at all, so it carries the foreground colour the two
+   defaults' tags are muted away from. */
+.field-tag.custom { color: var(--fg); }
+.field-tag.warn { color: var(--warn); }
 .field-help { color: var(--muted); font-size: 12px; margin: 0; }
 
 .input {
@@ -132,11 +147,19 @@
 }
 .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .input.invalid { border-color: var(--danger); }
-select.input { appearance: none; }
+/* The default an empty field takes, shown where it will apply. */
+.input::placeholder { color: var(--muted); opacity: 1; }
+.input.ph-keybox::placeholder { color: var(--accent); }
 input[type="file"].input { padding: 8px 10px; }
 
-.patch { display: flex; flex-direction: column; gap: 6px; }
-.quickpicks { display: flex; flex-wrap: wrap; gap: 6px; }
+/* appearance:none strips the native arrow off a <select>, which then reads as a text box; the
+   wrapper paints one back. */
+select.input { appearance: none; padding-right: 36px; }
+.select-wrap { position: relative; display: block; }
+.select-caret { position: absolute; right: 15px; top: 50%; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+
+/* A patch level: one picker, and a box under it only when the value is a date no option covers. */
+.patch { display: flex; flex-direction: column; gap: 8px; }
 
 /* Extra separation above the "add package" row so it reads as an action distinct
  * from the app badges above it. */
@@ -256,7 +279,7 @@ button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
  * (the editor drill-body, the System update card) `overflow:hidden` would drop its
  * automatic min-size to 0, so an overflowing column collapses it to its borders and
  * clips the header away. Pin it to its content height and let the column scroll. */
-.disclosure { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
+.disclosure { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
 .disclosure-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
   min-height: 48px; padding: 12px 14px; border: 0; background: var(--card);
@@ -268,10 +291,14 @@ button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
 .disclosure-chevron { flex: none; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform .15s; }
 .disclosure-head.open .disclosure-chevron { transform: rotate(-135deg); }
 .disclosure-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 14px; }
+.disclosure-body > .group-note { margin: 0 0 2px; }
 
 /* --- segmented control -------------------------------------------------- */
 .segmented { display: inline-flex; background: var(--chip); border-radius: var(--radius-sm); padding: 3px; gap: 3px; align-self: flex-start; }
 .seg { min-height: 44px; padding: 6px 18px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; }
+/* A segmented control used as a form field: full width, the choices sharing it evenly. */
+.segmented-block { display: flex; align-self: stretch; }
+.segmented-block .seg { flex: 1; padding: 6px 10px; }
 .seg.on { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 .seg:disabled { opacity: .6; cursor: default; }
 .seg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -362,6 +389,16 @@ html, body { overscroll-behavior-y: contain; }
 }
 .drill-title { margin: 0; font-size: 18px; font-weight: 700; }
 .drill-title:focus-visible { outline: none; }
+/* The profile's name IS the drill-in's title, and editing it is tapping it. Transparent until
+   focused, when it takes a box so it is plainly a field. */
+.drill-title-input {
+  flex: 0 1 auto; width: auto; max-width: 100%; min-width: 0; min-height: 40px; padding: 6px 10px;
+  font: inherit; font-size: 18px; font-weight: 700; color: var(--fg);
+  background: transparent; border: 1px solid transparent; border-bottom-color: var(--line);
+  border-radius: 10px 10px 0 0;
+}
+.drill-title-input:focus { outline: none; background: var(--card); border-color: var(--accent); border-radius: 10px; }
+.drill-title-input.invalid { border-color: var(--danger); }
 .drill-body {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 16px;
@@ -449,27 +486,85 @@ html, body { overscroll-behavior-y: contain; }
 .ov-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 .btn.small { padding: 5px 10px; font-size: 12px; flex: none; }
 
-/* --- keybox inspector --------------------------------------------------- */
-.kbi-key { gap: 12px; }
-.kbi-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.kbi-cert { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-.kbi-key .kbi-cert:first-of-type { border-top: 0; padding-top: 0; }
+/* --- keybox inspector ---------------------------------------------------
+ * The page is a chain drawn as a chain: a rail down the left, one numbered node per certificate
+ * from leaf to root, and between two nodes the signature that joins them. A node carries what
+ * names a certificate and whether it is usable now; the rest folds open under it. */
+.kbi-file { display: flex; flex-direction: column; gap: 4px; }
+.kbi-file-name { font-size: 15px; font-weight: 600; word-break: break-all; }
+.kbi-file-sub { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
+.warn-text { color: var(--warn); }
 
-/* Chain verdict banner — the headline "is this keybox genuine / revoked" status. */
-.kbi-verdict { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--chip); border: 1px solid var(--line); border-left: 4px solid var(--muted); }
-.kbi-verdict--good { border-left-color: var(--ok); }
-.kbi-verdict--warn { border-left-color: var(--warn); }
-.kbi-verdict--bad { border-left-color: var(--danger); }
-.kbi-verdict-icon { flex: none; width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: var(--muted); }
-.kbi-verdict--good .kbi-verdict-icon { background: var(--ok); }
-.kbi-verdict--warn .kbi-verdict-icon { background: var(--warn); }
-.kbi-verdict--bad .kbi-verdict-icon { background: var(--danger); }
-.kbi-verdict-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.kbi-verdict-title { font-weight: 700; font-size: 14px; }
-.kbi-verdict--good .kbi-verdict-title { color: var(--ok); }
-.kbi-verdict--warn .kbi-verdict-title { color: var(--warn); }
-.kbi-verdict--bad .kbi-verdict-title { color: var(--danger); }
-.kbi-verdict-sub { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.kbi-key { display: flex; flex-direction: column; gap: 12px; }
+/* The headline card, tinted down its left edge by the verdict it carries. */
+.kbi-head { gap: 12px; border-left: 4px solid var(--muted); }
+.kbi-head--good { border-left-color: var(--ok); }
+.kbi-head--warn { border-left-color: var(--warn); }
+.kbi-head--bad { border-left-color: var(--danger); }
+.kbi-verdict { display: flex; gap: 12px; align-items: flex-start; }
+.kbi-verdict-icon { flex: none; width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; line-height: 1; color: #fff; background: var(--muted); }
+.kbi-head--good .kbi-verdict-icon { background: var(--ok); }
+.kbi-head--warn .kbi-verdict-icon { background: var(--warn); }
+.kbi-head--bad .kbi-verdict-icon { background: var(--danger); }
+.kbi-verdict-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.kbi-verdict-title { font-weight: 700; font-size: 15px; }
+.kbi-head--good .kbi-verdict-title { color: var(--ok); }
+.kbi-head--warn .kbi-verdict-title { color: var(--warn); }
+.kbi-head--bad .kbi-verdict-title { color: var(--danger); }
+.kbi-verdict-sub { color: var(--muted); font-size: 12px; line-height: 1.45; }
+/* The private key belongs to the <Key> element, not to any certificate, so it sits in the head
+ * card under a rule of its own. */
+.kbi-pk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.kbi-pk-label { font-size: 12px; color: var(--muted); }
+
+/* The chain. The rail is drawn behind the nodes; the last node's segment stops at its own dot so
+ * the chain visibly ends at the root. */
+.kbi-chain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.kbi-node { position: relative; padding-left: 30px; padding-bottom: 6px; }
+.kbi-node::before { content: ""; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--line); }
+.kbi-node:first-child::before { top: 18px; }
+.kbi-node:last-child::before { bottom: auto; height: 18px; }
+.kbi-node-dot {
+  position: absolute; left: 1px; top: 8px; z-index: 1;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-weak); color: var(--accent); border: 2px solid var(--bg);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
+.kbi-node-dot--bad { background: var(--danger); color: var(--danger-fg); }
+.kbi-cert-card { gap: 8px; padding: 14px; }
+.kbi-node--bad .kbi-cert-card { border-color: var(--danger); }
+.kbi-cert-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.kbi-role { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.kbi-cert-name { font-size: 14px; font-weight: 600; word-break: break-all; }
+.kbi-cert-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12px; color: var(--muted); }
+.kbi-dot-sep { color: var(--line); }
+/* The edge between two nodes: it sits on the rail, between the cards it joins. */
+.kbi-link { display: flex; align-items: center; gap: 6px; padding: 7px 0 9px; font-size: 12px; color: var(--muted); }
+.kbi-link-mark { flex: none; width: 15px; text-align: center; font-weight: 700; }
+.kbi-link--ok .kbi-link-mark { color: var(--ok); }
+.kbi-link--bad { color: var(--danger); font-weight: 600; }
+.kbi-node:last-child .kbi-link { padding-bottom: 0; }
+
+/* The per-certificate fold. Flat and quiet when closed -- it is a way in, not a control. */
+.kbi-fold { display: flex; flex-direction: column; gap: 10px; }
+.kbi-fold-head {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 8px;
+  border: 0; background: transparent; padding: 0 2px; margin: -2px 0; min-height: 44px;
+  font: inherit; font-size: 12px; font-weight: 600; color: var(--accent); cursor: pointer;
+}
+.kbi-fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.kbi-fold-chevron { flex: none; width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.kbi-fold-head.open .kbi-fold-chevron { transform: rotate(45deg); }
+.kbi-detail { display: flex; flex-direction: column; gap: 10px; padding-top: 2px; border-top: 1px solid var(--line); }
+.kbi-detail .kv-hex { white-space: pre-wrap; }
+
+/* A map decoded out of a certificate extension: its rows sit indented behind a rule, so a nested
+ * map reads as part of the one above it, and the block is visibly over where the rule stops. */
+.kbi-map { display: flex; flex-direction: column; gap: 8px; padding-left: 10px; border-left: 2px solid var(--line); }
+.kbi-map-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Section label inside a key block, so it is not mistaken for a certificate. */
+.kbi-subhead { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 
 /* A revoked cert deserves a stronger signal than the amber warn chips. */
 .chip.danger { color: var(--danger); font-weight: 700; }
@@ -482,7 +577,13 @@ html, body { overscroll-behavior-y: contain; }
 .linklike { border: 0; background: transparent; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
 .linklike:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .editor-note { margin: 0; }
+/* A resolved default can be a 64-character hash, which has no break opportunity of its own and
+ * would otherwise run off the panel. */
+.resolve-hint { overflow-wrap: anywhere; }
 .resolve-hint.missing { color: var(--warn); }
+/* A default the keybox states, not one this device reported: the editor's one cue that a field
+ * left empty will attest something other than what the System screen shows. */
+.resolve-hint.from-keybox { color: var(--accent); }
 
 /* --- toggle switch (schema 'toggle' widget + Scope auto-include) --------- */
 /* A checkbox styled as an iOS-style switch: the real <input> lies invisible over the

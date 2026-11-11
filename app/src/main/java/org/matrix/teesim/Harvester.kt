@@ -143,18 +143,61 @@ object Harvester {
         )
 
     /**
-     * The ro.boot.vbmeta.* values to reflect for [h]: the PRESENTED boot key and hash — the
-     * override when one is active, else the real captured bytes. Unlike a plain read of the
-     * override map, this includes a genuinely captured value, so ro.boot.vbmeta.digest tracks the
-     * attested verifiedBootHash even on a device whose bootloader never populated the property
-     * (#228). A field whose presented value is not a real 32-byte value is skipped — we never write
-     * an all-zero prop.
+     * The system properties each device-identity field is read from, most specific first: the three
+     * [devicePropId] reads — which is the order the framework's own attestation-id lookup uses —
+     * then the per-partition names a build carries, then the legacy alias where there is one. A
+     * profile that applies its properties writes every name here that this device actually has, so
+     * whichever one a reader consults agrees with what is attested; it never creates a property the
+     * device lacks, so the build keeps its own shape.
+     *
+     * The ids with no property to write (imei, imei2, meid) are absent: they are read from
+     * telephony, not from a property, and are attested only.
      */
-    fun bootPropValues(h: Record): Map<String, String> = buildMap {
+    val IDENTITY_PROPS: Map<String, List<String>> =
+        mapOf(
+            "brand" to productProps("brand"),
+            "device" to productProps("device") + "ro.build.product",
+            "product" to productProps("name"),
+            "manufacturer" to productProps("manufacturer"),
+            "model" to productProps("model"),
+            "serial" to listOf("ro.serialno", "ro.boot.serialno"),
+        )
+
+    /**
+     * Every name `ro.product.<base>` is spelled under, across partitions and the attestation one.
+     */
+    private fun productProps(base: String): List<String> =
+        listOf(
+            "ro.product.${base}_for_attestation",
+            "ro.product.vendor.$base",
+            "ro.product.$base",
+            "ro.product.system.$base",
+            "ro.product.odm.$base",
+            "ro.product.product.$base",
+            "ro.product.system_ext.$base",
+            "ro.product.bootimage.$base",
+        )
+
+    /**
+     * The ro.boot.vbmeta.* values to reflect: the PRESENTED boot key and hash — the override when
+     * one is active, else the real captured bytes. Unlike a plain read of the override map, this
+     * includes a genuinely captured value, so ro.boot.vbmeta.digest tracks the attested
+     * verifiedBootHash even on a device whose bootloader never populated the property (#228). A
+     * field whose presented value is not a real 32-byte value is skipped — we never write an
+     * all-zero prop.
+     *
+     * [bootHash] is the hash actually being attested, which a profile may spoof away from this
+     * record's own ([ProfileDefaults.bootHash]); there is one property for a device that may be
+     * attesting several hashes, so the caller decides which profile it follows.
+     */
+    fun bootPropValues(
+        h: Record,
+        bootHash: ByteArray = h.effectiveBootHash(),
+    ): Map<String, String> = buildMap {
         h.effectiveBootKey()
             .takeIf { isUsableBootValue(it) }
             ?.let { put(BOOT_PROP.getValue("verifiedBootKey"), it.toHex()) }
-        h.effectiveBootHash()
+        bootHash
             .takeIf { isUsableBootValue(it) }
             ?.let { put(BOOT_PROP.getValue("verifiedBootHash"), it.toHex()) }
     }

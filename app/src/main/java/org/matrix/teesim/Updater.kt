@@ -159,6 +159,13 @@ object Updater {
         c.inputStream.use { input -> dest.outputStream().use { input.copyTo(it) } }
     }
 
+    /**
+     * The marker module/stage.sh writes when a hot install starts. Deleted before the flash, so its
+     * presence afterwards means THIS install took that path and the module is being applied in
+     * place — no reboot to ask for.
+     */
+    private val hotMarker = File(Const.DATA_DIR, "hotinstall.pending")
+
     /** Try each known root manager's module-install CLI until one succeeds. */
     private fun flash(zip: File): JSONObject {
         val managers =
@@ -169,15 +176,29 @@ object Updater {
                 listOf("/data/adb/apd", "module", "install", zip.absolutePath),
             )
         var last = ""
+        hotMarker.delete()
         for (cmd in managers) {
             try {
-                val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
+                val pb = ProcessBuilder(cmd).redirectErrorStream(true)
+                // Inherited all the way down to customize.sh and hotinstall.sh, which is how the
+                // hot install knows the daemon it is replacing is the one that asked for it: it
+                // defers the swap instead of killing us mid-reply (module/stage.sh).
+                pb.environment()["TEESIM_SELF_UPDATE"] = "1"
+                val p = pb.start()
                 val out = p.inputStream.bufferedReader().readText()
                 if (p.waitFor(120, TimeUnit.SECONDS) && p.exitValue() == 0) {
-                    SystemLogger.info("Updater: flashed via ${cmd[0]}")
+                    val hot = hotMarker.isFile
+                    SystemLogger.info(
+                        "Updater: flashed via ${cmd[0]}" +
+                            if (hot) "; the module is being applied without a reboot" else ""
+                    )
                     return JSONObject()
                         .put("ok", true)
-                        .put("message", "Installed — reboot to apply.")
+                        .put(
+                            "message",
+                            if (hot) "Installed — applying now, no reboot needed."
+                            else "Installed — reboot to apply.",
+                        )
                 }
                 last = "${cmd[0]}: ${out.trim()}"
             } catch (e: Exception) {

@@ -79,6 +79,79 @@ object DeviceProps {
         }
     }
 
+    /**
+     * The system properties a version/patch level is read from, canonical name first, then the
+     * per-partition ones a build may carry. The boot patch level has no name of its own on most
+     * builds — the bootloader hands it to KeyMint directly — so both candidates below are written
+     * only where a device happens to have one.
+     *
+     * These are for WRITING what a profile presents ([App.applySystemProps]); the daemon reads a
+     * level through [systemSecurityPatch]/[vendorSecurityPatch]/[propOsVersion] above, which is the
+     * framework's own source for each.
+     */
+    val OS_PATCH_PROPS =
+        listOf(
+            "ro.build.version.security_patch",
+            "ro.system.build.version.security_patch",
+            "ro.product.build.version.security_patch",
+            "ro.system_ext.build.version.security_patch",
+            "ro.odm.build.version.security_patch",
+        )
+
+    val VENDOR_PATCH_PROPS =
+        listOf("ro.vendor.build.security_patch", "ro.vendor.build.version.security_patch")
+
+    val BOOT_PATCH_PROPS =
+        listOf("ro.boot.security_patch", "ro.bootimage.build.version.security_patch")
+
+    val OS_VERSION_PROPS =
+        listOf(
+            "ro.build.version.release",
+            "ro.build.version.release_or_codename",
+            "ro.system.build.version.release",
+            "ro.product.build.version.release",
+            "ro.vendor.build.version.release",
+            "ro.odm.build.version.release",
+            "ro.system_ext.build.version.release",
+        )
+
+    /**
+     * The text a security-patch property carries for the packed [level] a profile attests, e.g.
+     * 20251105 -> "2025-11-05". A system patch level is only YYYYMM — it states no day — so the day
+     * [live] already carries is kept, and 01 stands in when it carries none. Null for a level that
+     * is not a real date, 0 ("report nothing") included: there is no property text for a value that
+     * is not being attested.
+     */
+    fun patchText(level: Int, live: String): String? {
+        val s = level.toString()
+        return when {
+            level <= 0 -> null
+            s.length == 8 -> "${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6)}"
+            s.length == 6 -> {
+                val day = live.replace("-", "").takeIf { it.length == 8 }?.substring(6) ?: "01"
+                "${s.substring(0, 4)}-${s.substring(4, 6)}-$day"
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * The text `ro.build.version.release` carries for the packed [osVersion]: 160000 -> "16",
+     * 160100 -> "16.1", 160102 -> "16.1.2". Trailing zero components are dropped, the way a release
+     * is written. Null when there is no version to write.
+     */
+    fun osVersionText(osVersion: Int): String? {
+        if (osVersion <= 0) return null
+        val major = osVersion / 10000
+        val minor = (osVersion / 100) % 100
+        val sub = osVersion % 100
+        return when {
+            sub != 0 -> "$major.$minor.$sub"
+            minor != 0 -> "$major.$minor"
+            else -> "$major"
+        }
+    }
+
     /** The system security patch string, e.g. "2025-11-01". */
     fun systemSecurityPatch(): String = Build.VERSION.SECURITY_PATCH ?: ""
 

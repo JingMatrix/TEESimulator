@@ -130,7 +130,7 @@ export function create(mount, opts = {}) {
           installError = res.message || "The daemon rejected the install.";
           toast("Install failed");
         } else {
-          toast((res && res.message) || "Update flashed — reboot to apply.");
+          toast((res && res.message) || "Update flashed.");
         }
       } catch (e) {
         installError = e && e.message ? e.message : String(e);

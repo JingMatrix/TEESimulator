@@ -72,6 +72,13 @@ export function create(mount) {
   // so this is fetched only when one may have happened — never on the Scope page's 9s poll.
   let resolvedCache = null;
   let resolvedFetchGen = 0;  // same stale-reply guard as scopeFetchGen, on its own channel
+  // What the keybox the open editor points at states about the device it was provisioned for, as the
+  // per-field defaults the daemon resolved: { name, defaults:{ field:{ value, source } } }. Keyed by
+  // KEYBOX file, not profile, because the editor edits a draft — the keybox may have just been
+  // switched in the form and nothing is saved or pushed yet. Null until it answers; the hints then
+  // fall back to the harvest alone, which is what they said before a keybox had anything to say.
+  let keyboxDefaults = null;
+  let keyboxDefaultsGen = 0;
   let scopePullBound = false; // pull-to-refresh listeners attached to scopeHost yet?
 
   function revalidate() {
@@ -114,6 +121,32 @@ export function create(mount) {
         if (gen !== resolvedFetchGen) return;
         resolvedCache = null;
         console.warn("[config] /scope unavailable:", (e && e.message) || String(e));
+      });
+  }
+
+  // Fetch the resolution defaults for one keybox. Failure degrades to the harvest-only hints rather
+  // than breaking the editor: an older daemon 404s this route, and a keybox that states nothing
+  // answers with the harvest values anyway.
+  function fetchKeyboxDefaults(name) {
+    if (!name) { keyboxDefaults = null; return Promise.resolve(); }
+    if (keyboxDefaults && keyboxDefaults.name === name) return Promise.resolve();
+    const gen = ++keyboxDefaultsGen;
+    return keyAdmin("keyboxDefaults", { name })
+      .then((res) => {
+        if (gen !== keyboxDefaultsGen) return; // a newer keybox was picked meanwhile
+        keyboxDefaults = (res && res.defaults) ? { name, defaults: res.defaults } : null;
+        const fromKeybox = keyboxDefaults
+          ? Object.keys(keyboxDefaults.defaults).filter((k) => keyboxDefaults.defaults[k].source === "keybox")
+          : [];
+        console.log("[config] /keybox/defaults %s: %d field(s), %d from the keybox (%s)",
+          name, keyboxDefaults ? Object.keys(keyboxDefaults.defaults).length : 0,
+          fromKeybox.length, fromKeybox.join(", ") || "none");
+        renderEditor();
+      })
+      .catch((e) => {
+        if (gen !== keyboxDefaultsGen) return;
+        keyboxDefaults = null;
+        console.warn("[config] /keybox/defaults unavailable:", (e && e.message) || String(e));
       });
   }
 
@@ -191,28 +224,63 @@ export function create(mount) {
       const o = ov[key];
       return (o && o.value != null && o.value !== "") ? o.value : h[key];
     };
-    return {
+    // Every entry is { value, source } — the view says which of the two sources a default comes
+    // from, and these are the ones this device reports.
+    const mine = (value) => ({ value, source: "harvest" });
+    const out = {
       // The patch/OS levels and brand/device/product/manufacturer/model are genuine captures with no
       // override layer; Resolver.kt reads them raw too (a fabricated-fallback level is written to the
       // raw record as well), so the raw value already equals the effective one.
-      patchSystem: h.osPatchLevel, patchVendor: h.vendorPatchLevel, patchBoot: h.bootPatchLevel, osVersion: h.osVersion,
-      brand: h.brand, device: h.device, product: h.product, manufacturer: h.manufacturer, model: h.model,
-      serial: eff("serial"), imei: eff("imei"), meid: eff("meid"), imei2: eff("imei2"),
+      patchSystem: mine(h.osPatchLevel), patchVendor: mine(h.vendorPatchLevel),
+      patchBoot: mine(h.bootPatchLevel), osVersion: mine(h.osVersion),
+      brand: mine(h.brand), device: mine(h.device), product: mine(h.product),
+      manufacturer: mine(h.manufacturer), model: mine(h.model),
+      serial: mine(eff("serial")), imei: mine(eff("imei")),
+      meid: mine(eff("meid")), imei2: mine(eff("imei2")),
     };
+    // The daemon resolved the same fields against the profile's keybox, which has the first word on
+    // the ones its provisioningInfo records (and repeats this device's value for the rest). It also
+    // answers for verifiedBootHash, which has no entry above: the harvest's own hash is only a
+    // default once something can attest another.
+    const kd = (keyboxDefaults && keyboxDefaults.defaults) || null;
+    if (kd) for (const field of Object.keys(kd)) out[field] = kd[field];
+    return out;
   }
 
   function renderList() {
     renderProfileList(mount, { config, errors, dirty, autoCounts: autoCounts() }, listActions);
   }
 
-  // Which OTHER profile (if any) already owns auto-include, relative to `name`. Only one profile
-  // may, so the editor greys this profile's toggle when another claims it.
-  function autoTakenBy(name) {
-    for (const other of Object.keys(config.profiles)) {
-      if (other === name) continue;
-      if (config.profiles[other] && config.profiles[other].autoIncludeNewApps === true) return other;
+  // Which OTHER profile (if any) already owns each whole-device claim, relative to `name`. Only
+  // one profile may hold one, so the editor greys this profile's switch when another claims it.
+  function takenBy(name) {
+    const out = {};
+    for (const f of FIELDS) {
+      if (!f.exclusive) continue;
+      for (const other of Object.keys(config.profiles)) {
+        if (other === name) continue;
+        if (getPath(config.profiles[other] || {}, f.path) === true) { out[f.key] = other; break; }
+      }
     }
-    return null;
+    return out;
+  }
+
+  // A profile written before `applyProperties` existed carries no flag. Settle it on load, by the
+  // rule ConfigStore reads the file with, so the switch shows what the daemon is actually doing
+  // and saving keeps it: with the key stated nowhere the profile named `default` (or the only one
+  // there is) claims the properties, and once any profile states it, an absent key means no.
+  function normalize(cfg) {
+    const names = Object.keys((cfg && cfg.profiles) || {});
+    const stated = names.some(
+      (n) => cfg.profiles[n] && typeof cfg.profiles[n].applyProperties === "boolean");
+    for (const name of names) {
+      const p = cfg.profiles[name];
+      if (!p || typeof p !== "object") continue;
+      if (typeof p.applyProperties !== "boolean") {
+        p.applyProperties = !stated && (name === "default" || names.length === 1);
+      }
+    }
+    return cfg;
   }
 
   function renderEditor() {
@@ -220,7 +288,7 @@ export function create(mount) {
     renderProfileEditor(
       editorHost,
       { config, name: editing, errors, keyboxFiles, openGroups, resolved: resolvedLevels(),
-        scopeMeta: scopeMeta(), autoTakenBy: autoTakenBy(editing), autoCount: autoCountFor(editing) },
+        scopeMeta: scopeMeta(), takenBy: takenBy(editing), autoCount: autoCountFor(editing) },
       editorActions);
   }
 
@@ -239,6 +307,9 @@ export function create(mount) {
     editorHost = el("div", { class: "editor-host" });
     editorOverlay = openOverlay(editorHost, { variant: "panel", label: "Edit profile", onClose: onEditorClosed });
     renderEditor();
+    // Not awaited: the editor paints with the harvest-only hints and re-renders when the keybox's
+    // own defaults arrive, rather than holding the panel closed on a file parse.
+    fetchKeyboxDefaults(getPath(config.profiles[name], ["keybox"]));
     const title = editorHost.querySelector(".drill-title");
     if (title) title.focus();
   }
@@ -659,7 +730,11 @@ export function create(mount) {
       if (!trimmed) return;
       if (!PROFILE_RE.test(trimmed)) { toast("Name must be 1-32 chars: letters, digits, - or _."); return; }
       if (config.profiles[trimmed]) { toast("A profile named " + trimmed + " already exists."); return; }
-      config.profiles[trimmed] = emptyProfile();
+      const fresh = emptyProfile();
+      // The first profile on a fresh install drives the system properties; a later one does not
+      // take that away from whichever profile already holds it.
+      fresh.applyProperties = Object.keys(config.profiles).length === 0;
+      config.profiles[trimmed] = fresh;
       dirty = true;
       revalidate();
       openEditor(trimmed);
@@ -676,6 +751,9 @@ export function create(mount) {
       dirty = true;
       revalidate();
       renderEditor();
+      // A different keybox states different things about the device it was provisioned for, so the
+      // defaults under every empty field change with it.
+      if (path.length === 1 && path[0] === "keybox") fetchKeyboxDefaults(value);
     },
 
     onAddApp(profile, pkg) {
@@ -802,7 +880,7 @@ export function create(mount) {
     if (!dirty) {
       const res = await ioLoad();
       if (res.ok) {
-        config = res.config;
+        config = normalize(res.config);
         loaded = true;
         revalidate();
       } else if (!config) {
@@ -838,7 +916,7 @@ export function create(mount) {
       const res = await ioLoad();
       if (!res.ok) { renderLoadError(res); return; }
 
-      config = res.config;
+      config = normalize(res.config);
       keyboxFiles = await listKeyboxes();
       await loadHarvest();
       // The auto counts on the list rows come from the daemon's last resolve. Fetched once here

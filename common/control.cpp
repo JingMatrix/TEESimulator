@@ -153,6 +153,7 @@ struct ProfileStorage {
   std::vector<int32_t> uids;
   std::vector<std::string> uid_pkg_strings;
   std::vector<const char *> uid_pkg_ptrs;
+  std::vector<uint8_t> vb_hash;  // empty unless this profile attests its own
   std::string brand, device, product, serial, imei, imei2, meid, manufacturer, model;
   TsDeviceIds ids{};
   bool has_ids = false;
@@ -277,6 +278,16 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       s.uid_pkg_ptrs.reserve(s.uid_pkg_strings.size());
       for (const auto &p : s.uid_pkg_strings) s.uid_pkg_ptrs.push_back(p.c_str());
       if (const tjson::Value *ids = pj.get("deviceIds")) s.has_ids = FillDeviceIds(*ids, s);
+      // Present only when this profile attests a root of trust of its own; absent means it shares
+      // the device-wide one. An undecodable value is dropped rather than passed on short: the TA
+      // would splice it into every chain it signs.
+      if (const tjson::Value *vbh = pj.get("verifiedBootHash")) {
+        if (!Base64Decode(vbh->as_string(), s.vb_hash)) {
+          LOGE("ApplyConfig: profile %s has an undecodable verifiedBootHash; using the device's",
+               s.id.c_str());
+          s.vb_hash.clear();
+        }
+      }
 
       TsProfile tp{};
       tp.id = s.id.c_str();
@@ -297,6 +308,8 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       tp.uids = s.uids.data();
       tp.n_uids = static_cast<int>(s.uids.size());
       tp.uid_packages = s.uid_pkg_ptrs.data();
+      tp.verified_boot_hash = s.vb_hash.empty() ? nullptr : s.vb_hash.data();
+      tp.verified_boot_hash_len = s.vb_hash.size();
 
       if (teesim_cfg_add_profile(&tp)) ++applied;
     }

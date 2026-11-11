@@ -38,6 +38,56 @@ object KeyboxInspector {
         return name
     }
 
+    /**
+     * What the keybox named [rawName] states about the device it was provisioned for, or null when
+     * it states nothing — a factory keybox carries no provisioningInfo, and a refused issuance
+     * carries a verdict without the hash. Read from disk on each call, which is once per config
+     * push; the file is small and the parse is not on any hot path.
+     */
+    fun provisioning(rawName: String): KeyboxDetail.Provisioning? {
+        val name = safeName(rawName) ?: return null
+        val file = File(Const.DATA_DIR, name)
+        if (!file.isFile) return null
+        return try {
+            val root = newSafeBuilder().parse(file).documentElement
+            val scope = firstChild(root, "Keybox") ?: root
+            val nodes = scope.getElementsByTagName("Certificate")
+            val certs = ArrayList<X509Certificate>(nodes.length)
+            for (i in 0 until nodes.length) parsePem(nodes.item(i).textContent)?.let {
+                certs.add(it)
+            }
+            KeyboxDetail.provisioningOf(certs)
+        } catch (e: Exception) {
+            SystemLogger.warning("KeyboxInspector: could not read provisioning info from $name", e)
+            null
+        }
+    }
+
+    /**
+     * What the keybox named [rawName] states, as the WebUI's profile editor needs it: the default
+     * every field a profile leaves empty takes, and whether the keybox or this device is the one
+     * saying it. The editor asks per keybox rather than per profile because it asks about a DRAFT —
+     * the keybox a profile has just been pointed at, before any of it is saved or pushed.
+     */
+    fun states(rawName: String, harvest: Harvester.Record?): JSONObject {
+        val name = safeName(rawName) ?: return fail("invalid keybox name")
+        if (harvest == null) return fail("no harvest yet")
+        val stated = provisioning(name)
+        val out = JSONObject().put("ok", true).put("name", name)
+        stated?.fingerprint?.let { out.put("fingerprint", it) }
+        val fields = JSONObject()
+        for ((field, d) in ProfileDefaults.from(stated, harvest)) {
+            fields.put(
+                field,
+                JSONObject()
+                    .put("value", d.value)
+                    .put("source", if (d.fromKeybox) "keybox" else "harvest"),
+            )
+        }
+        out.put("defaults", fields)
+        return out
+    }
+
     fun inspect(rawName: String, forceRefresh: Boolean = false): JSONObject {
         val name = safeName(rawName) ?: return fail("invalid keybox name")
         val file = File(Const.DATA_DIR, name)
@@ -140,13 +190,29 @@ object KeyboxInspector {
         p.getName(javax.security.auth.x500.X500Principal.CANONICAL)
 
     private fun inspectKey(ke: Element): JSONObject {
-        val out = JSONObject().put("algorithm", ke.getAttribute("algorithm").ifBlank { "?" })
+        val algoAttr = ke.getAttribute("algorithm")
+        val out = JSONObject().put("algorithm", algoAttr.ifBlank { "?" })
+        // The TA looks this attribute up with an exact, case-sensitive match
+        // (`attribute("algorithm")
+        // == Some("rsa"|"ecdsa")` in rust/teesim-km/src/attest.rs), so "ECDSA", " ecdsa" or "EC"
+        // parses here and is then silently invisible to the thing that signs with it. Flag it:
+        // a keybox whose only key is spelled wrong loads as "no key at all".
+        if (algoAttr != "rsa" && algoAttr != "ecdsa") out.put("algorithmRecognized", false)
 
         val priv = firstChild(ke, "PrivateKey")
-        out.put("privateKeyPresent", priv != null && priv.textContent.contains("PRIVATE KEY"))
+        val privPem = priv?.textContent?.trim()?.takeIf { it.contains("-----BEGIN") }
+        out.put("privateKeyPresent", privPem != null)
 
         val certParent = firstChild(ke, "CertificateChain") ?: ke
         val certNodes = certParent.getElementsByTagName("Certificate")
+        // What the file SAYS it holds. <NumberOfCertificates> is a CHILD ELEMENT of the chain, not
+        // an attribute, and it is worth reporting when it disagrees with what is actually in there:
+        // a keybox trimmed by hand keeps the original count and a reader should see the seam.
+        val declared = firstChild(certParent, "NumberOfCertificates")?.textContent?.trim()
+        if (!declared.isNullOrEmpty()) {
+            out.put("declaredCerts", declared.toIntOrNull() ?: -1)
+            if (declared.toIntOrNull() != certNodes.length) out.put("countMismatch", true)
+        }
 
         // Parse every slot; a null keeps its position so the signature pairing (cert[i] signed by
         // cert[i+1], the top cert self-signed) stays aligned even when one cert fails to decode.
@@ -210,6 +276,10 @@ object KeyboxInspector {
         val topIndex = parsed.indexOfLast { it != null }
         if (topIndex >= 0) certs.optJSONObject(topIndex)?.put("rootAuthority", authority)
 
+        out.put(
+            "privateKey",
+            KeyboxDetail.privateKey(privPem, ke.getAttribute("algorithm"), parsed.firstOrNull()),
+        )
         out.put("chainLength", certNodes.length)
         out.put("certs", certs)
         out.put("linkage", linkage(valid))
@@ -224,20 +294,32 @@ object KeyboxInspector {
     private fun certJson(index: Int, cert: X509Certificate): JSONObject {
         val now = System.currentTimeMillis()
         val (keyAlgo, keySize) = keyInfo(cert)
-        return JSONObject()
-            .put("index", index)
-            .put("subject", cert.subjectX500Principal.name)
-            .put("issuer", cert.issuerX500Principal.name)
-            .put("serial", cert.serialNumber.toString(16))
-            .put("notBefore", cert.notBefore.time)
-            .put("notAfter", cert.notAfter.time)
-            .put("expired", cert.notAfter.time < now)
-            .put("notYetValid", cert.notBefore.time > now)
-            .put("sigAlg", cert.sigAlgName)
-            .put("keyAlgorithm", keyAlgo)
-            .put("keySize", keySize)
-            .put("isCa", cert.basicConstraints >= 0)
-            .put("selfSigned", cert.subjectX500Principal == cert.issuerX500Principal)
+        val out =
+            JSONObject()
+                .put("index", index)
+                // KeyboxDetail.dn, not X500Principal.name: the latter prints every attribute type
+                // it does not know as hex DER, and Google's DNs are mostly those types.
+                .put("subject", KeyboxDetail.dn(cert.subjectX500Principal))
+                .put("issuer", KeyboxDetail.dn(cert.issuerX500Principal))
+                // The common names as well as the full DNs: a chain is read by who signed whom, and
+                // that is the part of a name a reader recognises. The DN stays, in the detail.
+                .putOpt("subjectCn", KeyboxDetail.commonName(cert.subjectX500Principal))
+                .putOpt("issuerCn", KeyboxDetail.commonName(cert.issuerX500Principal))
+                .put("serial", cert.serialNumber.toString(16))
+                .put("notBefore", cert.notBefore.time)
+                .put("notAfter", cert.notAfter.time)
+                .put("expired", cert.notAfter.time < now)
+                .put("notYetValid", cert.notBefore.time > now)
+                .put("sigAlg", cert.sigAlgName)
+                .put("keyAlgorithm", keyAlgo)
+                .put("keySize", keySize)
+                .put("isCa", cert.basicConstraints >= 0)
+                .put("selfSigned", cert.subjectX500Principal == cert.issuerX500Principal)
+        // Extensions and fingerprints live in KeyboxDetail; fold them into the same row so the
+        // WebUI reads one object per certificate.
+        val more = KeyboxDetail.details(cert)
+        for (k in more.keys()) out.put(k, more.get(k))
+        return out
     }
 
     private fun keyInfo(cert: X509Certificate): Pair<String, Int> =

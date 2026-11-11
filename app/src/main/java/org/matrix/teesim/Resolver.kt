@@ -15,11 +15,12 @@ import org.json.JSONObject
  * verifiedBootKey(b64), verifiedBootHash(b64), moduleHash(b64, optional), deviceLocked,
  * verifiedBootState, strongBoxAvailable, attestVersionTee, attestVersionStrongBox profile: id,
  * keyboxB64, mode, securityLevel(int), osVersion, osPatchLevel, vendorPatchLevel, bootPatchLevel,
- * deviceIds{...}, packages[], uids[]. packages[] is every explicit package-name entry verbatim
- * (kept even when not installed, since a name-match still fires on a later install); uids[] is the
- * independent effective caller-uid set (resolved packages + raw uid:N tokens + autoIncludeNewApps
- * expansion, never -1). The router matches package name first, uid second, so the two arrays need
- * not be the same length. See [Scope].
+ * deviceIds{...}, verifiedBootHash(b64, only when it differs from bootInfo's), packages[], uids[].
+ * packages[] is every explicit package-name entry verbatim (kept even when not installed, since a
+ * name-match still fires on a later install); uids[] is the independent effective caller-uid set
+ * (resolved packages + raw uid:N tokens + autoIncludeNewApps expansion, never -1). The router
+ * matches package name first, uid second, so the two arrays need not be the same length. See
+ * [Scope].
  */
 object Resolver {
 
@@ -112,6 +113,36 @@ object Resolver {
         return msg
     }
 
+    /**
+     * The OS version and patch levels a profile presents, in the integer encoding the attestation
+     * carries them in. Null for a value that does not resolve, which is how a profile declines to
+     * report one: an empty field reuses what was harvested, `system_property` reads the build
+     * property, `no` reports 0, and anything else is the mini-language date.
+     *
+     * Shared so the push and the system properties it is reflected into ([App.applySystemProps])
+     * cannot drift apart — the property is only ever a second face of the value being attested.
+     */
+    data class Levels(
+        val osVersion: Int?,
+        val osPatchLevel: Int?,
+        val vendorPatchLevel: Int?,
+        val bootPatchLevel: Int?,
+    )
+
+    fun levels(p: ConfigStore.ProfileConfig, harvest: Harvester.Record): Levels =
+        Levels(
+            osVersion =
+                when {
+                    p.osVersion.isBlank() -> harvest.osVersion
+                    p.osVersion.equals("system_property", true) -> DeviceProps.propOsVersion()
+                    else -> DeviceProps.parseOsVersion(p.osVersion)
+                },
+            osPatchLevel = DeviceProps.resolvePatch(p.patchSystem, "system", harvest.osPatchLevel),
+            vendorPatchLevel =
+                DeviceProps.resolvePatch(p.patchVendor, "vendor", harvest.vendorPatchLevel),
+            bootPatchLevel = DeviceProps.resolvePatch(p.patchBoot, "boot", harvest.bootPatchLevel),
+        )
+
     private fun resolveProfile(
         p: ConfigStore.ProfileConfig,
         scope: Scope.ProfileScope,
@@ -140,43 +171,36 @@ object Resolver {
             ),
         )
 
-        // osVersion: system_property -> the harvested device value, omitted when absent;
-        // else the parsed literal, omitted when it can't be parsed. A missing osVersion is reported
-        // as "not set" rather than a synthesized default.
-        val osVersion =
-            when {
-                p.osVersion.isBlank() -> harvest.osVersion
-                p.osVersion.equals("system_property", true) -> DeviceProps.propOsVersion()
-                else -> DeviceProps.parseOsVersion(p.osVersion)
-            }
-        osVersion?.let { o.put("osVersion", it) }
+        // OS version and the three patch levels, resolved from the config mini-language. Each is
+        // omitted (=> not reported) when it does not resolve.
+        val levels = levels(p, harvest)
+        levels.osVersion?.let { o.put("osVersion", it) }
+        levels.osPatchLevel?.let { o.put("osPatchLevel", it) }
+        levels.vendorPatchLevel?.let { o.put("vendorPatchLevel", it) }
+        levels.bootPatchLevel?.let { o.put("bootPatchLevel", it) }
 
-        // Patch levels via the mini-language; omit (=> not reported) when unresolved.
-        DeviceProps.resolvePatch(p.patchSystem, "system", harvest.osPatchLevel)?.let {
-            o.put("osPatchLevel", it)
-        }
-        DeviceProps.resolvePatch(p.patchVendor, "vendor", harvest.vendorPatchLevel)?.let {
-            o.put("vendorPatchLevel", it)
-        }
-        DeviceProps.resolvePatch(p.patchBoot, "boot", harvest.bootPatchLevel)?.let {
-            o.put("bootPatchLevel", it)
-        }
-
-        // Device IDs: an explicit profile value overrides; otherwise fall back to the harvest
-        // baseline — the real captured id, else the value read from the OS at harvest
-        // (serial/imei/meid, and brand/device/product/manufacturer/model when the leaf carried
-        // none), exposed via effective(). Omitted when neither is set (declines that id).
+        // Device IDs and the verified boot hash: an explicit profile value wins; everything it
+        // leaves empty takes the default [ProfileDefaults] resolves — what this profile's own
+        // keybox states about the device it was provisioned for, else the harvest baseline (the
+        // real captured id, else the value read from the OS at harvest). An id with neither is
+        // omitted, which declines it.
+        val defaults = ProfileDefaults.of(p.keybox, harvest)
         val ids = JSONObject()
-        putId(ids, "brand", p.brand, harvest.effective("brand"))
-        putId(ids, "device", p.device, harvest.effective("device"))
-        putId(ids, "product", p.product, harvest.effective("product"))
-        putId(ids, "serial", p.serial, harvest.effective("serial"))
-        putId(ids, "imei", p.imei, harvest.effective("imei"))
-        putId(ids, "imei2", p.imei2, harvest.effective("imei2"))
-        putId(ids, "meid", p.meid, harvest.effective("meid"))
-        putId(ids, "manufacturer", p.manufacturer, harvest.effective("manufacturer"))
-        putId(ids, "model", p.model, harvest.effective("model"))
+        for (field in ProfileDefaults.FIELDS) {
+            if (field == "verifiedBootHash") continue
+            val v = ProfileDefaults.effective(p, field, defaults)
+            if (v.isNotBlank()) ids.put(field, v)
+        }
         if (ids.length() > 0) o.put("deviceIds", ids)
+
+        // The root of trust this profile attests, when it is not the device-wide one in bootInfo: a
+        // spoof the profile names, or the hash its keybox states. It is also an input to the TA's
+        // key-encryption key, so the profile's generation-mode blobs follow it (see
+        // ConfigStore.ProfileConfig.verifiedBootHash); patch mode keeps the real key untouched.
+        val bootHash = ProfileDefaults.bootHash(p, harvest, defaults)
+        if (!bootHash.contentEquals(harvest.effectiveBootHash())) {
+            o.put("verifiedBootHash", b64.encodeToString(bootHash))
+        }
 
         // packages[] (attestation name-match, verbatim incl. not-yet-installed) and uids[]
         // (caller-uid fallback, effective set with no -1) resolved centrally by Scope, which also
@@ -199,10 +223,5 @@ object Resolver {
         o.put("uids", uids)
         o.put("uidPackages", uidPackages)
         return o
-    }
-
-    private fun putId(o: JSONObject, key: String, override: String, harvested: String) {
-        val v = override.ifBlank { harvested }
-        if (v.isNotBlank()) o.put(key, v)
     }
 }
