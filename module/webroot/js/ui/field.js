@@ -4,9 +4,14 @@
 // renderField(descriptor, value, onChange, context) -> HTMLElement
 //   value    the current value, already read at descriptor.path by the caller
 //   onChange (path, value) => ...  for scalar widgets (text/select/patch/keybox)
-//   context  { id, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
+//   context  { id, tag, placeholder, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
 //              labelMap, installedSet, autoInclude, autoTakenBy }
 //            - id           stable element id, so a re-render can restore focus
+//            - tag          { text, kind, title } drawn beside the label: where the value comes
+//                           from when the field is left empty ("keybox" / "harvested" / "omitted")
+//            - placeholder  that default's value, greyed inside the box
+//            - defaultValue that default's value for a widget that states it itself (the patch
+//                           picker names it on its "default" option and seeds "custom…" with it)
 //            - keyboxFiles  choices for the 'keybox' widget
 //            - addApp/removeApp  the applist/scope widget's structural callbacks
 //            - openScope    the scope widget's "Configure scope" jump (opens the picker)
@@ -30,49 +35,77 @@ import { UID_RE, splitEntry } from "../domain/schema.js";
 
 export function renderField(descriptor, value, onChange, context = {}) {
   switch (descriptor.type) {
+    case "segment":
+      return segmentField(descriptor, value, onChange, context);
     case "select":
-      return labelled(descriptor, selectWidget(descriptor, value, onChange, context));
+      return labelled(descriptor, selectWidget(descriptor, value, onChange, context), context);
     case "keybox":
-      return labelled(descriptor, keyboxWidget(descriptor, value, onChange, context));
+      return labelled(descriptor, keyboxWidget(descriptor, value, onChange, context), context);
     case "patch":
-      return labelled(descriptor, patchWidget(descriptor, value, onChange, context));
+      return labelled(descriptor, patchWidget(descriptor, value, onChange, context), context);
     case "applist":
-      return labelled(descriptor, applistWidget(descriptor, value, context));
+      return labelled(descriptor, applistWidget(descriptor, value, context), context);
     case "scope":
-      return labelled(descriptor, scopeWidget(descriptor, value, context));
+      return labelled(descriptor, scopeWidget(descriptor, value, context), context);
     case "toggle":
       return toggleField(descriptor, value, onChange, context);
     case "text":
     default:
-      return labelled(descriptor, textWidget(descriptor, value, onChange, context));
+      return labelled(descriptor, textWidget(descriptor, value, onChange, context), context);
   }
 }
 
-// Shared wrapper: <div.field> with a label, the control, and optional help text.
+// Shared wrapper: <div.field> with a label row, the control, and optional help text.
 // The caller (config-view) appends any inline error after this element.
+//
+// The label row carries the field's label and, when the caller passes one, a small tag on the
+// right naming where the value comes from if the field is left empty ("keybox", "harvested",
+// "omitted"). That tag replaces a whole line of prose per field, which is what keeps a screen of
+// eleven identity fields readable.
 //
 // The <label for> must reference a real focusable control, not a wrapper <div>.
 // For the simple widgets the control IS the input/select; for the patch and applist
 // widgets it's a wrapper whose focusable input lives inside — so target that input's
 // id rather than the id-less wrapper, otherwise those fields have no programmatic
 // label.
-function labelled(descriptor, control) {
-  // Prefer a real form control; but a compound widget (the scope face) has none — its only id-bearing
-  // focusable is the "Configure scope" <button id=ctx.id>, so fall back to the first element carrying
-  // an id, restoring the label→control association rather than emitting for=null.
+function labelled(descriptor, control, ctx = {}) {
+  // Prefer a real form control; but a compound widget (the scope face) has none — its only
+  // id-bearing focusable is the "Configure scope" <button id=ctx.id>, so fall back to the first
+  // element carrying an id, restoring the label→control association rather than emitting for=null.
   const focusable = control.matches("input, select, textarea")
     ? control
     : control.querySelector("input, select, textarea") || control.querySelector("[id]");
   return el("div", { class: "field" }, [
-    el("label", { class: "field-label", for: (focusable && focusable.id) || null, text: descriptor.label }),
+    fieldHead(descriptor, (focusable && focusable.id) || null, ctx),
     control,
     descriptor.help ? el("div", { class: "field-help", text: descriptor.help }) : null,
   ]);
 }
 
+// The label row: the label, plus ctx.tag = { text, kind, title } when the caller has a source to
+// name. kind is "" (harvested), "keybox" or "warn", which is the only colour difference.
+function fieldHead(descriptor, forId, ctx) {
+  const tag = ctx.tag || null;
+  if (descriptor.labelHidden && !tag) return null;
+  return el("div", { class: "field-head" }, [
+    el("label", { class: "field-label", for: forId, text: descriptor.label }),
+    tag ? el("span", {
+      class: "field-tag" + (tag.kind ? " " + tag.kind : ""),
+      text: tag.text, title: tag.title || null,
+    }) : null,
+  ]);
+}
+
 function textWidget(d, value, onChange, ctx) {
   const input = el("input", {
-    id: ctx.id, class: "input", type: "text", value: value == null ? "" : value,
+    id: ctx.id, type: "text", value: value == null ? "" : value,
+    // A keybox-stated default is tinted in the box exactly as it is in the tag beside the label:
+    // the one cue that this field, left empty, attests something other than what this device is.
+    class: "input" + (ctx.tag && ctx.tag.kind === "keybox" ? " ph-keybox" : ""),
+    // The default this field takes when left empty, greyed inside the box: the value is shown
+    // where it will apply, instead of a line of prose under every field. Only a short default
+    // comes through here — config-view puts a long one (a 64-char hash) on its own line.
+    placeholder: ctx.placeholder || "",
     autocapitalize: "off", autocorrect: "off", spellcheck: "false",
     oninput: (e) => {
       const v = e.target.value;
@@ -84,21 +117,44 @@ function textWidget(d, value, onChange, ctx) {
 }
 
 function patchWidget(d, value, onChange, ctx) {
-  const input = textWidget(d, value, onChange, ctx);
-  // Quick-picks for the patch mini-language, so common values need no typing. The set
-  // is per-field (descriptor.picks): vendor/boot offer a YYYY-MM-05 date, a common
-  // vendor patch day, that the system (YYYY-MM) field has no use for.
-  const pick = (v) => {
-    input.value = v;
-    input.classList.toggle("invalid", !!(d.re && v !== "" && !d.re.test(v)));
-    onChange(d.path, v);
-  };
+  // A patch level is one of a handful of tokens, or a date typed by hand. Six of those laid out
+  // as chips crowd the row and wrap; one picker holds them in a single line, names what "default"
+  // resolves to inside the option itself, and reads like the keybox picker above it.
+  // "custom…" is the escape hatch: picking it seeds the box with the value the field was already
+  // taking, so there is something to edit rather than an empty field.
+  const v = value == null ? "" : String(value);
   const picks = (d.picks || ["system_property", "today", "no"]).map(resolvePick);
-  const chips = el("div", { class: "quickpicks" },
-    picks.map((p) =>
-      el("button", { type: "button", class: "chip clickable", text: p.label, onclick: () => pick(p.value) })));
-  return el("div", { class: "patch" }, [input, chips]);
+  const onPick = picks.some((p) => p.value === v);
+  const custom = v !== "" && !onPick;
+
+  const options = [
+    { value: "", label: ctx.defaultValue ? "default — " + ctx.defaultValue : "default" },
+    ...picks,
+    { value: CUSTOM, label: "custom…" },
+  ];
+  const select = el("select", {
+    // The picker keeps ctx.id in both states. Handing it to the box instead would make the
+    // caller's focus restore move focus there the moment "custom…" is chosen, and the keyboard
+    // that comes up covers the field it belongs to.
+    id: ctx.id, class: "input",
+    onchange: (e) => {
+      // "custom…" is not a value: it writes the seed, and the box that then appears is left
+      // unfocused, since a keyboard here would cover the field it belongs to.
+      const next = e.target.value === CUSTOM ? customSeed(d, picks, ctx) : e.target.value;
+      if (next === v) return;
+      onChange(d.path, next);
+    },
+  }, options.map((o) => el("option", {
+    value: o.value, selected: o.value === CUSTOM ? custom : o.value === v, text: o.label,
+  })));
+
+  const box = custom ? textWidget(d, v, onChange, { ...ctx, id: ctx.id + "-v" }) : null;
+  return el("div", { class: "patch" }, [picker(select), box]);
 }
+
+// The picker entry that stands for "a value no option covers". It is not a config value: choosing
+// it writes customSeed()'s date, never this string.
+const CUSTOM = "\u0000custom";
 
 // A quick-pick token -> { label, value }. "@month05" inserts the template "YYYY-MM-05"
 // (a common vendor/boot patch date); the daemon resolves YYYY/MM to today, so it tracks
@@ -109,12 +165,49 @@ function resolvePick(token) {
   return { label: token, value: token };
 }
 
+// What "custom…" opens the box on: the default the field was taking (a harvested date or OS
+// version — never an option's own token, or the field would still read as resting on that one),
+// else the descriptor's template, which the daemon resolves against today's calendar.
+function customSeed(d, picks, ctx) {
+  const seed = ctx.defaultValue || "";
+  const isToken = picks.some((p) => p.value === seed);
+  if (seed && !isToken && (!d.re || d.re.test(seed))) return seed;
+  return d.seed || "";
+}
+
 function selectWidget(d, value, onChange, ctx) {
-  return el("select", {
+  return picker(el("select", {
     id: ctx.id, class: "input",
     onchange: (e) => onChange(d.path, e.target.value),
   }, (d.options || []).map((opt) =>
-    el("option", { value: opt, selected: opt === value, text: opt })));
+    el("option", { value: opt, selected: opt === value, text: opt }))));
+}
+
+// A <select> reads as a text box once appearance:none strips the native arrow back off it.
+// Wrap it with one, so a picker looks like a picker.
+function picker(select) {
+  return el("div", { class: "select-wrap" }, [select, el("span", { class: "select-caret", "aria-hidden": "true" })]);
+}
+
+// A radio group drawn as one segmented control: every choice visible, one tap to switch, and
+// only the chosen one's meaning spelled out underneath.
+function segmentField(d, value, onChange, ctx) {
+  const opts = d.options || [];
+  const labels = d.optionLabels || {};
+  const seg = el("div", { class: "segmented segmented-block", role: "radiogroup", "aria-label": d.label },
+    opts.map((opt, i) => el("button", {
+      id: i === 0 ? ctx.id : null, type: "button",
+      class: "seg" + (opt === value ? " on" : ""),
+      role: "radio", "aria-checked": opt === value ? "true" : "false",
+      text: labels[opt] || opt,
+      onclick: () => { if (opt !== value) onChange(d.path, opt); },
+    })));
+  const help = (d.optionHelp && d.optionHelp[value]) || d.help || null;
+  return el("div", { class: "field" }, [
+    fieldHead(d, ctx.id, ctx),
+    seg,
+    help ? el("div", { class: "field-help", text: help }) : null,
+  ]);
 }
 
 function keyboxWidget(d, value, onChange, ctx) {
@@ -123,14 +216,14 @@ function keyboxWidget(d, value, onChange, ctx) {
   const files = (ctx.keyboxFiles || []).slice();
   if (value && !files.includes(value)) files.push(value);
   if (files.length === 0) {
-    return el("select", { id: ctx.id, class: "input", disabled: true },
-      [el("option", { text: "no keybox files found" })]);
+    return picker(el("select", { id: ctx.id, class: "input", disabled: true },
+      [el("option", { text: "no keybox files found" })]));
   }
-  return el("select", {
+  return picker(el("select", {
     id: ctx.id, class: "input",
     onchange: (e) => onChange(d.path, e.target.value),
   }, files.map((f) =>
-    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)") })));
+    el("option", { value: f, selected: f === value, text: f + ((ctx.keyboxFiles || []).includes(f) ? "" : " (missing)") }))));
 }
 
 function applistWidget(d, value, ctx) {

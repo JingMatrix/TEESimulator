@@ -92,8 +92,11 @@
   padding: 14px 16px; min-height: 60px; font: inherit; color: var(--fg); cursor: pointer;
 }
 .list-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.list-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.list-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .list-title { font-weight: 700; font-size: 15px; }
+/* One muted line of facts under a profile's name: its keybox, its app count. */
+.list-sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .list-chevron { flex: none; width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); }
 
 /* --- chips -------------------------------------------------------------- */
@@ -118,11 +121,20 @@
 .pill.warn { background: var(--warn); color: var(--accent-fg); }
 
 /* --- forms -------------------------------------------------------------- */
-.group { border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
-.group legend { padding: 0 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+/* A form section: the same card as a collapsed .disclosure, so an open group and a folded one
+   read as one kind of thing down the editor. */
+.group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.group-head { margin: 0; font-size: 15px; font-weight: 600; color: var(--fg); }
+.group-note { margin: -4px 0 0; }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
+/* Label on the left, the source of this field's default on the right: one row instead of a line
+   of prose under every field. */
+.field-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 18px; }
 .field-label { font-size: 13px; font-weight: 600; }
+.field-tag { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--muted); background: var(--chip); border-radius: 999px; padding: 2px 8px; }
+.field-tag.keybox { color: var(--accent); background: var(--accent-weak); }
+.field-tag.warn { color: var(--warn); }
 .field-help { color: var(--muted); font-size: 12px; margin: 0; }
 
 .input {
@@ -132,11 +144,19 @@
 }
 .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .input.invalid { border-color: var(--danger); }
-select.input { appearance: none; }
+/* The default an empty field takes, shown where it will apply. */
+.input::placeholder { color: var(--muted); opacity: 1; }
+.input.ph-keybox::placeholder { color: var(--accent); }
 input[type="file"].input { padding: 8px 10px; }
 
-.patch { display: flex; flex-direction: column; gap: 6px; }
-.quickpicks { display: flex; flex-wrap: wrap; gap: 6px; }
+/* appearance:none strips the native arrow off a <select>, which then reads as a text box; the
+   wrapper paints one back. */
+select.input { appearance: none; padding-right: 36px; }
+.select-wrap { position: relative; display: block; }
+.select-caret { position: absolute; right: 15px; top: 50%; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+
+/* A patch level: one picker, and a box under it only when the value is a date no option covers. */
+.patch { display: flex; flex-direction: column; gap: 8px; }
 
 /* Extra separation above the "add package" row so it reads as an action distinct
  * from the app badges above it. */
@@ -256,7 +276,7 @@ button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
  * (the editor drill-body, the System update card) `overflow:hidden` would drop its
  * automatic min-size to 0, so an overflowing column collapses it to its borders and
  * clips the header away. Pin it to its content height and let the column scroll. */
-.disclosure { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
+.disclosure { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; flex: none; }
 .disclosure-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
   min-height: 48px; padding: 12px 14px; border: 0; background: var(--card);
@@ -268,10 +288,14 @@ button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
 .disclosure-chevron { flex: none; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform .15s; }
 .disclosure-head.open .disclosure-chevron { transform: rotate(-135deg); }
 .disclosure-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 14px; }
+.disclosure-body > .group-note { margin: 0 0 2px; }
 
 /* --- segmented control -------------------------------------------------- */
 .segmented { display: inline-flex; background: var(--chip); border-radius: var(--radius-sm); padding: 3px; gap: 3px; align-self: flex-start; }
 .seg { min-height: 44px; padding: 6px 18px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; }
+/* A segmented control used as a form field: full width, the choices sharing it evenly. */
+.segmented-block { display: flex; align-self: stretch; }
+.segmented-block .seg { flex: 1; padding: 6px 10px; }
 .seg.on { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 .seg:disabled { opacity: .6; cursor: default; }
 .seg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -362,6 +386,16 @@ html, body { overscroll-behavior-y: contain; }
 }
 .drill-title { margin: 0; font-size: 18px; font-weight: 700; }
 .drill-title:focus-visible { outline: none; }
+/* The profile's name IS the drill-in's title, and editing it is tapping it. Transparent until
+   focused, when it takes a box so it is plainly a field. */
+.drill-title-input {
+  flex: 0 1 auto; width: auto; max-width: 100%; min-width: 0; min-height: 40px; padding: 6px 10px;
+  font: inherit; font-size: 18px; font-weight: 700; color: var(--fg);
+  background: transparent; border: 1px solid transparent; border-bottom-color: var(--line);
+  border-radius: 10px 10px 0 0;
+}
+.drill-title-input:focus { outline: none; background: var(--card); border-color: var(--accent); border-radius: 10px; }
+.drill-title-input.invalid { border-color: var(--danger); }
 .drill-body {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: 16px;

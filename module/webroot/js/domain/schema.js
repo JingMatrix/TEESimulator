@@ -66,10 +66,13 @@ export const HASH_RE = /^[0-9a-fA-F]{64}$/;
 // Field descriptors, in render order. Each one is:
 //   key      unique id, also the inline-error key
 //   path     where the value lives inside a profile object (supports nesting)
-//   label    human label for the form
+//   label    human label for the form (labelHidden drops the row where it would only repeat
+//            the section title; the label still names the field in error messages)
 //   group    which fieldset it renders under
 //   type     which widget renders it (see ui/field.js)
-//   options  choices for a 'select'
+//   picks    quick-pick tokens for a 'patch' field; `seed` is what its "custom…" box opens on
+//   options  choices for a 'select' / 'segment'
+//   optionLabels, optionHelp  a 'segment' choice's button text and its one-line meaning
 //   default  value emptyProfile() seeds
 //   re       format regex (per-item for 'applist'); a value is checked ONLY when
 //            present, so re means "format-validate", never "required"
@@ -81,38 +84,38 @@ export const FIELDS = [
   {
     key: "keybox", path: ["keybox"], label: "Keybox", group: "attestation",
     type: "keybox", re: KEYBOX_RE, required: true, default: "keybox.xml",
-    help: "An *.xml keybox under /data/adb/teesim to sign attestations with.",
+    help: "An *.xml keybox under /data/adb/teesim; import and inspect them on Keyboxes.",
   },
+  // Two modes, so they render as one segmented control rather than a drop-down: both are
+  // visible at a glance and picking one is a single tap. `optionHelp` is what the chosen
+  // segment means -- only the selected mode's line is shown, which is the half that matters.
   {
     key: "mode", path: ["mode"], label: "Operation mode", group: "attestation",
-    type: "select", options: ["patch", "generation"], required: true, default: "patch",
+    type: "segment", options: ["patch", "generation"], required: true, default: "patch",
     re: MODE_RE,
-    help:
-      "patch: keep the real hardware key and re-sign only its attestation with the keybox " +
-      "(fewer detection points; needs a working hardware level). generation: mint the whole key " +
-      "in software. A level whose hardware is unavailable always falls back to generation.",
+    optionLabels: { patch: "Patch", generation: "Generation" },
+    optionHelp: {
+      patch: "Keeps the real hardware key and re-signs only its attestation with the keybox — " +
+        "fewer detection points. A level whose hardware is unavailable falls back to generation.",
+      generation: "Mints the whole key in software under the keybox. Works at every level.",
+    },
   },
-  // --- patch & OS levels (folded away in the editor to keep it concise). Empty means
-  //     "use the harvested value" — so these are optional, not required. ---
+  // --- security patch levels (folded away in the editor to keep it concise). Empty means
+  //     "use the default", i.e. the harvested value — so these are optional, not required. ---
   {
     key: "patchSystem", path: ["patchLevel", "system"], label: "System patch",
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "today",
-    picks: ["system_property", "today", "no"],
+    picks: ["system_property", "today", "no"], seed: "YYYY-MM",
   },
   {
     key: "patchVendor", path: ["patchLevel", "vendor"], label: "Vendor patch",
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "YYYY-MM-05",
-    picks: ["system_property", "@month05", "today", "no"],
+    picks: ["system_property", "@month05", "today", "no"], seed: "YYYY-MM-DD",
   },
   {
     key: "patchBoot", path: ["patchLevel", "boot"], label: "Boot patch",
     group: "levels", type: "patch", re: PATCH_RE, required: false, default: "YYYY-MM-05",
-    picks: ["system_property", "@month05", "today", "no"],
-  },
-  {
-    key: "osVersion", path: ["osVersion"], label: "OS version",
-    group: "levels", type: "patch", re: OSVER_RE, required: false, default: "",
-    picks: ["system_property"],
+    picks: ["system_property", "@month05", "today", "no"], seed: "YYYY-MM-DD",
   },
   // --- device identity (all optional: blank means "don't provision this id") ---
   { key: "brand", path: ["brand"], label: "Brand", group: "identity", type: "text", required: false, default: "" },
@@ -124,7 +127,15 @@ export const FIELDS = [
   { key: "imei", path: ["imei"], label: "IMEI", group: "identity", type: "text", required: false, default: "" },
   { key: "meid", path: ["meid"], label: "MEID", group: "identity", type: "text", required: false, default: "" },
   { key: "imei2", path: ["imei2"], label: "IMEI2", group: "identity", type: "text", required: false, default: "" },
-  // No help line: it sits among the identity fields, which carry none, and the cue under it
+  // The OS version and the verified boot hash close the identity group: they are attested
+  // about this device like the ids above, and the one place to state another device's is here,
+  // beside the names and serials that have to agree with it.
+  {
+    key: "osVersion", path: ["osVersion"], label: "OS version",
+    group: "identity", type: "patch", re: OSVER_RE, required: false, default: "",
+    picks: ["system_property"], seed: "16.0.0",
+  },
+  // No help line: it sits among the identity fields, which carry none, and the cue beside it
   // already names the value it takes when left empty. What spoofing it costs a generation-mode
   // profile (its stored blobs are keyed by this hash) is in the README, not in the form.
   {
@@ -133,15 +144,15 @@ export const FIELDS = [
   },
   // --- targeting ----------------------------------------------------------
   {
-    key: "apps", path: ["apps"], label: "Apps", group: "apps", type: "scope",
+    // The section is called Target apps and the widget's own head counts them, so the label
+    // would say "Apps" three inches under "Target apps".
+    key: "apps", path: ["apps"], label: "Apps", labelHidden: true, group: "apps", type: "scope",
     re: APP_ENTRY_RE, required: true, default: [],
-    help: "The apps this profile attests for.",
   },
   {
     key: "autoIncludeNewApps", path: ["autoIncludeNewApps"], label: "Auto-include new apps",
     group: "apps", type: "toggle", required: false, default: false,
-    help: "Targets apps installed after now; existing apps stay untouched. New apps are discovered " +
-      "on a rescan, not watched for live.",
+    help: "Targets apps installed from now on, found on a rescan; existing apps stay untouched.",
   },
 ];
 
