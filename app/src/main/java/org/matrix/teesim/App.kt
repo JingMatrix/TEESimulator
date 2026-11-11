@@ -598,7 +598,10 @@ object App {
         // The device has the property, or we are already holding it — in which case what it reads
         // now is our own value and `saved` has the device's.
         fun present(prop: String) = prop in saved || DeviceProps.prop(prop, "").isNotEmpty()
-        /** The property's value before we first wrote it, which is the live one until we do. */
+        /**
+         * The property's value before we first wrote it, which is the live one until we do. Read
+         * through this rather than from the live property, which is ours once a push has run.
+         */
         fun original(prop: String) = saved[prop] ?: DeviceProps.prop(prop, "")
 
         // property -> the value to force. A profile presenting this device's own value has nothing
@@ -642,15 +645,22 @@ object App {
         }
         for ((name, value) in wanted) {
             val live = DeviceProps.prop(name, "")
+            // What has to be put back: the value from before we ever wrote this property. Once
+            // SysProp.set has run the property reads OUR value, so it is read -- or recalled from
+            // the store -- before the write, never after.
+            val was = saved[name] ?: live
             if (live == value) {
-                holding[name] = original(name)
+                // Already what the profile wants: ours from an earlier push, in which case `was`
+                // is the device's own and worth holding on to, or the device's own all along,
+                // which leaves nothing to restore.
+                if (name in saved) holding[name] = was
                 continue
             }
             if (SysProp.set(name, value)) {
-                holding[name] = original(name)
+                holding[name] = was
                 SystemLogger.info(
                     "App: system prop $name forced to '$value' for profile " +
-                        "'${chosen?.id ?: "-"}' (was '${live.ifEmpty { "unset" }}')"
+                        "'${chosen?.id ?: "-"}' (was '${was.ifEmpty { "unset" }}')"
                 )
             }
         }
