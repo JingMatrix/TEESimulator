@@ -132,20 +132,23 @@ object KeyboxDetail {
      */
     /**
      * provisioningInfo keys. Only 1 and 4 are documented by Google, and the map is explicitly
-     * unversioned, so the rest are readings and say so with a question mark. A key with no reading
-     * at all is shown by its number rather than guessed at.
+     * unversioned, so 3 and 5 are readings — what each rests on is in the comment above it. A key
+     * with no reading at all is shown by its number rather than guessed at.
      */
     private val PROVISIONING_FIELDS =
         mapOf(
             // Documented: "an approximate number of certificates issued to the device in the last
             // 30 days", offered to relying parties as an abuse signal.
             1L to "certificates issued in the last 30 days",
-            3L to "manufacturer?",
+            // Read: a manufacturer name, present only where no fingerprint is.
+            3L to "manufacturer",
             // Documented: the certified origin of the attested key, vouched for by the chipset
             // manufacturer — STRONG_BOX or TEE. (Keyboxes seen in the wild carry it in the leaf's
             // subject instead and omit this.)
             4L to "validated attested entity",
-            5L to "validated attributes?",
+            // Read: the (verdict, subject) pairs below, which name what was checked about the
+            // device at provisioning.
+            5L to "validated attributes",
         )
 
     /**
