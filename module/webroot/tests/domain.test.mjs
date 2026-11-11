@@ -212,6 +212,23 @@ test("exactly one profile auto-including new apps is fine", () => {
   assert.equal(r.ok, true, JSON.stringify(r.errors));
 });
 
+test("two profiles both applying system properties is an error on BOTH", () => {
+  const a = validProfile(["com.a"]); a.applyProperties = true;
+  const b = validProfile(["com.b"]); b.applyProperties = true;
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, false);
+  const errs = r.errors.filter((e) => e.field === "applyProperties");
+  assert.ok(errs.some((e) => e.profile === "a"));
+  assert.ok(errs.some((e) => e.profile === "b"));
+});
+
+test("exactly one profile applying system properties is fine", () => {
+  const a = validProfile(["com.a"]); a.applyProperties = true;
+  const b = validProfile(["com.b"]);
+  const r = validateConfig(configWith({ a, b }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
 // --- regex whitelists ----------------------------------------------------
 const cases = [
   [PKG_RE, ["com.foo", "com.foo.bar", "a_b.c", "A9._"], ["", "com foo", "com;rm -rf", "com/foo", "com-foo"]],

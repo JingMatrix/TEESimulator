@@ -251,14 +251,36 @@ export function create(mount) {
     renderProfileList(mount, { config, errors, dirty, autoCounts: autoCounts() }, listActions);
   }
 
-  // Which OTHER profile (if any) already owns auto-include, relative to `name`. Only one profile
-  // may, so the editor greys this profile's toggle when another claims it.
-  function autoTakenBy(name) {
-    for (const other of Object.keys(config.profiles)) {
-      if (other === name) continue;
-      if (config.profiles[other] && config.profiles[other].autoIncludeNewApps === true) return other;
+  // Which OTHER profile (if any) already owns each whole-device claim, relative to `name`. Only
+  // one profile may hold one, so the editor greys this profile's switch when another claims it.
+  function takenBy(name) {
+    const out = {};
+    for (const f of FIELDS) {
+      if (!f.exclusive) continue;
+      for (const other of Object.keys(config.profiles)) {
+        if (other === name) continue;
+        if (getPath(config.profiles[other] || {}, f.path) === true) { out[f.key] = other; break; }
+      }
     }
-    return null;
+    return out;
+  }
+
+  // A profile written before `applyProperties` existed carries no flag. Settle it on load, by the
+  // rule ConfigStore reads the file with, so the switch shows what the daemon is actually doing
+  // and saving keeps it: with the key stated nowhere the profile named `default` (or the only one
+  // there is) claims the properties, and once any profile states it, an absent key means no.
+  function normalize(cfg) {
+    const names = Object.keys((cfg && cfg.profiles) || {});
+    const stated = names.some(
+      (n) => cfg.profiles[n] && typeof cfg.profiles[n].applyProperties === "boolean");
+    for (const name of names) {
+      const p = cfg.profiles[name];
+      if (!p || typeof p !== "object") continue;
+      if (typeof p.applyProperties !== "boolean") {
+        p.applyProperties = !stated && (name === "default" || names.length === 1);
+      }
+    }
+    return cfg;
   }
 
   function renderEditor() {
@@ -266,7 +288,7 @@ export function create(mount) {
     renderProfileEditor(
       editorHost,
       { config, name: editing, errors, keyboxFiles, openGroups, resolved: resolvedLevels(),
-        scopeMeta: scopeMeta(), autoTakenBy: autoTakenBy(editing), autoCount: autoCountFor(editing) },
+        scopeMeta: scopeMeta(), takenBy: takenBy(editing), autoCount: autoCountFor(editing) },
       editorActions);
   }
 
@@ -708,7 +730,11 @@ export function create(mount) {
       if (!trimmed) return;
       if (!PROFILE_RE.test(trimmed)) { toast("Name must be 1-32 chars: letters, digits, - or _."); return; }
       if (config.profiles[trimmed]) { toast("A profile named " + trimmed + " already exists."); return; }
-      config.profiles[trimmed] = emptyProfile();
+      const fresh = emptyProfile();
+      // The first profile on a fresh install drives the system properties; a later one does not
+      // take that away from whichever profile already holds it.
+      fresh.applyProperties = Object.keys(config.profiles).length === 0;
+      config.profiles[trimmed] = fresh;
       dirty = true;
       revalidate();
       openEditor(trimmed);
@@ -854,7 +880,7 @@ export function create(mount) {
     if (!dirty) {
       const res = await ioLoad();
       if (res.ok) {
-        config = res.config;
+        config = normalize(res.config);
         loaded = true;
         revalidate();
       } else if (!config) {
@@ -890,7 +916,7 @@ export function create(mount) {
       const res = await ioLoad();
       if (!res.ok) { renderLoadError(res); return; }
 
-      config = res.config;
+      config = normalize(res.config);
       keyboxFiles = await listKeyboxes();
       await loadHarvest();
       // The auto counts on the list rows come from the daemon's last resolve. Fetched once here

@@ -52,7 +52,9 @@ const renameId = (profile) => `rn__${profile}`;
 function foldSummary(group, fields, profile, hasErrors) {
   const nodes = [el("span", { text: group.title })];
   if (group.id === "identity") {
+    // Values only: a switch in the group would be a setting about them, not one of them.
     const setCount = fields.reduce((n, f) => {
+      if (f.type === "toggle") return n;
       const v = getPath(profile, f.path);
       return n + (v != null && v !== "" ? 1 : 0);
     }, 0);
@@ -76,7 +78,11 @@ function foldSummary(group, fields, profile, hasErrors) {
 function defaultCue(d, value, resolved) {
   if (!Object.prototype.hasOwnProperty.call(resolved, d.key)) return null;
   const v = value == null ? "" : String(value).trim();
-  if (v !== "") return null;
+  // A field the profile states itself takes neither default, and says so in the same place the
+  // other two are named.
+  if (v !== "") {
+    return { tag: { text: "custom", kind: "custom", title: "Stated by this profile." } };
+  }
   const rd = resolved[d.key] || {};
   const rv = rd.value == null ? "" : String(rd.value);
   if (rv === "") {
@@ -198,7 +204,7 @@ export function renderProfileEditor(host, state, actions) {
   const scrollTop = captureScroll(host);
   clear(host);
 
-  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, autoTakenBy = null, autoCount = 0 } = state;
+  const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, takenBy = {}, autoCount = 0 } = state;
   const profile = config.profiles[name];
   if (!profile) { actions.onClose(); return; }
 
@@ -274,9 +280,9 @@ export function renderProfileEditor(host, state, actions) {
       // So the scope face can say "auto-include on — new apps added automatically" instead of
       // "no apps" when the profile relies on auto-include rather than explicit picks.
       autoInclude: getPath(profile, ["autoIncludeNewApps"]) === true,
-      // The auto-include toggle disables itself (with a note) when ANOTHER profile already owns
-      // auto-include — only one profile may, so the conflict shows before Save rejects it.
-      autoTakenBy,
+      // An exclusive toggle disables itself (with a note) when ANOTHER profile already owns the
+      // claim — only one profile may, so the conflict shows before Save rejects it.
+      takenBy: d.exclusive ? takenBy[d.key] || null : null,
       // How many apps the daemon currently auto-includes for this profile, from its resolved
       // snapshot — the count config.json cannot supply.
       autoCount,

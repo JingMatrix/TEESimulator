@@ -5,7 +5,7 @@
 //   value    the current value, already read at descriptor.path by the caller
 //   onChange (path, value) => ...  for scalar widgets (text/select/patch/keybox)
 //   context  { id, tag, placeholder, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
-//              labelMap, installedSet, autoInclude, autoTakenBy }
+//              labelMap, installedSet, autoInclude, takenBy }
 //            - id           stable element id, so a re-render can restore focus
 //            - tag          { text, kind, title } drawn beside the label: where the value comes
 //                           from when the field is left empty ("keybox" / "harvested" / "omitted")
@@ -19,13 +19,12 @@
 //                           the app's real name, not just its package
 //            - installedSet optional Set of installed package names, so a scope chip can
 //                           flag a package that is not currently installed on the device
-//            - autoInclude  whether this profile has auto-include on
+//            - autoInclude  whether this profile has auto-include on (scope face empty state)
 //            - autoCount    how many apps the daemon currently auto-includes for it (0 when
 //                           /scope is unavailable), so the face can count what apps[] cannot
-//            - autoInclude  whether this profile has auto-include on (scope face empty state)
-//            - autoTakenBy  for the auto-include toggle: the OTHER profile that already owns
-//                           auto-include (or null); when set, the switch renders disabled with
-//                           a "(used by <name>)" note, since only one profile may auto-include
+//            - takenBy      for an `exclusive` toggle: the OTHER profile that already owns this
+//                           claim (or null); when set, the switch renders disabled with a
+//                           "used by <name>" note, since only one profile may hold it
 //
 // A new descriptor of an EXISTING type needs no edit here. A new type is one new
 // case below.
@@ -258,15 +257,15 @@ function applistWidget(d, value, ctx) {
 // a sibling of the (visually hidden but full-size) checkbox, so a tap anywhere on the track
 // flips it and CSS drives the thumb off `:checked`. onChange gets the boolean, never a string.
 //
-// Auto-include is a whole-device catch-all, so at most one profile may own it: when another
-// profile already does, ctx.autoTakenBy names it and the switch renders disabled with a short
-// "(used by <name>)" note, so the conflict is legible before Save rejects it.
+// An `exclusive` toggle is a whole-device claim, so at most one profile may own it: when another
+// profile already does, ctx.takenBy names it and the switch renders disabled with a short
+// "used by <name>" note, so the conflict is legible before Save rejects it.
 // A compact settings ROW (not the three-line label/control/help stack): the title and its help sit
 // stacked on the left as a <label for> that also toggles, and the switch sits inline on the right.
 // The help doubles as the "used by <profile>" note when auto-include is locked to another profile.
 function toggleField(d, value, onChange, ctx) {
   const checked = value === true;
-  const locked = d.key === "autoIncludeNewApps" && !!ctx.autoTakenBy && !checked;
+  const locked = !!d.exclusive && !!ctx.takenBy && !checked;
   const input = el("input", {
     id: ctx.id, class: "switch-input", type: "checkbox", checked, disabled: locked,
     role: "switch", "aria-checked": checked ? "true" : "false",
@@ -276,7 +275,7 @@ function toggleField(d, value, onChange, ctx) {
     input,
     el("span", { class: "switch-track", "aria-hidden": "true" }, [el("span", { class: "switch-thumb" })]),
   ]);
-  const sub = locked ? "Used by profile “" + ctx.autoTakenBy + "”" : d.help;
+  const sub = locked ? "Used by profile “" + ctx.takenBy + "”" : d.help;
   return el("div", { class: "field toggle-field" }, [
     el("div", { class: "toggle-row" }, [
       el("label", { class: "toggle-main", for: ctx.id }, [

@@ -134,6 +134,9 @@
 .field-label { font-size: 13px; font-weight: 600; }
 .field-tag { flex: none; font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--muted); background: var(--chip); border-radius: 999px; padding: 2px 8px; }
 .field-tag.keybox { color: var(--accent); background: var(--accent-weak); }
+/* The profile's own value: not a default at all, so it carries the foreground colour the two
+   defaults' tags are muted away from. */
+.field-tag.custom { color: var(--fg); }
 .field-tag.warn { color: var(--warn); }
 .field-help { color: var(--muted); font-size: 12px; margin: 0; }
 

@@ -76,6 +76,8 @@ export const HASH_RE = /^[0-9a-fA-F]{64}$/;
 //   default  value emptyProfile() seeds
 //   re       format regex (per-item for 'applist'); a value is checked ONLY when
 //            present, so re means "format-validate", never "required"
+//   exclusive  for a 'toggle': the phrase for "only one profile may <exclusive>", which both
+//            validates and tells the editor to grey this switch where another profile owns it
 //   required whether a blank value is an error; independent of re, so a field can
 //            be optional-but-format-validated or required-but-format-free
 //   help     optional hint under the field
@@ -99,6 +101,16 @@ export const FIELDS = [
         "fewer detection points. A level whose hardware is unavailable falls back to generation.",
       generation: "Mints the whole key in software under the keybox. Works at every level.",
     },
+  },
+  // The device has one set of system properties, so at most one profile may drive them — the
+  // validator enforces that, and the editor greys the switch on every other profile. It sits with
+  // the keybox and the mode because it governs the whole profile, not one group of its values.
+  {
+    key: "applyProperties", path: ["applyProperties"], label: "Apply to system properties",
+    group: "attestation", type: "toggle", required: false, default: false,
+    exclusive: "write the device's system properties",
+    help: "Writes the ids, patch levels and OS version this profile attests into the properties " +
+      "they are read from — only ones this device already has, and never past a reboot.",
   },
   // --- security patch levels (folded away in the editor to keep it concise). Empty means
   //     "use the default", i.e. the harvested value — so these are optional, not required. ---
@@ -152,6 +164,7 @@ export const FIELDS = [
   {
     key: "autoIncludeNewApps", path: ["autoIncludeNewApps"], label: "Auto-include new apps",
     group: "apps", type: "toggle", required: false, default: false,
+    exclusive: "auto-include new apps",
     help: "Targets apps installed from now on, found on a rescan; existing apps stay untouched.",
   },
 ];

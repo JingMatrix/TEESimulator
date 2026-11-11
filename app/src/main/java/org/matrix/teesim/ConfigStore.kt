@@ -50,6 +50,13 @@ object ConfigStore {
         // each package change. At most one profile may set this (checked below); it lets the apps
         // list be empty, the auto set covering it.
         val autoIncludeNewApps: Boolean,
+        // When true, every value this profile attests that differs from the harvest is written
+        // into the system property it is read from, and ro.boot.vbmeta.digest follows this
+        // profile's verified boot hash (see App.applySystemProps). There is one set of properties
+        // on the device, so at most one profile may ask (checked below). A config that states the
+        // key nowhere falls back to the profile named `default`, or the only one there is, which
+        // is what the daemon did before the flag existed.
+        val applyProperties: Boolean,
     )
 
     data class Config(
@@ -83,6 +90,13 @@ object ConfigStore {
             HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
         var autoIncludeProfiles =
             0 // how many profiles set autoIncludeNewApps (at most one allowed)
+        var applyPropsProfiles = 0 // how many profiles set applyProperties (at most one allowed)
+        // Whether any profile states applyProperties at all, which decides whether the others get
+        // the historical fallback or a plain false.
+        val statesApplyProperties =
+            profilesObj.keys().asSequence().any {
+                profilesObj.optJSONObject(it)?.has("applyProperties") == true
+            }
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -127,6 +141,21 @@ object ConfigStore {
                 p.optJSONArray("apps")?.let { arr ->
                     (0 until arr.length()).map { arr.getString(it).trim() }
                 } ?: emptyList()
+
+            // One device, one set of system properties: two profiles writing them would fight over
+            // every value. A config that states the key nowhere gets the choice the daemon made
+            // before the flag existed; once any profile states it, the statement is the whole
+            // truth and an absent key means no -- otherwise naming a second profile would collide
+            // with a `default` that never asked for anything.
+            val applyProperties =
+                if (p.has("applyProperties")) p.optBoolean("applyProperties", false)
+                else !statesApplyProperties && (id == "default" || profilesObj.length() == 1)
+            if (applyProperties) applyPropsProfiles++
+            if (applyPropsProfiles > 1)
+                throw ConfigException(
+                    "profile '$id' also sets applyProperties, but at most one profile may write " +
+                        "the device's system properties"
+                )
 
             // A profile that auto-includes every user app may legitimately name no apps of its own;
             // otherwise it must target at least one, or it routes nothing.
@@ -216,6 +245,7 @@ object ConfigStore {
                     verifiedBootHash = bootHash,
                     apps = apps,
                     autoIncludeNewApps = autoIncludeNewApps,
+                    applyProperties = applyProperties,
                 )
             )
         }

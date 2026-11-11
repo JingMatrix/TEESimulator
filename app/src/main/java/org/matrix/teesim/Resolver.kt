@@ -113,6 +113,36 @@ object Resolver {
         return msg
     }
 
+    /**
+     * The OS version and patch levels a profile presents, in the integer encoding the attestation
+     * carries them in. Null for a value that does not resolve, which is how a profile declines to
+     * report one: an empty field reuses what was harvested, `system_property` reads the build
+     * property, `no` reports 0, and anything else is the mini-language date.
+     *
+     * Shared so the push and the system properties it is reflected into ([App.applySystemProps])
+     * cannot drift apart — the property is only ever a second face of the value being attested.
+     */
+    data class Levels(
+        val osVersion: Int?,
+        val osPatchLevel: Int?,
+        val vendorPatchLevel: Int?,
+        val bootPatchLevel: Int?,
+    )
+
+    fun levels(p: ConfigStore.ProfileConfig, harvest: Harvester.Record): Levels =
+        Levels(
+            osVersion =
+                when {
+                    p.osVersion.isBlank() -> harvest.osVersion
+                    p.osVersion.equals("system_property", true) -> DeviceProps.propOsVersion()
+                    else -> DeviceProps.parseOsVersion(p.osVersion)
+                },
+            osPatchLevel = DeviceProps.resolvePatch(p.patchSystem, "system", harvest.osPatchLevel),
+            vendorPatchLevel =
+                DeviceProps.resolvePatch(p.patchVendor, "vendor", harvest.vendorPatchLevel),
+            bootPatchLevel = DeviceProps.resolvePatch(p.patchBoot, "boot", harvest.bootPatchLevel),
+        )
+
     private fun resolveProfile(
         p: ConfigStore.ProfileConfig,
         scope: Scope.ProfileScope,
@@ -141,27 +171,13 @@ object Resolver {
             ),
         )
 
-        // osVersion: system_property -> the harvested device value, omitted when absent;
-        // else the parsed literal, omitted when it can't be parsed. A missing osVersion is reported
-        // as "not set" rather than a synthesized default.
-        val osVersion =
-            when {
-                p.osVersion.isBlank() -> harvest.osVersion
-                p.osVersion.equals("system_property", true) -> DeviceProps.propOsVersion()
-                else -> DeviceProps.parseOsVersion(p.osVersion)
-            }
-        osVersion?.let { o.put("osVersion", it) }
-
-        // Patch levels via the mini-language; omit (=> not reported) when unresolved.
-        DeviceProps.resolvePatch(p.patchSystem, "system", harvest.osPatchLevel)?.let {
-            o.put("osPatchLevel", it)
-        }
-        DeviceProps.resolvePatch(p.patchVendor, "vendor", harvest.vendorPatchLevel)?.let {
-            o.put("vendorPatchLevel", it)
-        }
-        DeviceProps.resolvePatch(p.patchBoot, "boot", harvest.bootPatchLevel)?.let {
-            o.put("bootPatchLevel", it)
-        }
+        // OS version and the three patch levels, resolved from the config mini-language. Each is
+        // omitted (=> not reported) when it does not resolve.
+        val levels = levels(p, harvest)
+        levels.osVersion?.let { o.put("osVersion", it) }
+        levels.osPatchLevel?.let { o.put("osPatchLevel", it) }
+        levels.vendorPatchLevel?.let { o.put("vendorPatchLevel", it) }
+        levels.bootPatchLevel?.let { o.put("bootPatchLevel", it) }
 
         // Device IDs and the verified boot hash: an explicit profile value wins; everything it
         // leaves empty takes the default [ProfileDefaults] resolves — what this profile's own

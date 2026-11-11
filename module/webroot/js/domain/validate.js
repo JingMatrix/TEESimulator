@@ -115,16 +115,19 @@ export function validateConfig(config) {
     }
   }
 
-  // Auto-include is a whole-device catch-all ("every unclaimed user app"), so two profiles
-  // both asking for it would fight over the same apps — the daemon allows at most one. Flag
-  // every offender so the user sees exactly which profiles to reconcile.
-  const autoProfiles = Object.keys(profiles).filter(
-    (name) => profiles[name] && profiles[name].autoIncludeNewApps === true);
-  if (autoProfiles.length > 1) {
-    for (const name of autoProfiles) {
+  // A few toggles are whole-device claims: auto-include targets "every unclaimed user app", and
+  // applying properties writes the one set of system properties this device has. Two profiles
+  // claiming either would fight over it, so the daemon honours at most one. Flag every offender,
+  // so the user sees exactly which profiles to reconcile.
+  for (const f of FIELDS) {
+    if (!f.exclusive) continue;
+    const claimants = Object.keys(profiles).filter(
+      (name) => profiles[name] && getPath(profiles[name], f.path) === true);
+    if (claimants.length < 2) continue;
+    for (const name of claimants) {
       errors.push({
-        profile: name, field: "autoIncludeNewApps",
-        msg: `Only one profile may auto-include new apps; ${autoProfiles.length} do.`,
+        profile: name, field: f.key,
+        msg: `Only one profile may ${f.exclusive}; ${claimants.length} do.`,
       });
     }
   }

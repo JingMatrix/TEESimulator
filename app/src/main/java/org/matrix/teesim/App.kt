@@ -158,6 +158,12 @@ object App {
 
             Packages.init(appContext)
 
+            // Put back any system property a profile overwrote in this same boot before reading
+            // the device. A hot install restarts the daemon without rebooting, and the harvest
+            // supplements an unattested device id from exactly those properties, so without this
+            // the capture would read our own spoof and record it as what this device is.
+            PropStore.restoreAll()
+
             // Real-key harvest (frozen verifiedBoot*), persisted to harvested.json. Then layer the
             // user's overrides.json over it for the record we actually present.
             capturedBase = Harvester.run(appContext)
@@ -378,7 +384,7 @@ object App {
         // keybox or a profile that attests something else does so in the profile, not here.
         harvest = Harvester.applyUserOverrides(capturedBase, OverrideStore.load())
         KeyAdmin.updateHarvest(harvest)
-        applyBootProps(harvest, lastGoodConfig)
+        applySystemProps(harvest, lastGoodConfig)
         applyRkpDeletions()
         val cfg =
             lastGoodConfig
@@ -510,15 +516,145 @@ object App {
     private var bootPropHashHex: String? = null
 
     /**
-     * The profile whose root of trust the device-wide properties follow: the one named `default`,
-     * or the only one a single-profile configuration has. Every profile may attest its own verified
-     * boot hash, but there is exactly one ro.boot.vbmeta.digest for the framework to read, so it
-     * cannot agree with all of them at once — it follows this one, and a configuration with several
-     * profiles that disagree leaves the others' hash visible in attestation alone.
+     * The profile the device-wide system properties follow: the one that asks to apply them. There
+     * is one set of properties and every profile may attest its own values, so they cannot agree
+     * with all of them at once — they follow this one, and whatever the others attest is visible in
+     * attestation alone. At most one profile may ask ([ConfigStore] rejects a second), and a
+     * configuration where none does leaves every property as this device set it.
      */
-    private fun bootPropProfile(cfg: ConfigStore.Config?): ConfigStore.ProfileConfig? {
-        val profiles = cfg?.profiles ?: return null
-        return profiles.firstOrNull { it.id == "default" } ?: profiles.singleOrNull()
+    private fun propsProfile(cfg: ConfigStore.Config?): ConfigStore.ProfileConfig? =
+        cfg?.profiles?.firstOrNull { it.applyProperties }
+
+    /**
+     * Reflect the governing profile into the device's system properties — its device ids, its patch
+     * levels, its OS version and the verified boot hash — so what an app reads agrees with what is
+     * attested for it. Runs on every push — daemon start, a saved config, an edited keybox — which
+     * is also what undoes it: a profile that stops applying, or stops naming a value, is a push
+     * where the property is no longer wanted and goes back to the device's own.
+     */
+    private fun applySystemProps(h: Harvester.Record, cfg: ConfigStore.Config?) {
+        val chosen = propsProfile(cfg)
+        applyBootProps(h, chosen)
+        applyProfileProps(h, chosen)
+    }
+
+    /**
+     * One kind of value a profile can present, paired with the properties it is read from: how to
+     * read it off the profile's resolved levels, off the harvest to see whether it differs at all,
+     * and how to spell it the way the property does. Written as selectors rather than looked up by
+     * name, so a property list and the value it mirrors cannot drift apart.
+     */
+    private data class LevelProp(
+        val props: List<String>,
+        val presented: (Resolver.Levels) -> Int?,
+        val harvested: (Harvester.Record) -> Int?,
+        /** (level, the property's own value before we touched it) -> the text to write. */
+        val text: (Int, String) -> String?,
+    )
+
+    private val LEVEL_PROPS =
+        listOf(
+            // A security-patch property is a full date even where the level is only a month, so
+            // the day the device's own value carried is kept.
+            LevelProp(
+                DeviceProps.OS_PATCH_PROPS,
+                { it.osPatchLevel },
+                { it.osPatchLevel },
+                DeviceProps::patchText,
+            ),
+            LevelProp(
+                DeviceProps.VENDOR_PATCH_PROPS,
+                { it.vendorPatchLevel },
+                { it.vendorPatchLevel },
+                DeviceProps::patchText,
+            ),
+            LevelProp(
+                DeviceProps.BOOT_PATCH_PROPS,
+                { it.bootPatchLevel },
+                { it.bootPatchLevel },
+                DeviceProps::patchText,
+            ),
+            LevelProp(
+                DeviceProps.OS_VERSION_PROPS,
+                { it.osVersion },
+                { it.osVersion },
+                { level, _ -> DeviceProps.osVersionText(level) },
+            ),
+        )
+
+    /**
+     * Force every property a profile claims — its device ids, its patch levels, its OS version — to
+     * the value [chosen] presents where that differs from this device's own, and put back the ones
+     * it no longer claims. (The ro.boot.vbmeta.* pair is [applyBootProps]'s: those are written
+     * whether or not a profile claims anything.)
+     *
+     * Only a property the device already has is ever written: a name it does not carry is one
+     * nothing on it reads, and inventing one would change the build's shape rather than what it
+     * says. The value each property had first is kept in [PropStore], which is what a restore and
+     * the next harvest read.
+     */
+    private fun applyProfileProps(h: Harvester.Record, chosen: ConfigStore.ProfileConfig?) {
+        val saved = PropStore.saved()
+        // The device has the property, or we are already holding it — in which case what it reads
+        // now is our own value and `saved` has the device's.
+        fun present(prop: String) = prop in saved || DeviceProps.prop(prop, "").isNotEmpty()
+        /** The property's value before we first wrote it, which is the live one until we do. */
+        fun original(prop: String) = saved[prop] ?: DeviceProps.prop(prop, "")
+
+        // property -> the value to force. A profile presenting this device's own value has nothing
+        // to write and leaves the property untouched.
+        val wanted = LinkedHashMap<String, String>()
+        if (chosen != null) {
+            val defaults = ProfileDefaults.of(chosen.keybox, h)
+            for ((field, props) in Harvester.IDENTITY_PROPS) {
+                val value = ProfileDefaults.effective(chosen, field, defaults)
+                if (value.isBlank() || value == h.effective(field)) continue
+                for (prop in props) if (present(prop)) wanted[prop] = value
+            }
+            val levels = Resolver.levels(chosen, h)
+            for (level in LEVEL_PROPS) {
+                val presented = level.presented(levels) ?: continue
+                if (presented == level.harvested(h)) continue
+                for (prop in level.props) {
+                    if (!present(prop)) continue
+                    val text = level.text(presented, original(prop)) ?: continue
+                    wanted[prop] = text
+                }
+            }
+        }
+
+        // What we are responsible for putting back after this push: every property we still hold,
+        // with the value it had before we first wrote it.
+        val holding = LinkedHashMap<String, String>()
+        for ((name, was) in saved) {
+            if (name in wanted) {
+                holding[name] = was
+                continue
+            }
+            val live = DeviceProps.prop(name, "")
+            if (live != was) {
+                val ok = if (was.isEmpty()) SysProp.delete(name) else SysProp.set(name, was)
+                SystemLogger.info(
+                    "App: system prop $name back to this device's own " +
+                        "'${was.ifEmpty { "unset" }}'${if (ok) "" else " (failed)"}"
+                )
+            }
+        }
+        for ((name, value) in wanted) {
+            val live = DeviceProps.prop(name, "")
+            if (live == value) {
+                holding[name] = original(name)
+                continue
+            }
+            if (SysProp.set(name, value)) {
+                holding[name] = original(name)
+                SystemLogger.info(
+                    "App: system prop $name forced to '$value' for profile " +
+                        "'${chosen?.id ?: "-"}' (was '${live.ifEmpty { "unset" }}')"
+                )
+            }
+        }
+        PropStore.keep(holding)
     }
 
     /**
@@ -529,11 +665,14 @@ object App {
      * was empty (some bootloaders never populate ro.boot.vbmeta.digest — unlocked /
      * verification-disabled / OEM AVB, #228), stale, or changed by another module. A match is left
      * untouched, so a steady state does no work.
+     *
+     * These two are not held in [PropStore]: the value written is the one being attested, which on
+     * a device whose bootloader populates them honestly is the device's own, and the harvest
+     * deliberately does not read ro.boot.vbmeta.digest back.
      */
-    private fun applyBootProps(h: Harvester.Record, cfg: ConfigStore.Config?) {
+    private fun applyBootProps(h: Harvester.Record, chosen: ConfigStore.ProfileConfig?) {
         // The hash to reflect is the one the governing profile actually attests, which it may spoof
-        // or take from its keybox; with no config to read, the harvest's own.
-        val chosen = bootPropProfile(cfg)
+        // or take from its keybox; with no profile applying its properties, the harvest's own.
         val bootHash = chosen?.let { ProfileDefaults.bootHash(it, h) } ?: h.effectiveBootHash()
         val hex = bootHash.toHex()
         if (hex != bootPropHashHex) {
