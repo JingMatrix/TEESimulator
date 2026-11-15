@@ -7,8 +7,8 @@
 
 use crate::{as_array, device, mark_blob, strip_marker, OpError, Ta};
 use kmr_wire::keymint::{
-    AttestationKey, DateTime, HardwareAuthToken, KeyCharacteristics, KeyCreationResult, KeyFormat,
-    KeyParam, KeyPurpose, Tag,
+    AttestationKey, DateTime, ErrorCode, HardwareAuthToken, KeyCharacteristics, KeyCreationResult,
+    KeyFormat, KeyParam, KeyPurpose, Tag,
 };
 use kmr_wire::secureclock::TimeStampToken;
 use kmr_wire::{
@@ -100,6 +100,13 @@ impl Ta {
             self.inner.security_level(),
             attestation_key.is_some()
         );
+        // Tag.aidl forbids importing EARLY_BOOT_ONLY keys, even during early boot.
+        if key_params.iter().any(|p| p.tag() == Tag::EarlyBootOnly) {
+            return Err(OpError {
+                code: ErrorCode::EarlyBootEnded as i32,
+                msg: "EARLY_BOOT_ONLY keys cannot be imported".to_string(),
+            });
+        }
         ensure_creation_datetime(&mut key_params);
         let resp: Result<ImportKeyResponse, OpError> =
             self.perform(ImportKeyRequest { key_params, key_format, key_data, attestation_key });
@@ -268,3 +275,6 @@ fn marked_result(mut r: KeyCreationResult) -> KeyCreationResult {
     r.key_blob = mark_blob(&r.key_blob);
     r
 }
+
+#[cfg(test)]
+mod tests;
