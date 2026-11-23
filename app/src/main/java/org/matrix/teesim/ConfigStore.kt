@@ -224,10 +224,10 @@ object ConfigStore {
                     id = id,
                     keybox = keybox,
                     mode = mode,
-                    // Defaults for an omitted field mirror the shipped config: a current-month
-                    // system patch and the conventional YYYY-MM-05 vendor/boot patch; an absent
-                    // osVersion is left empty (reuse the harvested value).
-                    patchSystem = patch.optString("system", "today"),
+                    // Defaults for an omitted field mirror the shipped config: an empty system
+                    // patch (reuse the harvested value) and the conventional YYYY-MM-05
+                    // vendor/boot patch; an absent osVersion is likewise left empty.
+                    patchSystem = patch.optString("system", ""),
                     patchVendor = patch.optString("vendor", "YYYY-MM-05"),
                     patchBoot = patch.optString("boot", "YYYY-MM-05"),
                     osVersion =

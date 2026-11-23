@@ -116,7 +116,7 @@ export const FIELDS = [
   //     "use the default", i.e. the harvested value — so these are optional, not required. ---
   {
     key: "patchSystem", path: ["patchLevel", "system"], label: "System patch",
-    group: "levels", type: "patch", re: PATCH_RE, required: false, default: "today",
+    group: "levels", type: "patch", re: PATCH_RE, required: false, default: "",
     picks: ["system_property", "today", "no"], seed: "YYYY-MM",
   },
   {

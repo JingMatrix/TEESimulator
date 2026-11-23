@@ -69,7 +69,7 @@ A schema version and a map of named profiles. Each targeted package must appear 
   "profiles": {
     "default": {
       "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa and/or ecdsa, chains >= 2)
-      "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
+      "patchLevel": { "system": "", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",                       // empty = harvested | system_property | "16" | "16.0.0" | 160000
       "brand": "", "device": "", "product": "",
       "manufacturer": "", "model": "",
