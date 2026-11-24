@@ -7,7 +7,7 @@ import java.io.File
  * Finds the keystore daemon and drives the packaged `inject` binary to load the right interceptor
  * into it: `inject <pid> <lib.so> entry`. On Android 12+ the target is keystore2 with
  * libteesim_keymint.so; on 10/11 it is keystore with libteesim_keystore.so. Re-injects whenever the
- * daemon restarts (new pid).
+ * keystore process restarts (new pid).
  *
  * A keystore process can already be carrying an interceptor when this daemon starts — after a
  * daemon crash and respawn, after a hot install, or when late-load.sh arms a system that was armed
@@ -29,6 +29,10 @@ class Injector(private val moduleDir: File) {
     private companion object {
         /** Keystore restarts this daemon may order to clear an interceptor it cannot drive. */
         const val MAX_RESTARTS = 2
+
+        /** A map line for the injector's staged, already unlinked copy of the interceptor. */
+        val STAGED = Regex("""\s/data/local/tmp/lib[0-9A-Za-z]{8}\.so \(deleted\)$""")
+        val WHITESPACE = Regex("""\s+""")
     }
 
     private val injectBin = File(moduleDir, "$abi/inject")
@@ -179,16 +183,50 @@ class Injector(private val moduleDir: File) {
     /**
      * Whether [pid] has an interceptor mapped, or null when the maps cannot be read. Two shapes
      * count: the module's own libteesim_*.so, mapped straight from /data/adb, and the injector's
-     * staging fallback, which copies it to /data/local/tmp/lib<random>.so, dlopens that and unlinks
-     * it — so the map keeps that path with a "(deleted)" suffix.
+     * staging fallback, which copies it to /data/local/tmp/lib<8 random alnum>.so, dlopens that and
+     * unlinks it — so the map keeps that path with a "(deleted)" suffix. The staged name says
+     * nothing about whose library it is, so its file is opened through map_files and must carry our
+     * soname; one that cannot be opened there is taken on the name alone.
      */
     private fun hasInterceptor(pid: Int): Boolean? {
+        val lines =
+            try {
+                File("/proc/$pid/maps").readLines()
+            } catch (e: Exception) {
+                return null
+            }
+        if (lines.any { it.contains("libteesim_") }) return true
+        val checked = HashSet<String>()
+        return lines.any { line ->
+            if (!STAGED.containsMatchIn(line)) return@any false
+            val fields = line.split(WHITESPACE, limit = 6)
+            checked.add(fields[4]) && stagedIsOurs(pid, fields[0])
+        }
+    }
+
+    /** Whether the staged copy mapped at [range] in [pid] is our library, by its soname. */
+    private fun stagedIsOurs(pid: Int, range: String): Boolean {
+        val needle = "libteesim_".toByteArray()
         return try {
-            File("/proc/$pid/maps").useLines { lines ->
-                lines.any { it.contains("libteesim_") || it.contains("/data/local/tmp/lib") }
+            File("/proc/$pid/map_files/$range").inputStream().buffered().use { input ->
+                var matched = 0
+                var b = input.read()
+                while (b >= 0) {
+                    // The needle's first byte does not recur in it, so after a mismatch the only
+                    // match that can be in progress is one starting at this byte.
+                    matched =
+                        when {
+                            b.toByte() == needle[matched] -> matched + 1
+                            b.toByte() == needle[0] -> 1
+                            else -> 0
+                        }
+                    if (matched == needle.size) return true
+                    b = input.read()
+                }
+                false
             }
         } catch (e: Exception) {
-            null
+            true
         }
     }
 
@@ -197,6 +235,7 @@ class Injector(private val moduleDir: File) {
      * caller has already decided the current one cannot be used; the cap is what keeps a keystore
      * that keeps coming back wrong from being restarted forever.
      */
+    @Synchronized // the loop and adoptAsync's thread can both get here
     private fun restartTarget(pid: Int) {
         if (pid == restartedPid) {
             standDown(pid, "the restart did not take")
@@ -217,6 +256,12 @@ class Injector(private val moduleDir: File) {
                 "Injector: asked init to restart $procName (exit ${p.exitValue()}" +
                     "${if (out.isEmpty()) "" else ", $out"}); the new process will be injected"
             )
+            // Let the old process finish going down, so the loop's next look does not find it
+            // still alive and take that for a restart that did not happen.
+            for (i in 0 until 20) {
+                if (!isNamedProcess(pid, procName)) break
+                sleep(250)
+            }
         } catch (e: Throwable) {
             standDown(pid, "could not run setprop ctl.restart $procName: ${e.message}")
         }
@@ -286,7 +331,7 @@ class Injector(private val moduleDir: File) {
         return try {
             val stat = File("/proc/$pid/stat").readText()
             val fields = stat.substringAfterLast(')').trim().split(' ')
-            // field 22 overall is the 20th after state, which is index 19 here.
+            // The list starts at field 3 (state), so field 22 is index 19.
             fields[19].toLong()
         } catch (e: Exception) {
             -1L

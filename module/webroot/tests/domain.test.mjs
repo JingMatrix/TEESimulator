@@ -252,3 +252,11 @@ for (const [re, good, bad] of cases) {
     for (const b of bad) assert.equal(re.test(b), false, `expected ${re} to reject ${JSON.stringify(b)}`);
   });
 }
+
+test("validateProfile rejects an all-zero verified boot hash, as the daemon does", () => {
+  const p = validProfile();
+  p.verifiedBootHash = "0".repeat(64);
+  assert.ok(validateProfile("default", p).some((e) => e.field === "verifiedBootHash"));
+  p.verifiedBootHash = "f".repeat(64);
+  assert.ok(!validateProfile("default", p).some((e) => e.field === "verifiedBootHash"));
+});

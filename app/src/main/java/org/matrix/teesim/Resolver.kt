@@ -133,7 +133,8 @@ object Resolver {
         Levels(
             osVersion =
                 when {
-                    p.osVersion.isBlank() -> harvest.osVersion
+                    p.osVersion.isBlank() || p.osVersion.equals("harvested", true) ->
+                        harvest.osVersion
                     p.osVersion.equals("system_property", true) -> DeviceProps.propOsVersion()
                     else -> DeviceProps.parseOsVersion(p.osVersion)
                 },
@@ -194,9 +195,8 @@ object Resolver {
         if (ids.length() > 0) o.put("deviceIds", ids)
 
         // The root of trust this profile attests, when it is not the device-wide one in bootInfo: a
-        // spoof the profile names, or the hash its keybox states. It is also an input to the TA's
-        // key-encryption key, so the profile's generation-mode blobs follow it (see
-        // ConfigStore.ProfileConfig.verifiedBootHash); patch mode keeps the real key untouched.
+        // spoof the profile names, or the hash its keybox states. Attested only: the TA's
+        // key-encryption key does not depend on it, so keys survive a change to it.
         val bootHash = ProfileDefaults.bootHash(p, harvest, defaults)
         if (!bootHash.contentEquals(harvest.effectiveBootHash())) {
             o.put("verifiedBootHash", b64.encodeToString(bootHash))

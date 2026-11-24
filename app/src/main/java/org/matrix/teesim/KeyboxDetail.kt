@@ -43,8 +43,8 @@ import org.json.JSONObject
  *   `<CertificateChain>` and nothing in the file ties them together, so a mismatched pair parses
  *   perfectly and only fails later, at signing time, with no explanation. It is settled here by
  *   signing a fixed probe and verifying it against the leaf's public key: that is a proof of
- *   correspondence rather than a comparison of encodings, and it holds for every key type without
- *   special-casing any of them.
+ *   correspondence rather than a comparison of encodings, for the two key types a keybox carries,
+ *   RSA and EC.
  * * **Is the subjectKeyIdentifier the digest RFC 5280 asks for.** Method 1 defines it as the SHA-1
  *   of the subjectPublicKey BIT STRING, and Google's and AOSP's certificates all follow it, so it
  *   can be recomputed — and a certificate whose identifier does not match the key it carries has
@@ -116,21 +116,6 @@ object KeyboxDetail {
         mapOf("1.3.6.1.5.5.7.48.1" to "OCSP", "1.3.6.1.5.5.7.48.2" to "caIssuers")
 
     /**
-     * provisioningInfo's integer keys. The structure is not published, so these labels are read off
-     * what the field holds in practice; one that keeps a question mark is a plausible reading
-     * rather than a known meaning, which is still better to show than a bare "key 3".
-     *
-     * The nested map under key 5 is laid out as pairs: an odd key states a verdict on one attribute
-     * of the device, and the even key after it carries the value that verdict was passed on. A
-     * negative verdict comes with no value at all — the issuer records that it refused, not what it
-     * refused — which is why a map can hold a verdict alone but never a value alone.
-     *
-     * Key 1 is not a count of anything cumulative: it only ever takes powers of two, and the same
-     * device is issued different ones over time, so it reads as the size of the batch rather than a
-     * running total. Key 3 names the device's manufacturer — not its brand, which on some devices
-     * is a different string entirely — and is only ever present where no fingerprint is.
-     */
-    /**
      * provisioningInfo keys. Only 1 and 4 are documented by Google, and the map is explicitly
      * unversioned, so 3 and 5 are readings — what each rests on is in the comment above it. A key
      * with no reading at all is shown by its number rather than guessed at.
@@ -140,7 +125,8 @@ object KeyboxDetail {
             // Documented: "an approximate number of certificates issued to the device in the last
             // 30 days", offered to relying parties as an abuse signal.
             1L to "certificates issued in the last 30 days",
-            // Read: a manufacturer name, present only where no fingerprint is.
+            // Read: a manufacturer name — not the brand, which on some devices is a different
+            // string — present only where no fingerprint is.
             3L to "manufacturer",
             // Documented: the certified origin of the attested key, vouched for by the chipset
             // manufacturer — STRONG_BOX or TEE. (Keyboxes seen in the wild carry it in the leaf's
@@ -154,7 +140,9 @@ object KeyboxDetail {
     /**
      * The entries of key 5, which read as two (verdict, subject) pairs: the issuer approving an
      * attribute of the device, and the value it passed that verdict on. The pairing is inference
-     * from the ordering; only the fingerprint's content is self-evident.
+     * from the ordering; only the fingerprint's content is self-evident. A negative verdict comes
+     * with no value — the issuer records that it refused, not what it refused — so a verdict can
+     * appear alone but a value never does.
      */
     private val PROVISIONING_SUBFIELDS =
         mapOf(
@@ -209,10 +197,18 @@ object KeyboxDetail {
         return out
     }
 
+    /**
+     * The certificate's own SubjectPublicKeyInfo, as encoded in it. `cert.publicKey.encoded` is a
+     * provider's re-encoding, which turns a compressed EC point into an uncompressed one and so
+     * changes the bytes the subjectKeyIdentifier is a digest of.
+     */
+    private fun spkiOf(cert: X509Certificate): SubjectPublicKeyInfo =
+        org.bouncycastle.asn1.x509.Certificate.getInstance(cert.encoded).subjectPublicKeyInfo
+
     /** The named curve of an EC certificate, by the OID in its SubjectPublicKeyInfo. */
     private fun curveOf(cert: X509Certificate): String? =
         try {
-            val spki = SubjectPublicKeyInfo.getInstance(cert.publicKey.encoded)
+            val spki = spkiOf(cert)
             val oid = ASN1ObjectIdentifier.getInstance(spki.algorithm.parameters)
             ECNamedCurveTable.getName(oid) ?: oid.id
         } catch (_: Exception) {
@@ -227,7 +223,7 @@ object KeyboxDetail {
         val present = extensionOctets(cert, OID_SKI) ?: return null
         return try {
             val id = SubjectKeyIdentifier.getInstance(present).keyIdentifier
-            val spki = SubjectPublicKeyInfo.getInstance(cert.publicKey.encoded)
+            val spki = spkiOf(cert)
             val expected = MessageDigest.getInstance("SHA-1").digest(spki.publicKeyData.bytes)
             val matches = id.contentEquals(expected)
             JSONObject().put("value", hex(id)).put("isPublicKeySha1", matches).apply {
@@ -311,11 +307,6 @@ object KeyboxDetail {
     }
 
     /**
-     * provisioningInfo, decoded: every key the map carries, flattened one level with the nested
-     * map's entries indented by their label. There is no one-line summary — it could only repeat
-     * rows that are listed here anyway.
-     */
-    /**
      * What an RKP keybox states about the device it was provisioned for, in the fields the module
      * can be consistent with: the verified boot hash its issuer recorded, the manufacturer, and the
      * build fingerprint. Every field is optional — a factory keybox carries no provisioningInfo at
@@ -373,10 +364,11 @@ object KeyboxDetail {
             val raw = extensionOctets(cert, OID_PROVISIONING) ?: continue
             val decoded = Cbor.decode(raw) as? Map<*, *> ?: continue
             val device = decoded[5L] as? Map<*, *>
-            // 5.2 is the hash as 64 lowercase hex characters; anything else is not one.
+            // 5.2 is the hash as 64 lowercase hex characters; anything else, all zeros included,
+            // is not one.
             val hash =
                 (device?.get(2L) as? String)
-                    ?.takeIf { HEX64.matches(it) }
+                    ?.takeIf { HEX64.matches(it) && it.any { c -> c != '0' } }
                     ?.let { hex ->
                         ByteArray(32) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
                     }
@@ -393,6 +385,10 @@ object KeyboxDetail {
 
     private val HEX64 = Regex("^[0-9a-f]{64}$")
 
+    /**
+     * provisioningInfo as the inspector shows it: every key the map carries, nested maps kept
+     * nested and labelled where a reading exists, so nothing is summarised away.
+     */
     private fun provisioning(cert: X509Certificate): JSONObject? {
         val raw = extensionOctets(cert, OID_PROVISIONING) ?: return null
         val decoded = Cbor.decode(raw)
@@ -405,24 +401,25 @@ object KeyboxDetail {
                         .put(row("raw", hex(raw, 16))),
                 )
         }
-        return JSONObject().put("fields", provisioningFields(decoded, 0))
+        return JSONObject().put("fields", provisioningFields(decoded, PROVISIONING_FIELDS))
     }
 
     /**
      * One level of the provisioningInfo map, as rows. A key whose value is itself a map becomes a
      * row carrying its own `fields` rather than a value, so the shape of the extension survives
      * into the view instead of being flattened into a list with a count standing in for the
-     * nesting. [depth] selects the labels: the map's own keys at the top, the entries of key 5
-     * below it, and nothing documented or read any deeper, where a key is shown by its number.
+     * nesting. [names] labels this map's keys: the documented ones at the top, those of key 5's
+     * entries below it, and none anywhere else, where a key is shown by its number.
      */
-    private fun provisioningFields(map: Map<*, *>, depth: Int): JSONArray {
+    private fun provisioningFields(map: Map<*, *>, names: Map<Long, String>?): JSONArray {
         val out = JSONArray()
         for ((k, v) in map) {
-            val names = if (depth == 0) PROVISIONING_FIELDS else PROVISIONING_SUBFIELDS
-            val label = (if (depth <= 1) names[k as? Long] else null) ?: "key $k"
+            val label = names?.get(k as? Long) ?: "key $k"
             if (v is Map<*, *>) {
+                val inner =
+                    if (names === PROVISIONING_FIELDS && k == 5L) PROVISIONING_SUBFIELDS else null
                 out.put(
-                    JSONObject().put("label", label).put("fields", provisioningFields(v, depth + 1))
+                    JSONObject().put("label", label).put("fields", provisioningFields(v, inner))
                 )
             } else {
                 out.put(row(label, value(v)))
@@ -445,13 +442,47 @@ object KeyboxDetail {
 
     // --- Private keys -------------------------------------------------------------------
 
+    /** The group order of NIST P-256, which tells that curve from any other of the same size. */
+    private val P256_ORDER =
+        java.math.BigInteger("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16)
+
+    /** Longer than any key a keybox carries; past it the text is not read, only refused. */
+    private const val MAX_PEM_CHARS = 64 * 1024
+
+    class PemBlock(val label: String, val body: String)
+
     /**
-     * What the `<PrivateKey>` block holds and whether it belongs to [leaf]. [algorithmAttr] is the
-     * `<Key algorithm>` attribute, which is checked against the key actually found rather than
-     * trusted. Never returns key material.
+     * Every `-----BEGIN X----- … -----END X-----` block in [text], found by a linear scan. A
+     * backtracking regex was quadratic on a hostile file — tens of seconds for one inspect — and
+     * the text is capped for the same reason.
      */
-    private val PEM_BLOCK =
-        Regex("-----BEGIN ([^-]+)-----(.*?)-----END \\1-----", RegexOption.DOT_MATCHES_ALL)
+    fun pemBlocks(text: String): List<PemBlock> {
+        if (text.length > MAX_PEM_CHARS) return emptyList()
+        val out = ArrayList<PemBlock>()
+        var at = 0
+        while (true) {
+            val begin = text.indexOf("-----BEGIN ", at)
+            if (begin < 0) break
+            val labelEnd = text.indexOf("-----", begin + 11)
+            if (labelEnd < 0) break
+            val label = text.substring(begin + 11, labelEnd).trim()
+            val endMarker = "-----END $label-----"
+            val end = text.indexOf(endMarker, labelEnd + 5)
+            if (end < 0) break
+            out.add(PemBlock(label, text.substring(labelEnd + 5, end)))
+            at = end + endMarker.length
+        }
+        return out
+    }
+
+    /**
+     * The block a `<PrivateKey>` means: the one whose label names a private key, since `openssl
+     * ecparam -genkey` writes an `EC PARAMETERS` block in front of it; else the first.
+     */
+    private fun keyBlock(text: String): PemBlock? =
+        pemBlocks(text).let { all ->
+            all.firstOrNull { it.label.endsWith("PRIVATE KEY") } ?: all.firstOrNull()
+        }
 
     /**
      * Rebuild a PEM block as 64-column base64. Keyboxes travel through chat channels, and what
@@ -461,9 +492,9 @@ object KeyboxDetail {
      * rather than refused.
      */
     private fun normalizePem(text: String): String {
-        val m = PEM_BLOCK.find(text.trim()) ?: return text.trim()
-        val label = m.groupValues[1].trim()
-        val body = m.groupValues[2].replace(Regex("\\s"), "")
+        val block = keyBlock(text) ?: return text.trim()
+        val label = block.label
+        val body = block.body.replace(Regex("\\s"), "")
         return buildString {
             append("-----BEGIN ").append(label).append("-----\n")
             var i = 0
@@ -475,16 +506,19 @@ object KeyboxDetail {
         }
     }
 
+    /**
+     * What the `<PrivateKey>` block holds and whether it belongs to [leaf]. [algorithmAttr] is the
+     * `<Key algorithm>` attribute, which is checked against the key actually found rather than
+     * trusted. Never returns key material.
+     */
     fun privateKey(pem: String?, algorithmAttr: String, leaf: X509Certificate?): JSONObject {
         val out = JSONObject().put("present", pem != null)
         if (pem == null) return out
-        val label =
-            pem.lineSequence()
-                .map { it.trim() }
-                .firstOrNull { it.startsWith("-----BEGIN") }
-                ?.removePrefix("-----BEGIN ")
-                ?.removeSuffix("-----")
-                ?.trim()
+        if (pem.length > MAX_PEM_CHARS)
+            return out.put("error", "the PrivateKey element is too long to be a key")
+        // From the parsed block, not the first line: a one-line PEM would otherwise put the whole
+        // base64 body into the label.
+        val label = keyBlock(pem)?.label
         if (label != null) {
             out.put("pemLabel", label)
             out.put(
@@ -504,7 +538,9 @@ object KeyboxDetail {
                 val parsed = PEMParser(StringReader(normalizePem(pem))).readObject()
                 val conv = JcaPEMKeyConverter().setProvider("BC")
                 when (parsed) {
-                    is PEMKeyPair -> conv.getKeyPair(parsed).private
+                    // Only the private half: an EC key may omit its optional public point, which
+                    // getKeyPair would trip over and BoringSSL derives.
+                    is PEMKeyPair -> conv.getPrivateKey(parsed.privateKeyInfo)
                     is org.bouncycastle.asn1.pkcs.PrivateKeyInfo -> conv.getPrivateKey(parsed)
                     is PKCS8EncryptedPrivateKeyInfo -> {
                         out.put("error", "the private key is encrypted; no passphrase to open it")
@@ -546,23 +582,47 @@ object KeyboxDetail {
                 else -> type
             }
         out.put("algorithmAgrees", expected == type)
-        if (leaf != null) out.put("matchesLeaf", provesOwnership(key, type, leaf))
+        taProblem(label, type, (key as? ECPrivateKey)?.params?.order == P256_ORDER)?.let {
+            out.put("taProblem", it)
+        }
+        // Left out rather than false for a key type the probe cannot sign with: having no verdict
+        // is not a mismatch.
+        if (leaf != null) provesOwnership(key, type, leaf)?.let { out.put("matchesLeaf", it) }
         return out
     }
+
+    /**
+     * Why the simulator's TA could not sign with a key this inspector reads fine, or null when it
+     * can. The TA hands the decoded bytes straight to BoringSSL's SEC1 parser for EC (bound to
+     * P-256) and its PKCS#1 parser for RSA, so a PKCS#8 wrapper or another curve loads without
+     * complaint and fails at the first attestation.
+     */
+    private fun taProblem(label: String?, type: String, isP256: Boolean): String? =
+        when {
+            type == "EC" && label != "EC PRIVATE KEY" ->
+                "the TA reads an EC key only as SEC1 (\"EC PRIVATE KEY\"); convert it with " +
+                    "openssl ec -in key.pem -out sec1.pem"
+            type == "RSA" && label != "RSA PRIVATE KEY" ->
+                "the TA reads an RSA key only as PKCS#1 (\"RSA PRIVATE KEY\"); convert it with " +
+                    "openssl rsa -in key.pem -traditional -out pkcs1.pem"
+            type == "EC" && !isP256 ->
+                "the TA signs with NIST P-256 only, and this key is on another curve"
+            else -> null
+        }
 
     /**
      * Whether [key] is the private half of [leaf]'s public key, settled by signing a fixed probe
      * and verifying it against the certificate. A false here is the one keybox fault that nothing
      * else in the inspector would catch, and it is fatal: every attestation signed with this key
-     * would carry a chain that cannot verify.
+     * would carry a chain that cannot verify. Null for a key type other than EC or RSA.
      */
-    private fun provesOwnership(key: PrivateKey, type: String, leaf: X509Certificate): Boolean =
+    private fun provesOwnership(key: PrivateKey, type: String, leaf: X509Certificate): Boolean? =
         try {
             val alg =
                 when (type) {
                     "EC" -> "SHA256withECDSA"
                     "RSA" -> "SHA256withRSA"
-                    else -> return false
+                    else -> return null
                 }
             val probe = "teesim keybox pairing probe".toByteArray()
             val signer = Signature.getInstance(alg, "BC")

@@ -279,11 +279,12 @@ void ApplyConfig(const tjson::Value &msg, uint64_t &epoch, int &applied, int &to
       for (const auto &p : s.uid_pkg_strings) s.uid_pkg_ptrs.push_back(p.c_str());
       if (const tjson::Value *ids = pj.get("deviceIds")) s.has_ids = FillDeviceIds(*ids, s);
       // Present only when this profile attests a root of trust of its own; absent means it shares
-      // the device-wide one. An undecodable value is dropped rather than passed on short: the TA
-      // would splice it into every chain it signs.
+      // the device-wide one. A value that does not decode to 32 bytes is dropped rather than
+      // passed on short: the TA would splice it into every chain it signs.
       if (const tjson::Value *vbh = pj.get("verifiedBootHash")) {
-        if (!Base64Decode(vbh->as_string(), s.vb_hash)) {
-          LOGE("ApplyConfig: profile %s has an undecodable verifiedBootHash; using the device's",
+        if (!Base64Decode(vbh->as_string(), s.vb_hash) || s.vb_hash.size() != 32) {
+          LOGE("ApplyConfig: profile %s has a verifiedBootHash that is not 32 bytes of base64; "
+               "using the device's",
                s.id.c_str());
           s.vb_hash.clear();
         }

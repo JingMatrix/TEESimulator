@@ -109,6 +109,26 @@ object App {
         }
     }
 
+    // The restore-props helper body (see main): what the daemon would have put back had it seen
+    // the claim dropped, run by stage.sh once the daemon is stopped. Every property props.json
+    // holds goes back to what it read before the first write, and ro.boot.vbmeta.* goes back to
+    // the harvested hash, which is what the daemon writes there when no profile claims it. Exit 0
+    // when every restore that was attempted took; with no harvest on disk, vbmeta is not touched.
+    private fun runRestoreProps(): Int {
+        PropStore.restoreAll()
+        var ok = PropStore.saved().isEmpty()
+        // With the user's overrides applied, as the daemon has it: an unusable captured boot key or
+        // hash may have been set in overrides.json, and that is what the daemon wrote.
+        Harvester.persisted()
+            ?.let { Harvester.applyUserOverrides(it, OverrideStore.load()) }
+            ?.let { h ->
+                for ((prop, value) in Harvester.bootPropValues(h, h.effectiveBootHash())) {
+                    if (DeviceProps.prop(prop, "") != value && !SysProp.set(prop, value)) ok = false
+                }
+            }
+        return if (ok) 0 else 1
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
         // Delete-helper mode (a child the daemon spawns to delete one key as its owning app — see
@@ -129,6 +149,9 @@ object App {
                     args[4],
                 )
             )
+        }
+        if (args.size == 1 && args[0] == "restore-props") {
+            kotlin.system.exitProcess(runRestoreProps())
         }
         // Taken before the first line is logged: the reader attaches to logd from this instant,
         // so everything below is captured even though the reader is still starting.
@@ -369,8 +392,8 @@ object App {
      */
     @Synchronized
     private fun resolveAndPush(): Int {
-        // The config is read first because it is what names the keybox, and the keybox has the
-        // last word on the boot hash below.
+        // The config is read first because it is what names the keybox, and the keybox's hash is
+        // the default for the boot hash below.
         try {
             lastGoodConfig = ConfigStore.load()
         } catch (e: ConfigStore.ConfigException) {
@@ -590,8 +613,17 @@ object App {
      *
      * Only a property the device already has is ever written: a name it does not carry is one
      * nothing on it reads, and inventing one would change the build's shape rather than what it
-     * says. The value each property had first is kept in [PropStore], which is what a restore and
-     * the next harvest read.
+     * says. And only one that, before we touched it, said what the harvest says: a property that
+     * legitimately differs — the system image's own `generic` device name, a frozen vendor image's
+     * older release — describes something else, and rewriting it would be the inconsistency. A
+     * device whose properties spell a value differently from its attestation therefore keeps them.
+     * The value each property had first is kept in [PropStore], which is what a restore and the
+     * next harvest read.
+     *
+     * This reaches getprop only. android.os.Build was loaded by zygote at boot, so apps keep seeing
+     * this device's values there. The framework also fills an id-attestation request's ids from
+     * those, and the TA refuses ids that differ from the profile's, so in generation mode such a
+     * profile fails that request (CANNOT_ATTEST_IDS) whether or not this runs.
      */
     private fun applyProfileProps(h: Harvester.Record, chosen: ConfigStore.ProfileConfig?) {
         val saved = PropStore.saved()
@@ -612,15 +644,21 @@ object App {
             for ((field, props) in Harvester.IDENTITY_PROPS) {
                 val value = ProfileDefaults.effective(chosen, field, defaults)
                 if (value.isBlank() || value == h.effective(field)) continue
-                for (prop in props) if (present(prop)) wanted[prop] = value
+                for (prop in props) {
+                    if (present(prop) && original(prop) == h.effective(field)) wanted[prop] = value
+                }
             }
             val levels = Resolver.levels(chosen, h)
             for (level in LEVEL_PROPS) {
                 val presented = level.presented(levels) ?: continue
-                if (presented == level.harvested(h)) continue
+                val harvested = level.harvested(h)
+                if (presented == harvested) continue
                 for (prop in level.props) {
                     if (!present(prop)) continue
-                    val text = level.text(presented, original(prop)) ?: continue
+                    val was = original(prop)
+                    // Spelled the way the harvested level would be, or it is not this one's echo.
+                    if (harvested == null || level.text(harvested, was) != was) continue
+                    val text = level.text(presented, was) ?: continue
                     wanted[prop] = text
                 }
             }
@@ -639,11 +677,25 @@ object App {
                 val ok = if (was.isEmpty()) SysProp.delete(name) else SysProp.set(name, was)
                 SystemLogger.info(
                     "App: system prop $name back to this device's own " +
-                        "'${was.ifEmpty { "unset" }}'${if (ok) "" else " (failed)"}"
+                        PropStore.shown(name, was) +
+                        if (ok) "" else " (failed)"
                 )
+                // A failed restore leaves our value in place, so the original is still ours to
+                // put back; dropping it here would lose it for good.
+                if (!ok) holding[name] = was
             }
         }
+        // Write-ahead: every original is on disk before the first resetprop, so a daemon killed
+        // mid-loop (a hot install stopping it) leaves nothing written that the next start's
+        // restoreAll cannot put back. An entry whose write then does not happen is the device's
+        // own value, and restoring it is a no-op; the final keep() below drops it. When the store
+        // cannot be written, nothing new is spoofed: an original not on disk is one the next push
+        // would read back as our own value, and lose.
+        val ahead = LinkedHashMap(holding)
+        for (name in wanted.keys) ahead.getOrPut(name) { saved[name] ?: DeviceProps.prop(name, "") }
+        val recorded = PropStore.keep(ahead)
         for ((name, value) in wanted) {
+            if (!recorded && name !in saved) continue
             val live = DeviceProps.prop(name, "")
             // What has to be put back: the value from before we ever wrote this property. Once
             // SysProp.set has run the property reads OUR value, so it is read -- or recalled from
@@ -656,11 +708,14 @@ object App {
                 if (name in saved) holding[name] = was
                 continue
             }
-            if (SysProp.set(name, value)) {
-                holding[name] = was
+            val ok = SysProp.set(name, value)
+            // Held on success, and also on a failed re-write of a property an earlier push already
+            // wrote: it still reads our older value, which `was` is the way back from.
+            if (ok || name in saved) holding[name] = was
+            if (ok) {
                 SystemLogger.info(
-                    "App: system prop $name forced to '$value' for profile " +
-                        "'${chosen?.id ?: "-"}' (was '${was.ifEmpty { "unset" }}')"
+                    "App: system prop $name forced to ${PropStore.shown(name, value)} for profile " +
+                        "'${chosen?.id ?: "-"}' (was ${PropStore.shown(name, was)})"
                 )
             }
         }
@@ -669,15 +724,16 @@ object App {
 
     /**
      * Force the matching ro.boot.vbmeta.* property to the boot key/hash we actually PRESENT (the
-     * override when one is active, else the real captured value), so anything reading those props
-     * directly sees exactly what attestation reports. We compare against the LIVE property and
-     * overwrite it on any mismatch — the value we attest wins unconditionally, whether the property
-     * was empty (some bootloaders never populate ro.boot.vbmeta.digest — unlocked /
-     * verification-disabled / OEM AVB, #228), stale, or changed by another module. A match is left
-     * untouched, so a steady state does no work.
+     * hash of the profile that applies properties — its own spoof, else its keybox's, else the
+     * harvest's — or the harvest's when none does), so anything reading those props directly sees
+     * exactly what attestation reports. We compare against the LIVE property and overwrite it on
+     * any mismatch — the value we attest wins unconditionally, whether the property was empty (some
+     * bootloaders never populate ro.boot.vbmeta.digest — unlocked / verification-disabled / OEM
+     * AVB, #228), stale, or changed by another module. A match is left untouched, so a steady state
+     * does no work.
      *
-     * These two are not held in [PropStore]: the value written is the one being attested, which on
-     * a device whose bootloader populates them honestly is the device's own, and the harvest
+     * These two are not held in [PropStore]: when no profile claims them they are written back to
+     * the harvest's value rather than to what the property read before, and the harvest
      * deliberately does not read ro.boot.vbmeta.digest back.
      */
     private fun applyBootProps(h: Harvester.Record, chosen: ConfigStore.ProfileConfig?) {

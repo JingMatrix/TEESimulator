@@ -70,9 +70,9 @@ typedef struct {
   const char *const *uid_packages;
   // The verified boot hash THIS profile attests, when it is not the device-wide one above: a value
   // the profile spoofs, or the one its RKP keybox states about the device it was provisioned for.
-  // NULL/0 means "the device-wide hash". It is the profile's root of trust and an input to its TA's
-  // key-encryption key, so a profile attesting its own hash also encrypts its generation-mode blobs
-  // under its own key -- they stop decrypting if it changes, and come back when it returns.
+  // NULL/0 means "the device-wide hash". It is what the profile's attestations state as the root
+  // of trust's hash; it does not enter the key-encryption key (kmr-ta builds that from the boot
+  // key, state and lock flag alone), so blobs decrypt under every profile whatever their hashes.
   const uint8_t *verified_boot_hash;
   size_t verified_boot_hash_len;
 } TsProfile;

@@ -125,7 +125,6 @@
    read as one kind of thing down the editor. */
 .group { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 0; display: flex; flex-direction: column; gap: 14px; }
 .group-head { margin: 0; font-size: 15px; font-weight: 600; color: var(--fg); }
-.group-note { margin: -4px 0 0; }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
 /* Label on the left, the source of this field's default on the right: one row instead of a line
@@ -291,7 +290,6 @@ button.chip.chip-tap { border: 0; font-family: inherit; cursor: pointer; }
 .disclosure-chevron { flex: none; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform .15s; }
 .disclosure-head.open .disclosure-chevron { transform: rotate(-135deg); }
 .disclosure-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 14px; }
-.disclosure-body > .group-note { margin: 0 0 2px; }
 
 /* --- segmented control -------------------------------------------------- */
 .segmented { display: inline-flex; background: var(--chip); border-radius: var(--radius-sm); padding: 3px; gap: 3px; align-self: flex-start; }
@@ -524,6 +522,7 @@ html, body { overscroll-behavior-y: contain; }
 .kbi-node::before { content: ""; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--line); }
 .kbi-node:first-child::before { top: 18px; }
 .kbi-node:last-child::before { bottom: auto; height: 18px; }
+.kbi-node:only-child::before { display: none; }
 .kbi-node-dot {
   position: absolute; left: 1px; top: 8px; z-index: 1;
   width: 20px; height: 20px; border-radius: 50%;
@@ -580,7 +579,6 @@ html, body { overscroll-behavior-y: contain; }
 /* A resolved default can be a 64-character hash, which has no break opportunity of its own and
  * would otherwise run off the panel. */
 .resolve-hint { overflow-wrap: anywhere; }
-.resolve-hint.missing { color: var(--warn); }
 /* A default the keybox states, not one this device reported: the editor's one cue that a field
  * left empty will attest something other than what the System screen shows. */
 .resolve-hint.from-keybox { color: var(--accent); }

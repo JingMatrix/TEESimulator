@@ -65,6 +65,13 @@ export function validateProfile(name, profile) {
     }
   }
 
+  // Mirrors ConfigStore: all zeros is what a device with no verified boot reports, and the daemon
+  // refuses the whole config over it, so say so here rather than let Save fail.
+  const hash = profile.verifiedBootHash;
+  if (typeof hash === "string" && /^0{64}$/.test(hash)) {
+    errors.push({ field: "verifiedBootHash", msg: "All zeros is what a device with no verified boot reports; attestation is refused for it." });
+  }
+
   return errors;
 }
 

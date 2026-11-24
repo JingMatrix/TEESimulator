@@ -44,6 +44,14 @@ object Cbor {
             return b[pos++].toInt() and 0xff
         }
 
+        /** The next [width] bytes, big-endian, as raw bits: a float's, or an argument's. */
+        private fun bits(width: Int): Long {
+            need(width)
+            var v = 0L
+            repeat(width) { v = (v shl 8) or (b[pos++].toLong() and 0xff) }
+            return v
+        }
+
         /** The argument encoded in [info], per RFC 8949 §3; 31 (indefinite) is the caller's job. */
         private fun argument(info: Int): Long {
             if (info < 24) return info.toLong()
@@ -55,9 +63,7 @@ object Cbor {
                     27 -> 8
                     else -> throw Malformed() // 28..30 are reserved, 31 handled by the caller
                 }
-            need(width)
-            var v = 0L
-            repeat(width) { v = (v shl 8) or (b[pos++].toLong() and 0xff) }
+            val v = bits(width)
             if (v < 0) throw Malformed() // a 64-bit argument past Long.MAX_VALUE
             return v
         }
@@ -81,8 +87,8 @@ object Cbor {
             return when (major) {
                 0 -> argument(info)
                 1 -> -1L - argument(info)
-                2 -> bytes(info, depth)
-                3 -> String(bytes(info, depth), Charsets.UTF_8)
+                2 -> bytes(major, info)
+                3 -> String(bytes(major, info), Charsets.UTF_8)
                 4 -> array(info, depth)
                 5 -> map(info, depth)
                 6 -> {
@@ -97,15 +103,21 @@ object Cbor {
                         23 -> null // null and undefined both read as absent
                         25 -> halfFloat()
                         26 -> Float.fromBits(argument(26).toInt()).toDouble()
-                        27 -> Double.fromBits(argument(27))
+                        27 -> Double.fromBits(bits(8)) // a negative one has the top bit set
+                        // A one-byte simple value is well-formed from 32 up (RFC 8949 §3.3).
+                        24 -> u8().takeIf { it >= 32 }?.toLong() ?: throw Malformed()
                         else -> if (info < 20) argument(info) else throw Malformed()
                     }
                 else -> throw Malformed()
             }
         }
 
-        /** A byte string, joining the chunks of an indefinite-length one. */
-        private fun bytes(info: Int, depth: Int): ByteArray {
+        /**
+         * The raw bytes of a byte or text string ([major] 2 or 3), joining the chunks of an
+         * indefinite-length one. Each chunk must be a definite string of the same major type (RFC
+         * 8949 §3.2.3): no tags, no nesting, and no text inside bytes or the reverse.
+         */
+        private fun bytes(major: Int, info: Int): ByteArray {
             if (info != 31) {
                 val n = count(info)
                 val out = b.copyOfRange(pos, pos + n)
@@ -113,11 +125,11 @@ object Cbor {
                 return out
             }
             val parts = ArrayList<ByteArray>()
-            while (true) {
-                if (peekBreak()) break
-                val part = item(depth + 1)
-                if (part !is ByteArray) throw Malformed()
-                parts.add(part)
+            while (!peekBreak()) {
+                val head = u8()
+                val chunkInfo = head and 0x1f
+                if (head shr 5 != major || chunkInfo == 31) throw Malformed()
+                parts.add(bytes(major, chunkInfo))
             }
             val out = ByteArray(parts.sumOf { it.size })
             var at = 0
@@ -150,7 +162,7 @@ object Cbor {
                 return out
             }
             val n = argument(info)
-            if (n * 2 > b.size - pos) throw Malformed() // one byte minimum per key and value
+            if (n > (b.size - pos) / 2) throw Malformed() // one byte minimum per key and value
             repeat(n.toInt()) {
                 val k = item(depth + 1)
                 out[key(k)] = item(depth + 1)

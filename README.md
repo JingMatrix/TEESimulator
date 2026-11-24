@@ -42,16 +42,16 @@ Killing the keystore daemon (`su -c 'kill $(pidof keystore2)'` on Android 12+, `
 
 Nothing the module installs waits for a boot stage — it mounts no partition and ships no `system.prop`, and the daemon injects whatever keystore process it finds — so an install can take effect on the system that is already running. Which path a device has depends on its root manager:
 
-* *KernelSU* installs it in place. The installer asks for a hot install, `ksud` swaps the module directory and runs `hotinstall.sh`, and the daemon takes over from there.
-* *Magisk, APatch,* and a KernelSU too old for that path need one command:
+* A *KernelSU* whose `ksud` supports hot install installs it in place. The installer asks for a hot install, `ksud` swaps the module directory and runs `hotinstall.sh`, and the daemon takes over from there.
+* *Magisk, APatch,* and a KernelSU without that path stage the new build in `modules_update` until the next boot, and arm it with one command — the installer prints the exact path:
 
   ```sh
-  su -c /data/adb/modules/teesim/late-load.sh
+  su -c /data/adb/modules_update/teesim/late-load.sh
   ```
 
-  `ksud late-load` runs the same script by itself. `--stop` is the reverse: it stops the daemon and restarts the keystore service, leaving the system carrying no interceptor at all.
+  Once the module has been through a boot it lives in `/data/adb/modules/teesim`, and the script is run from there. `ksud late-load` runs the same script by itself. `--stop` is the reverse: it stops the daemon, puts back the system properties a profile wrote, and restarts the keystore service, leaving the system carrying no interceptor at all.
 
-Both arm the running system, and both have one thing a reboot does not: the keystore process in front of them may already carry an interceptor, which no library is ever unloaded from or injected over. When that one is *this* build's — a daemon that crashed and respawned, or a second `late-load.sh` — the daemon adopts it and nothing restarts. When it is an older build's, as after an update, the daemon restarts the keystore service and injects the new one into the fresh process, and apps may see a transient keystore error as it goes down. The stage prints which of the two happened — and when `ksud` runs it for you, at boot or on a hot install, there is no shell for it to print to, so the same lines go to the device log and show up in the daemon's log and the WebUI's Logs panel.
+Both arm the running system, and both have one thing a reboot does not: the keystore process in front of them may already carry an interceptor, which no library is ever unloaded from or injected over. When that one is *this* build's — a daemon that crashed and respawned, or a second `late-load.sh` — the daemon adopts it and nothing restarts. When it is an older build's, as after an update, the daemon restarts the keystore service and injects the new one into the fresh process, and apps may see a transient keystore error as it goes down. The stage prints which of the two happened, into the install log on a hot install — and when `ksud late-load` runs it at boot there is nothing to print to, so the same lines also go to the device log and show up in the daemon's log and the WebUI's Logs panel.
 
 A reboot is still needed for one case the installer reports: a *TrickyStore* that was active on this boot keeps its own keystore hook until the keystore daemon restarts, so the installer disables it and asks for the reboot rather than hot-installing over it.
 
@@ -75,31 +75,31 @@ A schema version and a map of named profiles. Each targeted package must appear 
       "manufacturer": "", "model": "",
       "serial": "", "imei": "", "meid": "", "imei2": "",
       "verifiedBootHash": "",                // empty = the keybox's, else this device's; or 64 hex characters
-      "applyProperties": true,               // also write what this profile attests into the matching system properties
+      "applyProperties": false,              // opt-in: also write what this profile attests into the system properties
       "apps": ["com.google.android.gms", "com.android.vending"]
     }
   }
 }
 ```
 
-Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Every other field states what this profile attests, and what it leaves empty takes a default from one of two places. An RKP keybox records the device it was *provisioned* for — its verified boot hash, its manufacturer, and a build fingerprint, which spells out the brand, product and device names — and that comes first, because attesting this device's own values under such a keybox contradicts the keybox signing the chain. Everything it does not state falls back to the harvest: the value captured from the real TEE, or the one read from the OS when the attested leaf carried none, so an app asking the keystore to attest the device's real ids gets a matching answer. A field with neither is omitted rather than sent as a made-up default, and the editor's hint under each empty field names the value and which of the two sources it came from.
+Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month for the system level and today's date for vendor and boot; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Every other field states what this profile attests, and what it leaves empty takes a default from one of two places. An RKP keybox records the device it was *provisioned* for — its verified boot hash, its manufacturer, and a build fingerprint, which spells out the brand, product and device names — and that comes first, because attesting this device's own values under such a keybox contradicts the keybox signing the chain. Everything it does not state falls back to the harvest: the value captured from the real TEE, or the one read from the OS when the attested leaf carried none, so an app asking the keystore to attest the device's real ids gets a matching answer. A field with neither is omitted rather than sent as a made-up default, and the editor's hint under each empty field names the value and which of the two sources it came from.
 
-`verifiedBootHash` is the profile's root of trust. It is also an input to the key-encryption key the simulator's TA derives, so a profile that changes it cannot read back the generation-mode keys minted under the previous hash — they return when it does, and patch mode keeps the real hardware key and is unaffected.
+`verifiedBootHash` is the hash the profile's root of trust attests. Only the attestation carries it: the key-encryption key the simulator's TA derives comes from the boot key, state and lock flag above, so changing the hash leaves every stored key readable.
 
-`applyProperties` decides whether what a profile attests is also what the device *says*. Attestation and the system properties are read by different code — an app can ask the keystore to attest the device ids and then read `ro.product.model` for itself — so a profile whose values differ from this device's own leaves the two disagreeing. With the flag set, every id, patch level and OS version the profile presents that differs from the harvest is written into the properties it is read from, and `ro.boot.vbmeta.digest` follows the hash the profile attests. Only a property this device already carries is written: a name it does not have is one nothing on it reads, and inventing one would change the build's shape rather than what it says. There is a single set of properties, so at most one profile may claim them (the daemon rejects a second); an absent flag means the profile named `default`, or the only one a single-profile configuration has, which is what the daemon did before the flag existed.
+`applyProperties` (opt-in, off unless stated) decides whether what a profile attests is also what `getprop` *says*. With the flag set, every id, patch level and OS version the profile presents that differs from the harvest is written into the system properties it is read from, and `ro.boot.vbmeta.digest` follows the hash the profile attests; without it, the daemon writes only the harvested `ro.boot.vbmeta.*` values, as it always has. A property is written only where this device already carries it *and* it says what the harvest says: a name the device does not have is one nothing on it reads, and one that legitimately differs — the system image's own `generic` device name, a frozen vendor image's older release — describes something else. There is a single set of properties, so at most one profile may claim them (the daemon rejects a second).
 
-Nothing written this way is permanent. `resetprop` lives in memory, so a reboot restores every property on its own, and the daemon records what each one read before it first wrote it (`props.json`, scoped to one boot) so it can put them back — when a profile stops claiming a value, and before it harvests, which is what keeps the capture a reading of *this* device even when the daemon is restarted into a system it has already spoofed.
+Nothing written this way is permanent. `resetprop` lives in memory, so a reboot restores every property on its own, and the daemon records what each one read before it first wrote it (`props.json`, scoped to one boot) so it can put them back — when a profile stops claiming a value, when `late-load.sh --stop` disarms the module, and before it harvests, which is what keeps the capture a reading of *this* device even when the daemon is restarted into a system it has already spoofed.
 
 ### `keybox.xml`
 
-A keybox carries the private keys and certificate chains the simulator signs with. It must contain *at least one* of an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` and a `CertificateChain` of two certificates or more — a factory keybox carries both, while one extracted from RKP carries only the EC key. An attested key is signed by the batch key of its own algorithm where the keybox has it, and by the other one where it does not:
+A keybox carries the private keys and certificate chains the simulator signs with. It must contain *at least one* of an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` — SEC1 (`EC PRIVATE KEY`) or PKCS#1 (`RSA PRIVATE KEY`), the encodings the TA signs with; the WebUI's keybox inspector flags a PKCS#8 one — and a `CertificateChain` of two certificates or more — a factory keybox carries both, while one extracted from RKP carries only the EC key. An attested key is signed by the batch key of its own algorithm where the keybox has it, and by the other one where it does not:
 
 ```xml
 <?xml version="1.0"?>
 <AndroidAttestation>
   <Keybox DeviceID="...">
     <Key algorithm="rsa">
-      <PrivateKey format="pem">-----BEGIN PRIVATE KEY-----...</PrivateKey>
+      <PrivateKey format="pem">-----BEGIN RSA PRIVATE KEY-----...</PrivateKey>
       <CertificateChain>
         <Certificate format="pem">-----BEGIN CERTIFICATE-----...</Certificate>
         <!-- ...intermediate and root... -->

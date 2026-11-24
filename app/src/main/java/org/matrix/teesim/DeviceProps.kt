@@ -86,7 +86,7 @@ object DeviceProps {
      * only where a device happens to have one.
      *
      * These are for WRITING what a profile presents ([App.applySystemProps]); the daemon reads a
-     * level through [systemSecurityPatch]/[vendorSecurityPatch]/[propOsVersion] above, which is the
+     * level through [systemSecurityPatch]/[vendorSecurityPatch]/[propOsVersion] below, which is the
      * framework's own source for each.
      */
     val OS_PATCH_PROPS =
@@ -152,30 +152,46 @@ object DeviceProps {
         }
     }
 
-    /** The system security patch string, e.g. "2025-11-01". */
-    fun systemSecurityPatch(): String = Build.VERSION.SECURITY_PATCH ?: ""
+    /**
+     * [name] as this device has it: what it read before a profile first wrote it ([PropStore]),
+     * else the live value. The readers below go through this, because `system_property` and the
+     * harvest's fallbacks mean the device's own value, and the live one is ours once a profile
+     * applies its properties.
+     */
+    internal fun own(name: String, default: String = ""): String =
+        PropStore.saved()[name]?.takeIf { it.isNotEmpty() } ?: prop(name, default)
+
+    /**
+     * The system security patch string, e.g. "2025-11-01". Read from the property rather than
+     * Build.VERSION, which is fixed when the class first loads and would keep a spoof read then.
+     */
+    fun systemSecurityPatch(): String =
+        own("ro.build.version.security_patch", Build.VERSION.SECURITY_PATCH ?: "")
 
     fun vendorSecurityPatch(): String =
-        prop("ro.vendor.build.security_patch").ifBlank { systemSecurityPatch() }
+        own("ro.vendor.build.security_patch").ifBlank { systemSecurityPatch() }
 
     /**
      * Boot has no dedicated build property; use the vendor security patch, the closest real value.
      */
     fun bootSecurityPatch(): String = vendorSecurityPatch()
 
-    /** osVersion from getprop (ro.build.version.release), encoded, or null when unavailable. */
+    /**
+     * osVersion from ro.build.version.release — its original while this daemon holds a spoof in it
+     * — encoded, or null when unavailable.
+     */
     fun propOsVersion(): Int? =
-        parseOsVersion(prop("ro.build.version.release", Build.VERSION.RELEASE ?: ""))
+        parseOsVersion(own("ro.build.version.release", Build.VERSION.RELEASE ?: ""))
 
     /**
      * Resolve one patch-level component from the config mini-language to its integer encoding, or
      * null to mean "omit / not reported".
      *
      * An empty value reuses the value captured from the real TEE at harvest ([harvested]).
-     * Keywords: `system_property` (the matching build property from getprop, and nothing else),
-     * `today` (the current month/day), `no` (report 0), or an explicit `YYYY-MM` / `YYYY-MM-DD`
-     * date. A date may use the template tokens `YYYY` / `MM` / `DD`, resolved to today, so
-     * `YYYY-MM-05` tracks the calendar.
+     * Keywords: `system_property` (the matching build property, read as it was before any write of
+     * ours, and nothing else), `today` (the current month/day), `no` (report 0), or an explicit
+     * `YYYY-MM` / `YYYY-MM-DD` date. A date may use the template tokens `YYYY` / `MM` / `DD`,
+     * resolved to today, so `YYYY-MM-05` tracks the calendar.
      *
      * An empty harvested value or an absent build property reports nothing — the tag is omitted
      * rather than sent as a made-up default. component: "system" (YYYYMM), "vendor"/"boot"
@@ -185,7 +201,9 @@ object DeviceProps {
         val isYmd = component != "system"
         val v = language.trim()
         return when {
-            v.isEmpty() -> harvested
+            // `harvested` is the spelled-out form of the empty default, which the README and the
+            // WebUI both offer.
+            v.isEmpty() || v.equals("harvested", true) -> harvested
             v.equals("no", true) -> 0
             v.equals("system_property", true) -> {
                 val prop =

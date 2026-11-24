@@ -14,6 +14,13 @@ else
   exit 1
 fi
 
+# A second argument runs a one-shot helper mode of App.main instead of the daemon (stage.sh's
+# `restore-props`), under its own nice name so `pidof teesim` never mistakes it for the daemon.
+if [ -n "$2" ]; then
+  exec /system/bin/app_process -Djava.class.path="$CLASSPATH" "$MODDIR" \
+    --nice-name="teesim-$2" org.matrix.teesim.App "$2"
+fi
+
 # The trailing "$MODDIR" is args[0] to App.main, telling the daemon where the inject
 # binary and native libraries live.
 exec /system/bin/app_process -Djava.class.path="$CLASSPATH" "$MODDIR" \

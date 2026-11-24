@@ -110,7 +110,8 @@ export const FIELDS = [
     group: "attestation", type: "toggle", required: false, default: false,
     exclusive: "write the device's system properties",
     help: "Writes the ids, patch levels and OS version this profile attests into the properties " +
-      "they are read from — only ones this device already has, and never past a reboot.",
+      "they are read from — only ones this device has and that say what it attests, and never " +
+      "past a reboot.",
   },
   // --- security patch levels (folded away in the editor to keep it concise). Empty means
   //     "use the default", i.e. the harvested value — so these are optional, not required. ---

@@ -31,16 +31,17 @@
 #   hotinstall   Requested from customize.sh with MODULE_HOT_INSTALL_REQUEST and
 #                MODULE_HOT_RUN_SCRIPT. ksud moves the staged module directory over the live one,
 #                applies its sepolicy.rule, enters init's mount namespace and runs the named
-#                script with a 30 second deadline and stdin closed. Partition mounts, system.prop
+#                script from the installing process, stdin closed and stdout on the install log;
+#                it stops waiting after 30 seconds but does not kill the script. Partition mounts, system.prop
 #                and post-fs-data wait for the next boot, and no other stage runs — so whatever
 #                has to happen for the new build to take over has to happen here.
 #
 # A stage reports to stdout, where whoever triggered it is looking: the KernelSU and APatch
-# managers show the install log, and a hand-run late-load.sh prints to the shell. Two paths have
-# nobody there at all — `ksud late-load` and the hot install it runs from its own daemon both
-# discard the script's output — so every line also goes to logd under the TEESimulator tag, and
-# from there into the daemon's own log and the WebUI's Logs panel, which is where a reader after
-# the fact should look either way.
+# managers show the install log (a hot install's included), and a hand-run late-load.sh prints to
+# the shell. One path has nobody there at all — `ksud late-load` daemonizes and points the script's
+# output at /dev/null — so every line also goes to logd under the TEESimulator tag, and from there
+# into the daemon's own log and the WebUI's Logs panel, which is where a reader after the fact
+# should look either way.
 #
 #
 # What arming means here
@@ -56,10 +57,13 @@
 # SELinux: the module's sepolicy.rule is applied by the manager at post-fs-data, on a hot install,
 # and on `ksud late-load`. A plain install followed by a hand-run late-load.sh is the one path
 # where it has NOT been applied, and on an enforcing device the ptrace and socket denials that
-# follow make the injection fail. Nothing here can load the policy, so the verdict below reports
-# what actually happened rather than claiming success.
+# follow make the injection fail. That stage applies it itself through the manager's live-policy
+# tool where one is found (apply_policy), and the verdict below reports what actually happened
+# rather than claiming success.
 
-MODDIR=${0%/*}
+# Absolute, whichever way the shim was reached: the daemon and the supervisor are handed this path
+# and outlive the caller's working directory.
+MODDIR=$(cd "${0%/*}" 2>/dev/null && pwd) || exit 1
 DATA=/data/adb/teesim
 # The supervisor's pid, under the daemon's own 0700 directory. Its FileObserver matches by name
 # (config.json, overrides.json, *.xml), so a file here does not trip a re-resolve.
@@ -73,9 +77,11 @@ HOT_MARKER=$DATA/hotinstall.pending
 # is held by nobody, which is the whole bug this closes.
 LOCK=$DATA/stage.lock
 # The three waits a stage can spend, in seconds: on another stage finishing, on the previous daemon
-# going down, and on the new one getting the interceptor into the keystore daemon. Their sum is
-# what a hot install costs in the worst case, and it has to stay inside ksud's 30 second budget for
-# that stage.
+# going down, and on the new one getting the interceptor into the keystore daemon. Their sum, plus
+# the moment start_daemon waits for the new loop to record itself, is what a hot install costs in
+# the worst case. They are kept under the 30 seconds ksud waits for that stage, with room for the
+# checks between them: ksud kills nothing when they run out, but the install log ends there, before
+# the verdict.
 LOCK_TIMEOUT=5
 STOP_TIMEOUT=8
 ARM_TIMEOUT=12
@@ -87,15 +93,16 @@ STAGE=$1
 [ -n "$STAGE" ] && shift
 
 # A stage says everything twice: once on stdout, for whoever triggered it, and once into logd
-# under the daemon's own tag. The second copy is not redundancy — `ksud late-load` and ksud's hot
-# install throw the script's stdout away, so on the one path that matters most, a reboot arming the
-# module with nobody at a shell, the first copy reaches no one. The daemon's log file and the
+# under the daemon's own tag. The second copy is not redundancy — `ksud late-load` throws the
+# script's stdout away, so on the one path that matters most, a reboot arming the module with
+# nobody at a shell, the first copy reaches no one. The daemon's log file and the
 # WebUI's Logs panel both keep every TEESimulator line, which is where the header sends a reader
 # after the fact. `log` is toybox on every supported device; where its domain cannot reach logd the
 # write just fails, so nothing here depends on it.
 emit() {
   echo "$1 teesim/$STAGE: $3"
   log -p "$2" -t TEESimulator "stage/$STAGE: $3" 2>/dev/null
+  return 0 # a log that cannot reach logd must not turn a stage's last word into its failure
 }
 say() { emit '-' i "$*"; }
 warn() { emit '!' w "$*"; }
@@ -108,13 +115,14 @@ Arms TEESimulator on a system that is already running: starts the control daemon
 harvests the device's attestation parameters and injects the interceptor into the running
 keystore daemon. Run it after installing the module without a reboot.
 
-  --stop   the reverse: stop the daemon and restart the keystore service, so the system is
-           left carrying no interceptor at all.
+  --stop   the reverse: stop the daemon, put back every system property a profile wrote, and
+           restart the keystore service, so the system is left carrying no interceptor at all.
   --help   this text.
 
-The module's sepolicy.rule is only applied by the root manager at boot, on a hot install, and
-on \`ksud late-load\`. After a plain install on an enforcing device, arming by hand can be
-denied by SELinux; the verdict this prints says whether it worked.
+The module's sepolicy.rule is applied by the root manager at boot, on a hot install, and on
+\`ksud late-load\`; run by hand, this applies it too where the manager's live-policy tool is
+found. Where it is not, arming on an enforcing device can be denied by SELinux; the verdict this
+prints says whether it worked.
 EOF
 }
 
@@ -133,34 +141,58 @@ keystore_pid() {
   return 1
 }
 
-# Whether the keystore process carries an interceptor — ours or an older build's. Two shapes to
-# match: the module's own libteesim_*.so, loaded straight from /data/adb, and the injector's
-# staging fallback, which copies it to /data/local/tmp/lib<random>.so, dlopens that and unlinks
-# it (so the map reads "(deleted)"). Exit 2 means the maps could not be read at all, which is a
-# "cannot tell", not a "no" — and the read is attempted rather than tested, because root passes
-# every permission test here and it is SELinux that refuses.
-keystore_has_interceptor() {
+# The lines of $1's maps that are an interceptor — ours or an older build's — and exit 2 when the
+# maps cannot be read at all, which is a "cannot tell", not a "no". The read is attempted rather
+# than tested, because root passes every permission test here and it is SELinux that refuses. Two
+# shapes count: the module's own libteesim_*.so, loaded straight from /data/adb, and the injector's
+# staging fallback, which copies it to /data/local/tmp/lib<8 random alnum>.so, dlopens that and
+# unlinks it, so the map reads "(deleted)". The staged name says nothing about whose library it is,
+# so its file is opened through map_files and must carry our soname; one that cannot be opened is
+# taken on the name alone.
+interceptor_maps() {
   ks_maps=/proc/$1/maps
   cat "$ks_maps" >/dev/null 2>&1 || return 2
-  grep -qE 'libteesim_|/data/local/tmp/lib' "$ks_maps" 2>/dev/null
+  seen=
+  grep -E 'libteesim_|/data/local/tmp/lib[0-9A-Za-z]{8}\.so \(deleted\)$' "$ks_maps" 2>/dev/null |
+    while read -r range perms off dev ino path; do
+      case $path in
+      *libteesim_*) ;;
+      *)
+        if [ "$ino" != "$seen" ]; then
+          grep -qa libteesim_ "/proc/$1/map_files/$range" 2>/dev/null
+          [ $? = 1 ] && continue
+          seen=$ino
+        fi
+        ;;
+      esac
+      echo "$range $perms $off $dev $ino $path"
+    done
+}
+
+# Whether the keystore process carries an interceptor; exit 2 as in interceptor_maps.
+keystore_has_interceptor() {
+  found=$(interceptor_maps "$1") || return 2
+  [ -n "$found" ]
 }
 
 # The inode of the interceptor mapped into $1, nothing when none is, and exit 2 when the maps
-# cannot be read at all. Exit 2 is the same "cannot tell" as in keystore_has_interceptor.
+# cannot be read at all.
 mapped_interceptor_inode() {
-  ks_maps=/proc/$1/maps
-  cat "$ks_maps" >/dev/null 2>&1 || return 2
-  set -- $(grep -m1 -E 'libteesim_|/data/local/tmp/lib' "$ks_maps" 2>/dev/null)
+  found=$(interceptor_maps "$1") || return 2
+  set -- $found
   echo "$5"
 }
 
 # The inode of the interceptor THIS build ships. It is the one fact that tells an interceptor the
 # daemon has adopted — this build's, already in a keystore process that therefore never changed pid
 # — from the previous build's, still sitting there with nothing having happened yet. Only the
-# device's own ABI directory survives install, so the glob matches one file. Empty when stat is
-# unavailable, which only costs the adopt case its early exit.
+# device's own ABI directory survives install, and it holds every libteesim_*.so, so the glob names
+# the one library this Android version's keystore loads. Empty when stat is unavailable, which only
+# costs the adopt case its early exit.
 own_lib_inode() {
-  for f in "$MODDIR"/*/libteesim_*.so; do
+  lib=libteesim_keymint.so
+  [ "$(getprop ro.build.version.sdk)" -lt 31 ] 2>/dev/null && lib=libteesim_keystore.so
+  for f in "$MODDIR"/*/"$lib"; do
     [ -f "$f" ] || continue
     stat -c %i "$f" 2>/dev/null
     return
@@ -226,8 +258,7 @@ process_pgid() {
 # holds the token and the admin socket, so keep it 0700 too — the socket is then unreachable to
 # other apps. Also stage the WebUI's admin-socket client at a fixed, root-only path, so the WebUI
 # can invoke it without knowing the module's runtime path or the device ABI. Only the device's own
-# ABI directory survives install, so the glob matches one file; it is refreshed on every stage, so
-# an update always stages the client that belongs to the build now installed.
+# ABI directory survives install, so the glob matches one file, refreshed on every stage.
 prepare_data_dir() {
   mkdir -p "$DATA" 2>/dev/null
   chmod 0700 "$DATA" 2>/dev/null
@@ -275,25 +306,45 @@ take_lock() {
     warn "$DATA cannot be reached from here, so this stage can do nothing. A root shell that has"
     warn "uid 0 but no capabilities does this; check \`id\` and CapEff in /proc/self/status, and"
     warn "try again once the root manager has granted it properly."
-    return 1
+    return 2
   fi
   i=0
   steals=0
+  retries=0
   while :; do
     ln -s "$$" "$LOCK" 2>/dev/null && return 0
 
     # A stage killed by its manager's deadline leaves a lock nothing else will ever clean up, so
-    # an owner that is no longer running loses it. An unreadable target is in that same class. The
-    # steal is capped so that a lock being taken and dropped around us cannot spin here.
+    # an owner that is no longer a stage loses it. The lock lives on /data and outlives a reboot,
+    # where early pids repeat, so the owner is confirmed by its command line rather than by its pid
+    # merely existing. A target that vanished between the ln and the readlink was just released,
+    # and is retried rather than stolen — removing it now could remove a third stage's fresh lock.
+    # The steals are capped so that a lock being taken and dropped around us cannot spin here.
     owner=$(readlink "$LOCK" 2>/dev/null)
     dead=
     case $owner in
-    '' | *[!0-9]*) dead=1 ;;
-    *) [ -d /proc/"$owner" ] || dead=1 ;;
+    '')
+      if [ "$retries" -lt 3 ]; then
+        retries=$((retries + 1))
+        continue
+      fi
+      # Still unreadable after the retries: a regular file or a directory, which nothing can own.
+      # Compared with readlink below it would never match, so it is removed here — and only when
+      # it is not a symlink, which would be another stage's fresh lock.
+      if [ "$steals" -lt 3 ] && [ ! -L "$LOCK" ]; then
+        steals=$((steals + 1))
+        rm -rf "$LOCK"
+        continue
+      fi
+      ;;
+    *[!0-9]*) dead=1 ;;
+    # Our own pid can only be a previous boot's: this stage has not taken the lock yet.
+    "$$") dead=1 ;;
+    *) grep -q stage.sh /proc/"$owner"/cmdline 2>/dev/null || dead=1 ;;
     esac
     if [ -n "$dead" ] && [ "$steals" -lt 3 ]; then
       steals=$((steals + 1))
-      rm -f "$LOCK"
+      [ "$(readlink "$LOCK" 2>/dev/null)" = "$owner" ] && rm -f "$LOCK"
       continue
     fi
 
@@ -306,7 +357,8 @@ take_lock() {
   return 1
 }
 
-release_lock() { rm -f "$LOCK"; }
+# Only our own: a lock this stage lost to a steal now belongs to someone else.
+release_lock() { [ "$(readlink "$LOCK" 2>/dev/null)" = "$$" ] && rm -f "$LOCK"; }
 
 # --- Actions ------------------------------------------------------------------------------
 
@@ -330,6 +382,14 @@ start_daemon() {
   else
     sh "$MODDIR/supervise.sh" "$MODDIR" </dev/null >/dev/null 2>&1 &
   fi
+  # Wait, briefly, for the loop to record itself. The stage releases its lock when it returns, and
+  # a stage that took the lock before the pid file existed would find no supervisor and start a
+  # second one.
+  sd_i=0
+  while [ "$sd_i" -lt 10 ] && [ -z "$(supervisor_pid)" ]; do
+    sleep 0.2 2>/dev/null || sleep 1
+    sd_i=$((sd_i + 1))
+  done
 }
 
 # Stops the loop and the daemon under it, and reports whether there was anything to stop.
@@ -359,7 +419,7 @@ stop_daemon() {
     for p in $legacy; do [ -d /proc/"$p" ] && alive=1; done
     [ -n "$(daemon_pids)" ] && alive=1
     if [ -z "$alive" ]; then
-      rm -f "$PIDFILE" # the loop rewrites it on the way out only if it raced us
+      rm -f "$PIDFILE" # a supervisor still starting when this stop began may have written it
       return 0
     fi
     sleep 1
@@ -388,6 +448,49 @@ signal_daemon() {
     fi
   fi
   for p in $(daemon_pids); do kill -"$sig" "$p" 2>/dev/null; done
+}
+
+# Puts back every system property a profile wrote (props.json) and points ro.boot.vbmeta.* back at
+# the harvested hash, through the daemon's own code in a one-shot helper process. Run after the
+# daemon is gone, so nothing re-applies the spoof behind it. Called only when a daemon was running
+# or props.json says something is held: otherwise nothing was written, and at the post-fs-data
+# uninstall the runtime is not worth starting.
+restore_props() {
+  "$MODDIR/daemon" "$MODDIR" restore-props </dev/null >/dev/null 2>&1 &&
+    say "system properties are back to this device's own" ||
+    warn "some system properties could not be put back; a reboot restores them"
+}
+
+# Whether this stage was started, however indirectly, by the daemon itself — its WebUI updater
+# running `ksud module install`. TEESIM_SELF_UPDATE says so, but only an updater that knows to set
+# it does: the first update from a build older than this one arrives without it. The ancestry says
+# so either way, by the daemon's nice name.
+called_by_daemon() {
+  [ -n "$TEESIM_SELF_UPDATE" ] && return 0
+  cbd_p=$PPID
+  cbd_n=0
+  while [ "$cbd_n" -lt 12 ] && [ "${cbd_p:-0}" -gt 1 ] 2>/dev/null; do
+    [ "$(cat /proc/"$cbd_p"/comm 2>/dev/null)" = teesim ] && return 0
+    cbd_p=$(sed -n 's/^PPid:[[:space:]]*//p' /proc/"$cbd_p"/status 2>/dev/null)
+    cbd_n=$((cbd_n + 1))
+  done
+  return 1
+}
+
+# Loads sepolicy.rule into the running policy for the one path the manager has not: late-load.sh
+# run by hand after a plain install. Re-applying rules already in place changes nothing, so this
+# does not first ask whether they are. Best-effort, with the verdict left to report_arm.
+apply_policy() {
+  rule=$MODDIR/sepolicy.rule
+  [ -f "$rule" ] || return 0
+  if [ -x /data/adb/ksud ] && /data/adb/ksud sepolicy apply "$rule" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v magiskpolicy >/dev/null 2>&1 && magiskpolicy --live --apply "$rule" >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "could not load sepolicy.rule here; on an enforcing device arming may be denied until a"
+  warn "reboot"
 }
 
 # Asks init to restart the keystore service, which is what drops an interceptor already mapped
@@ -477,15 +580,15 @@ stage_service() {
     return 0
   fi
   prepare_data_dir
-  start_daemon
-  say "daemon started"
+  start_daemon && say "daemon started"
 }
 
 # Arms a system that is already up, whether `ksud late-load` got here or a root shell did. A
 # daemon already running is replaced rather than left alone: this stage is only ever run to apply
 # something, and the new daemon adopts a keystore daemon that already carries its own build, so
 # re-arming costs a re-harvest and no keystore restart. ksud reaches its own service stage after
-# this one returns, where the rule above makes service.sh a no-op.
+# this one returns, where the daemon it started, or the supervisor's pid file while that daemon is
+# still coming up, makes service.sh a no-op.
 stage_late_load() {
   if [ -f "$MODDIR/disable" ]; then
     warn "TEESimulator is marked disabled, arming it anyway because this stage was run"
@@ -503,6 +606,7 @@ stage_late_load() {
     say "is this build's, and restarts the service to replace it when it is not"
   fi
 
+  apply_policy
   prepare_data_dir
   stop_daemon && say "stopped the previous daemon"
   start_daemon
@@ -535,7 +639,7 @@ stage_hotinstall() {
   # the reply to that request over its admin socket. Hand the swap to a detached child and return,
   # so the reply goes out; the verdict is then the WebUI's to show, which is where that user is
   # looking anyway.
-  if [ -n "$TEESIM_SELF_UPDATE" ]; then
+  if called_by_daemon; then
     say "applying in the background so the update request can be answered first"
     if command -v setsid >/dev/null 2>&1; then
       setsid sh "$MODDIR/stage.sh" swap </dev/null >/dev/null 2>&1 &
@@ -559,23 +663,45 @@ stage_swap() {
   start_daemon
 }
 
-# The reverse of arming, for `late-load.sh --stop` and for uninstall.sh. Stopping the daemon alone
-# would leave the interceptor mapped in the keystore daemon with nothing driving it, so the service
-# is restarted to drop it — but only when it is actually carrying one, which at the post-fs-data
+# The reverse of arming, for `late-load.sh --stop` and for uninstall.sh. The properties a profile
+# wrote outlive the daemon (a resetprop lasts until reboot), so they are put back first. Stopping
+# the daemon alone would leave the interceptor mapped in the keystore daemon with nothing driving
+# it, so the service is restarted to drop it — but only when it is actually carrying one, which at the post-fs-data
 # uninstall a manager usually runs it from is not yet the case.
 stage_stop() {
   if stop_daemon; then
     say "stopped the daemon"
+    restore_props
   else
     say "no daemon was running"
+    # A props.json from an earlier boot is stale, not held: a reboot already restored everything,
+    # and the post-fs-data uninstall that lands here then is no place to start the runtime.
+    if [ -f "$DATA/props.json" ]; then
+      if grep -q "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" "$DATA/props.json"; then
+        restore_props
+      else
+        rm -f "$DATA/props.json"
+      fi
+    fi
   fi
 
   pid=$(keystore_pid)
-  if [ -n "$pid" ] && keystore_has_interceptor "$pid"; then
-    say "the keystore daemon still carries the interceptor, which only a restart drops"
-    restart_keystore
+  if [ -n "$pid" ]; then
+    keystore_has_interceptor "$pid"
+    case $? in
+    0)
+      say "the keystore daemon still carries the interceptor, which only a restart drops"
+      restart_keystore
+      ;;
+    2)
+      say "the keystore daemon's maps cannot be read here, so it is restarted in case it carries"
+      say "the interceptor"
+      restart_keystore
+      ;;
+    *) say "no interceptor is loaded in the keystore daemon; nothing to drop" ;;
+    esac
   else
-    say "no interceptor is loaded in the keystore daemon; nothing to drop"
+    say "no keystore daemon is running; nothing to drop"
   fi
 }
 
@@ -614,14 +740,26 @@ service | late-load | hotinstall | swap | stop) ;;
 esac
 
 # The lock is taken here rather than inside each stage so that every one of them has it, and
-# released however the stage ends — including when its manager's deadline cuts it short, which
-# otherwise leaves a lock behind for the staleness check to clear later.
-take_lock || exit 0
-# PIPE is in here for a reason: a stage whose reader goes away mid-sequence — a manager that stops
-# reading the install log, a `| head` on a hand-run late-load — would otherwise be killed outright
-# between stopping the old daemon and starting the new one, leaving the system disarmed and the
-# lock behind. Trapped, the write fails and the stage finishes the job it started.
-trap 'release_lock' EXIT HUP INT TERM PIPE
+# released on any exit the shell sees. A SIGKILL — a manager's deadline — leaves it behind, for
+# take_lock's staleness check to clear.
+# Busy is not a failure: another stage is doing the work. An unreachable data directory is.
+take_lock
+case $? in
+0) ;;
+1) exit 0 ;;
+*) exit 1 ;;
+esac
+trap 'release_lock' EXIT
+# INT and TERM are a request to stop, and exit through the EXIT trap above. HUP and PIPE are not:
+# a stage whose terminal or reader goes away mid-sequence — a manager that stops reading the
+# install log, a `| head` on a hand-run late-load — would otherwise be killed between stopping the
+# old daemon and starting the new one, leaving the system disarmed. A no-op handler keeps the stage
+# (and its lock) going, the write fails with EPIPE, and the stage finishes the job it started.
+# Unlike an ignored signal, a handler is not inherited by the daemon it starts — though on a ksud
+# hot install SIGPIPE arrives already ignored, which a shell cannot trap, and stays so.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap ':' HUP PIPE
 
 case $STAGE in
 service) stage_service ;;
@@ -632,6 +770,6 @@ stop) stage_stop ;;
 esac
 rc=$?
 
-# The self-update's deferred swap is the one child that outlives its stage, and it takes the lock
-# itself when it wakes. Nothing else here leaves work behind.
+# The self-update's deferred swap is the one child that outlives its stage; it takes the lock
+# itself as it starts, waiting out this stage's hold, and keeps it through the grace period.
 exit $rc

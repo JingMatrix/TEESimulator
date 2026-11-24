@@ -4,11 +4,12 @@
 // renderField(descriptor, value, onChange, context) -> HTMLElement
 //   value    the current value, already read at descriptor.path by the caller
 //   onChange (path, value) => ...  for scalar widgets (text/select/patch/keybox)
-//   context  { id, tag, placeholder, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
+//   context  { id, tag, placeholder, defaultValue, keyboxFiles, addApp(entry), removeApp(entry), openScope(),
 //              labelMap, installedSet, autoInclude, takenBy }
 //            - id           stable element id, so a re-render can restore focus
 //            - tag          { text, kind, title } drawn beside the label: where the value comes
-//                           from when the field is left empty ("keybox" / "harvested" / "omitted")
+//                           from when the field is left empty ("keybox" / "harvested" / "omitted"),
+//                           or "custom" when the profile states its own value
 //            - placeholder  that default's value, greyed inside the box
 //            - defaultValue that default's value for a widget that states it itself (the patch
 //                           picker names it on its "default" option and seeds "custom…" with it)
@@ -82,7 +83,8 @@ function labelled(descriptor, control, ctx = {}) {
 }
 
 // The label row: the label, plus ctx.tag = { text, kind, title } when the caller has a source to
-// name. kind is "" (harvested), "keybox" or "warn", which is the only colour difference.
+// name. kind is "" (harvested), "keybox", "custom" (the profile states its own value) or "warn"
+// (omitted), which is the only colour difference.
 function fieldHead(descriptor, forId, ctx) {
   const tag = ctx.tag || null;
   if (descriptor.labelHidden && !tag) return null;
@@ -105,6 +107,7 @@ function textWidget(d, value, onChange, ctx) {
     // where it will apply, instead of a line of prose under every field. Only a short default
     // comes through here — config-view puts a long one (a 64-char hash) on its own line.
     placeholder: ctx.placeholder || "",
+    "aria-label": ctx.ariaLabel || null,
     autocapitalize: "off", autocorrect: "off", spellcheck: "false",
     oninput: (e) => {
       const v = e.target.value;
@@ -124,7 +127,9 @@ function patchWidget(d, value, onChange, ctx) {
   const v = value == null ? "" : String(value);
   const picks = (d.picks || ["system_property", "today", "no"]).map(resolvePick);
   const onPick = picks.some((p) => p.value === v);
-  const custom = v !== "" && !onPick;
+  // ctx.editing: the box held focus before this render, so it stays even when what was typed is
+  // momentarily "" or a pick's token — closing it would take the keyboard away mid-word.
+  const custom = (v !== "" && !onPick) || !!ctx.editing;
 
   const options = [
     { value: "", label: ctx.defaultValue ? "default — " + ctx.defaultValue : "default" },
@@ -147,7 +152,9 @@ function patchWidget(d, value, onChange, ctx) {
     value: o.value, selected: o.value === CUSTOM ? custom : o.value === v, text: o.label,
   })));
 
-  const box = custom ? textWidget(d, v, onChange, { ...ctx, id: ctx.id + "-v" }) : null;
+  const box = custom
+    ? textWidget(d, v, onChange, { ...ctx, id: ctx.id + "-v", ariaLabel: d.label + " (custom value)" })
+    : null;
   return el("div", { class: "patch" }, [picker(select), box]);
 }
 
@@ -194,16 +201,19 @@ function segmentField(d, value, onChange, ctx) {
   const opts = d.options || [];
   const labels = d.optionLabels || {};
   const seg = el("div", { class: "segmented segmented-block", role: "radiogroup", "aria-label": d.label },
-    opts.map((opt, i) => el("button", {
-      id: i === 0 ? ctx.id : null, type: "button",
+    // Every segment has an id, so the focus restore after a re-render finds whichever was used.
+    opts.map((opt) => el("button", {
+      id: ctx.id + "-" + opt, type: "button",
       class: "seg" + (opt === value ? " on" : ""),
       role: "radio", "aria-checked": opt === value ? "true" : "false",
       text: labels[opt] || opt,
       onclick: () => { if (opt !== value) onChange(d.path, opt); },
     })));
   const help = (d.optionHelp && d.optionHelp[value]) || d.help || null;
+  // No label `for`: on a button it would replace the segment's own text as its accessible name.
+  // The radiogroup's aria-label names the group instead.
   return el("div", { class: "field" }, [
-    fieldHead(d, ctx.id, ctx),
+    fieldHead(d, null, ctx),
     seg,
     help ? el("div", { class: "field-help", text: help }) : null,
   ]);
@@ -256,13 +266,12 @@ function applistWidget(d, value, ctx) {
 // A labelled switch: a checkbox styled as an iOS-style toggle. The visible track/thumb is
 // a sibling of the (visually hidden but full-size) checkbox, so a tap anywhere on the track
 // flips it and CSS drives the thumb off `:checked`. onChange gets the boolean, never a string.
-//
-// An `exclusive` toggle is a whole-device claim, so at most one profile may own it: when another
-// profile already does, ctx.takenBy names it and the switch renders disabled with a short
-// "used by <name>" note, so the conflict is legible before Save rejects it.
 // A compact settings ROW (not the three-line label/control/help stack): the title and its help sit
 // stacked on the left as a <label for> that also toggles, and the switch sits inline on the right.
-// The help doubles as the "used by <profile>" note when auto-include is locked to another profile.
+//
+// An `exclusive` toggle is a whole-device claim, so at most one profile may own it: when another
+// profile already does, ctx.takenBy names it and the switch renders disabled, its help replaced by
+// a short "used by <name>" note, so the conflict is legible before Save rejects it.
 function toggleField(d, value, onChange, ctx) {
   const checked = value === true;
   const locked = !!d.exclusive && !!ctx.takenBy && !checked;

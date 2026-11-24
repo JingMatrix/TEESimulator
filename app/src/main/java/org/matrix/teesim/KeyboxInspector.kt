@@ -39,14 +39,31 @@ object KeyboxInspector {
     }
 
     /**
-     * What the keybox named [rawName] states about the device it was provisioned for, or null when
-     * it states nothing — a factory keybox carries no provisioningInfo, and a refused issuance
-     * carries a verdict without the hash. Read from disk on each call, which is once per config
-     * push; the file is small and the parse is not on any hot path.
+     * The keybox a profile names: a plain name through [safeName], and a path with a subdirectory —
+     * which only a hand-edited config.json has — kept as written, as long as it stays inside the
+     * data directory and names an .xml file.
      */
-    fun provisioning(rawName: String): KeyboxDetail.Provisioning? {
-        val name = safeName(rawName) ?: return null
-        val file = File(Const.DATA_DIR, name)
+    private fun profileKeybox(raw: String): File? {
+        val rel = raw.trim()
+        if (!rel.contains('/')) return safeName(rel)?.let { File(Const.DATA_DIR, it) }
+        return try {
+            val root = File(Const.DATA_DIR).canonicalFile
+            val f = File(root, rel).canonicalFile
+            f.takeIf { it.path.startsWith(root.path + File.separator) && it.name.endsWith(".xml") }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * What the keybox [file] states about the device it was provisioned for, or null when it states
+     * nothing — a factory keybox carries no provisioningInfo, and a refused issuance carries a
+     * verdict without the hash. Taken as a file rather than a name, since a profile may name one in
+     * a subdirectory that [safeName] would flatten onto another. Read from disk on each call, which
+     * is once per config push; the file is small and the parse is not on any hot path.
+     */
+    fun provisioningAt(file: File): KeyboxDetail.Provisioning? {
+        val name = file.name
         if (!file.isFile) return null
         return try {
             val root = newSafeBuilder().parse(file).documentElement
@@ -70,9 +87,11 @@ object KeyboxInspector {
      * the keybox a profile has just been pointed at, before any of it is saved or pushed.
      */
     fun states(rawName: String, harvest: Harvester.Record?): JSONObject {
-        val name = safeName(rawName) ?: return fail("invalid keybox name")
+        val file = profileKeybox(rawName) ?: return fail("invalid keybox name")
+        val name = rawName.trim()
+        if (!file.isFile) return fail("no such keybox: $name")
         if (harvest == null) return fail("no harvest yet")
-        val stated = provisioning(name)
+        val stated = provisioningAt(file)
         val out = JSONObject().put("ok", true).put("name", name)
         stated?.fingerprint?.let { out.put("fingerprint", it) }
         val fields = JSONObject()
@@ -192,11 +211,10 @@ object KeyboxInspector {
     private fun inspectKey(ke: Element): JSONObject {
         val algoAttr = ke.getAttribute("algorithm")
         val out = JSONObject().put("algorithm", algoAttr.ifBlank { "?" })
-        // The TA looks this attribute up with an exact, case-sensitive match
-        // (`attribute("algorithm")
-        // == Some("rsa"|"ecdsa")` in rust/teesim-km/src/attest.rs), so "ECDSA", " ecdsa" or "EC"
-        // parses here and is then silently invisible to the thing that signs with it. Flag it:
-        // a keybox whose only key is spelled wrong loads as "no key at all".
+        // The TA looks this attribute up with an exact, case-sensitive match (rust/teesim-km/
+        // src/attest.rs compares it to "rsa" or "ecdsa"), so "ECDSA", " ecdsa" or "EC" parses
+        // here and is then silently invisible to the thing that signs with it. Flag it: a keybox
+        // whose only key is spelled wrong loads as "no key at all".
         if (algoAttr != "rsa" && algoAttr != "ecdsa") out.put("algorithmRecognized", false)
 
         val priv = firstChild(ke, "PrivateKey")
@@ -339,12 +357,17 @@ object KeyboxInspector {
         return "ok"
     }
 
+    /**
+     * The certificate in [text]: its CERTIFICATE block wherever it sits, since `openssl pkcs12`
+     * prints bag attributes in front of it, else the first block, else the text as bare base64.
+     */
     private fun parsePem(text: String): X509Certificate? =
         try {
+            val blocks = KeyboxDetail.pemBlocks(text)
             val body =
-                text
-                    .replace("-----BEGIN CERTIFICATE-----", "")
-                    .replace("-----END CERTIFICATE-----", "")
+                (blocks.firstOrNull { it.label == "CERTIFICATE" } ?: blocks.firstOrNull())
+                    ?.body
+                    .let { it ?: text }
                     .replace(Regex("\\s"), "")
             if (body.isEmpty()) null
             else

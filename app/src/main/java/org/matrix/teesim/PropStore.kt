@@ -16,18 +16,22 @@ import org.json.JSONObject
  *
  * The file is scoped to one boot. A `resetprop` lives in memory only, so every property is the
  * device's own again after a reboot and a stored original from a previous boot would be a stale
- * value to write back; a mismatched boot id therefore discards the file unread. The boot id comes
- * from the kernel ([BOOT_ID_FILE]), which is a fresh random value per boot.
+ * value to write back; a mismatched boot id therefore discards the file. The boot id comes from the
+ * kernel ([BOOT_ID_FILE]), which is a fresh random value per boot.
  *
- * Not internally locked: every call is on the App monitor (`resolveAndPush` and daemon start), so
- * access is already serialized.
+ * Not locked. Writes come from daemon start, before any watcher can call [App.resolveAndPush], and
+ * from resolveAndPush itself, which is @Synchronized; reads ([DeviceProps]' originals) may come
+ * from any thread, and the file is replaced by rename, so a reader sees one version or the other.
+ * The one write a read makes is deleting a previous boot's file, which every writer would also do.
+ * The restore-props helper is a separate process that only runs once the daemon is gone.
  */
 object PropStore {
 
     private val BOOT_ID_FILE = File("/proc/sys/kernel/random/boot_id")
 
     /**
-     * The kernel's id for this boot, or empty when it cannot be read (the file is then unusable).
+     * The kernel's id for this boot, or empty when it cannot be read, in which case [saved] accepts
+     * the file without the boot check.
      */
     private fun bootId(): String =
         try {
@@ -74,20 +78,33 @@ object PropStore {
      * of properties the daemon is now responsible for putting back. One write per push rather than
      * one per property, and no write at all when nothing changed, which is the steady state.
      */
-    fun keep(originals: Map<String, String>) {
+    fun keep(originals: Map<String, String>): Boolean {
         val now = saved()
-        if (now == originals) return
-        writeAll(originals)
+        if (now == originals) return true
+        if (!writeAll(originals)) return false
         val added = originals.keys - now.keys
         val dropped = now.keys - originals.keys
         if (added.isNotEmpty())
             SystemLogger.info(
                 "PropStore: remembering this device's own " +
-                    added.joinToString(" ") { "$it='${originals[it]?.ifEmpty { "unset" }}'" }
+                    added.joinToString(" ") { "$it=${shown(it, originals[it].orEmpty())}" }
             )
         if (dropped.isNotEmpty())
             SystemLogger.info("PropStore: no longer holding ${dropped.joinToString(" ")}")
+        return true
     }
+
+    /**
+     * A property value as the log may carry it: quoted, `unset` when empty, and a serial number
+     * only as its [Redact] token, the way the harvest logs it — the log is kept on the device and a
+     * report pasted from it should not carry the real one.
+     */
+    fun shown(name: String, value: String): String =
+        when {
+            value.isEmpty() -> "'unset'"
+            "serialno" in name -> Redact.quoted(value)
+            else -> "'$value'"
+        }
 
     /**
      * Put every saved property back to the device's own value and empty the store. Returns the
@@ -113,17 +130,17 @@ object PropStore {
     }
 
     /**
-     * Overwrite the whole file atomically (temp + rename) so a crash mid-write can never leave a
-     * torn props.json. An empty map removes the file: no saved original is the resting state, and
-     * an absent file says so without a boot id to interpret. Never throws — a failed write is
-     * logged, and the live properties are already what they should be.
+     * Overwrite the whole file via temp + rename, so a crash mid-write does not tear props.json
+     * (the direct-write fallback for a failed rename excepted). An empty map removes the file: no
+     * saved original is the resting state, and an absent file says so without a boot id to
+     * interpret. Never throws: a failed write is logged and answered false.
      */
-    private fun writeAll(originals: Map<String, String>) {
+    private fun writeAll(originals: Map<String, String>): Boolean {
         val f = Const.propsFile
         try {
             if (originals.isEmpty()) {
                 f.delete()
-                return
+                return true
             }
             val saved = JSONObject()
             for ((k, v) in originals) saved.put(k, v)
@@ -134,12 +151,14 @@ object PropStore {
                 f.writeText(root.toString(2) + "\n")
                 tmp.delete()
             }
+            return true
         } catch (e: Exception) {
             SystemLogger.warning(
                 "PropStore: cannot persist props.json; this device's own property values may not " +
                     "be restored before the next harvest",
                 e,
             )
+            return false
         }
     }
 }

@@ -1,5 +1,7 @@
 package org.matrix.teesim
 
+import java.io.File
+
 /**
  * What a profile field left empty resolves to, and where that value came from.
  *
@@ -52,7 +54,7 @@ object ProfileDefaults {
      * absent, which is what declining to attest it looks like.
      */
     fun of(keyboxName: String, harvest: Harvester.Record): Map<String, Default> =
-        from(KeyboxInspector.provisioning(keyboxName), harvest)
+        from(KeyboxInspector.provisioningAt(File(Const.DATA_DIR, keyboxName)), harvest)
 
     /** The same, for a statement already read. */
     fun from(stated: KeyboxDetail.Provisioning?, harvest: Harvester.Record): Map<String, Default> =

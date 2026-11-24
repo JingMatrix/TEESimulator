@@ -13,7 +13,8 @@ MODDIR=$1
 PIDFILE=/data/adb/teesim/supervisor.pid
 
 echo $$ >"$PIDFILE"
-trap 'rm -f "$PIDFILE"; exit 0' TERM INT HUP
+# Only our own record: a late signal must not remove a newer supervisor's.
+trap '[ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"; exit 0' TERM INT HUP
 
 while true; do
   "$MODDIR/daemon" "$MODDIR"

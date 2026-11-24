@@ -18,7 +18,7 @@ object ConfigStore {
     // the advanced raw-uid token uid:N.
     private val PKG_RE = Regex("^[A-Za-z0-9_.]+(@\\d+)?$")
     private val UID_RE = Regex("^uid:\\d+$")
-    /** A verified boot hash as a profile may write it: SHA-256, lowercase hex. */
+    /** A verified boot hash as a profile may write it: SHA-256 as 64 hex characters, lowercased. */
     private val HEX64_RE = Regex("^[0-9a-f]{64}$")
 
     /** One profile as written by the WebUI, before resolution against the device. */
@@ -40,9 +40,9 @@ object ConfigStore {
         val meid: String,
         val imei2: String,
         // The verified boot hash this profile attests, as 64 hex characters, or empty to take the
-        // default ([ProfileDefaults]). It is the root of trust AND an input to the TA's
-        // key-encryption key, so a profile that changes it re-keys the generation-mode blobs minted
-        // under the previous one — they return when it does, and patch mode never has ours at all.
+        // default ([ProfileDefaults]). It is the hash the profile's root of trust attests, and
+        // nothing more: the TA's key-encryption key is built without it, so changing it leaves
+        // every key readable.
         val verifiedBootHash: String,
         val apps: List<String>,
         // When true, the profile ALSO targets every installed user app (uid >= first app uid) that
@@ -53,9 +53,7 @@ object ConfigStore {
         // When true, every value this profile attests that differs from the harvest is written
         // into the system property it is read from, and ro.boot.vbmeta.digest follows this
         // profile's verified boot hash (see App.applySystemProps). There is one set of properties
-        // on the device, so at most one profile may ask (checked below). A config that states the
-        // key nowhere falls back to the profile named `default`, or the only one there is, which
-        // is what the daemon did before the flag existed.
+        // on the device, so at most one profile may ask (checked below). Absent means false.
         val applyProperties: Boolean,
     )
 
@@ -91,12 +89,6 @@ object ConfigStore {
         var autoIncludeProfiles =
             0 // how many profiles set autoIncludeNewApps (at most one allowed)
         var applyPropsProfiles = 0 // how many profiles set applyProperties (at most one allowed)
-        // Whether any profile states applyProperties at all, which decides whether the others get
-        // the historical fallback or a plain false.
-        val statesApplyProperties =
-            profilesObj.keys().asSequence().any {
-                profilesObj.optJSONObject(it)?.has("applyProperties") == true
-            }
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -143,13 +135,10 @@ object ConfigStore {
                 } ?: emptyList()
 
             // One device, one set of system properties: two profiles writing them would fight over
-            // every value. A config that states the key nowhere gets the choice the daemon made
-            // before the flag existed; once any profile states it, the statement is the whole
-            // truth and an absent key means no -- otherwise naming a second profile would collide
-            // with a `default` that never asked for anything.
-            val applyProperties =
-                if (p.has("applyProperties")) p.optBoolean("applyProperties", false)
-                else !statesApplyProperties && (id == "default" || profilesObj.length() == 1)
+            // every value. Opt-in: an absent key means no, so a config written before the flag
+            // existed keeps the one write the daemon made then (ro.boot.vbmeta.*, from the harvest)
+            // and nothing more until someone asks for it.
+            val applyProperties = p.optBoolean("applyProperties", false)
             if (applyProperties) applyPropsProfiles++
             if (applyPropsProfiles > 1)
                 throw ConfigException(

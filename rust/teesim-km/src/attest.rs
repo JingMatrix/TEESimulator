@@ -135,15 +135,41 @@ fn parse_algo(node: roxmltree::Node, algo: SigningAlgorithm) -> Result<AlgoInfo,
     Ok(AlgoInfo { key, chain })
 }
 
-/// Strip PEM armor and all whitespace, then base64-decode.
-fn decode_pem(pem: &str) -> Result<Vec<u8>, String> {
-    let mut b64 = String::with_capacity(pem.len());
-    for line in pem.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("-----") {
-            continue;
+/// The base64 body of the PEM block `pem` means, armor stripped wherever it sits: keyboxes passed
+/// through chat arrive with the markers and body collapsed onto one line, and `openssl ecparam
+/// -genkey` puts an `EC PARAMETERS` block before the key. The block labelled as a private key wins,
+/// else the first; text with no armor at all is taken as bare base64, as it always was.
+fn pem_body(pem: &str) -> &str {
+    const BEGIN: &str = "-----BEGIN ";
+    let mut first: Option<&str> = None;
+    let mut at = 0;
+    while let Some(b) = pem[at..].find(BEGIN).map(|i| at + i) {
+        let label_start = b + BEGIN.len();
+        let Some(label_end) = pem[label_start..].find("-----").map(|i| label_start + i) else {
+            break;
+        };
+        let label = pem[label_start..label_end].trim();
+        let body_start = label_end + 5;
+        let end_marker = format!("-----END {label}-----");
+        let Some(end) = pem[body_start..].find(&end_marker).map(|i| body_start + i) else {
+            break;
+        };
+        let body = &pem[body_start..end];
+        if label.ends_with("PRIVATE KEY") {
+            return body;
         }
-        b64.extend(line.chars().filter(|c| !c.is_whitespace()));
+        first.get_or_insert(body);
+        at = end + end_marker.len();
+    }
+    first.unwrap_or(pem)
+}
+
+/// Strip PEM armor and all whitespace, then base64-decode. An empty result is refused here rather
+/// than loaded: zero bytes are taken for a key and fail only at the first signing, with no hint why.
+fn decode_pem(pem: &str) -> Result<Vec<u8>, String> {
+    let b64: String = pem_body(pem).chars().filter(|c| !c.is_whitespace()).collect();
+    if b64.is_empty() {
+        return Err("empty PEM body".into());
     }
     general_purpose::STANDARD.decode(&b64).map_err(|e| format!("base64: {e:?}"))
 }

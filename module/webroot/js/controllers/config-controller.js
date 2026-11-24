@@ -128,9 +128,12 @@ export function create(mount) {
   // than breaking the editor: an older daemon 404s this route, and a keybox that states nothing
   // answers with the harvest values anyway.
   function fetchKeyboxDefaults(name) {
-    if (!name) { keyboxDefaults = null; return Promise.resolve(); }
-    if (keyboxDefaults && keyboxDefaults.name === name) return Promise.resolve();
+    // Bumped here too, so a reply still in flight for the previous keybox cannot land.
+    if (!name) { keyboxDefaults = null; ++keyboxDefaultsGen; return Promise.resolve(); }
+    // Every call bumps the generation, the cache hit included: a reply still in flight for a
+    // keybox picked in between must not land over the one picked back.
     const gen = ++keyboxDefaultsGen;
+    if (keyboxDefaults && keyboxDefaults.name === name) return Promise.resolve();
     return keyAdmin("keyboxDefaults", { name })
       .then((res) => {
         if (gen !== keyboxDefaultsGen) return; // a newer keybox was picked meanwhile
@@ -147,6 +150,7 @@ export function create(mount) {
         if (gen !== keyboxDefaultsGen) return;
         keyboxDefaults = null;
         console.warn("[config] /keybox/defaults unavailable:", (e && e.message) || String(e));
+        renderEditor(); // take the previous keybox's values off the screen
       });
   }
 
@@ -215,11 +219,11 @@ export function create(mount) {
   function resolvedLevels() {
     const h = harvest || {};
     const ov = (h.overrides && typeof h.overrides === "object" && !Array.isArray(h.overrides)) ? h.overrides : {};
-    // serial/imei/imei2/meid are the only ids the daemon resolves through Record.effective():
-    // device-properties attestation omits them, so supplementDeviceIds reads them from the OS and
-    // records them in harvest.overrides (source "supplement"), leaving the raw capture blank. Mirror
-    // effective() here — the override value wins, else the raw capture — so an empty profile field
-    // shows the fabricated value that WILL be attested (Resolver.putId) rather than "will be omitted".
+    // The daemon reads every id through Record.effective(): device-properties attestation omits
+    // serial/imei/imei2/meid, so supplementDeviceIds reads them from the OS and records them in
+    // harvest.overrides (source "supplement"), leaving the raw capture blank, and the user's own
+    // overrides land there too. Mirror effective() here — the override value wins, else the raw
+    // capture — so an empty profile field shows the value that WILL be attested.
     const eff = (key) => {
       const o = ov[key];
       return (o && o.value != null && o.value !== "") ? o.value : h[key];
@@ -228,21 +232,27 @@ export function create(mount) {
     // from, and these are the ones this device reports.
     const mine = (value) => ({ value, source: "harvest" });
     const out = {
-      // The patch/OS levels and brand/device/product/manufacturer/model are genuine captures with no
-      // override layer; Resolver.kt reads them raw too (a fabricated-fallback level is written to the
-      // raw record as well), so the raw value already equals the effective one.
+      // The patch/OS levels have no override layer; Resolver.kt reads them raw too (a
+      // fabricated-fallback level is written to the raw record as well). The identity fields do:
+      // a leaf that carried no brand/device/product/manufacturer/model gets them supplemented
+      // from the build properties, which effective() returns.
       patchSystem: mine(h.osPatchLevel), patchVendor: mine(h.vendorPatchLevel),
       patchBoot: mine(h.bootPatchLevel), osVersion: mine(h.osVersion),
-      brand: mine(h.brand), device: mine(h.device), product: mine(h.product),
-      manufacturer: mine(h.manufacturer), model: mine(h.model),
+      brand: mine(eff("brand")), device: mine(eff("device")), product: mine(eff("product")),
+      manufacturer: mine(eff("manufacturer")), model: mine(eff("model")),
       serial: mine(eff("serial")), imei: mine(eff("imei")),
       meid: mine(eff("meid")), imei2: mine(eff("imei2")),
     };
     // The daemon resolved the same fields against the profile's keybox, which has the first word on
     // the ones its provisioningInfo records (and repeats this device's value for the rest). It also
-    // answers for verifiedBootHash, which has no entry above: the harvest's own hash is only a
-    // default once something can attest another.
-    const kd = (keyboxDefaults && keyboxDefaults.defaults) || null;
+    // answers for verifiedBootHash, which has no entry above: the daemon's fallback for it (the
+    // harvest's own hash) is not mirrored here, so without this reply the hash field shows no
+    // default.
+    // Only the reply for the keybox this draft names: until the new one arrives, another
+    // profile's or the previously picked keybox's values would be shown as this one's.
+    const kd = (keyboxDefaults && editing != null &&
+      keyboxDefaults.name === getPath(config.profiles[editing], ["keybox"]) &&
+      keyboxDefaults.defaults) || null;
     if (kd) for (const field of Object.keys(kd)) out[field] = kd[field];
     return out;
   }
@@ -265,20 +275,18 @@ export function create(mount) {
     return out;
   }
 
-  // A profile written before `applyProperties` existed carries no flag. Settle it on load, by the
-  // rule ConfigStore reads the file with, so the switch shows what the daemon is actually doing
-  // and saving keeps it: with the key stated nowhere the profile named `default` (or the only one
-  // there is) claims the properties, and once any profile states it, an absent key means no.
+  // Settle on load what ConfigStore assumes for a key a profile leaves out, so the editor shows
+  // what the daemon is actually doing and saving writes it down: `applyProperties` is opt-in, and
+  // an absent vendor or boot patch level is YYYY-MM-05 rather than the harvested value an empty
+  // one means (ConfigStore's patchLevel defaults).
   function normalize(cfg) {
-    const names = Object.keys((cfg && cfg.profiles) || {});
-    const stated = names.some(
-      (n) => cfg.profiles[n] && typeof cfg.profiles[n].applyProperties === "boolean");
-    for (const name of names) {
-      const p = cfg.profiles[name];
+    for (const p of Object.values((cfg && cfg.profiles) || {})) {
       if (!p || typeof p !== "object") continue;
-      if (typeof p.applyProperties !== "boolean") {
-        p.applyProperties = !stated && (name === "default" || names.length === 1);
-      }
+      if (typeof p.applyProperties !== "boolean") p.applyProperties = false;
+      const pl = (p.patchLevel && typeof p.patchLevel === "object") ? p.patchLevel : (p.patchLevel = {});
+      if (typeof pl.system !== "string") pl.system = "";
+      if (typeof pl.vendor !== "string") pl.vendor = "YYYY-MM-05";
+      if (typeof pl.boot !== "string") pl.boot = "YYYY-MM-05";
     }
     return cfg;
   }
@@ -310,12 +318,25 @@ export function create(mount) {
     // Not awaited: the editor paints with the harvest-only hints and re-renders when the keybox's
     // own defaults arrive, rather than holding the panel closed on a file parse.
     fetchKeyboxDefaults(getPath(config.profiles[name], ["keybox"]));
-    const title = editorHost.querySelector(".drill-title");
-    if (title) title.focus();
+    // Focus the back control, not the title: the title is the rename input, and focusing it would
+    // raise the keyboard.
+    const back = editorHost.querySelector(".drill-head .iconbtn");
+    if (back) back.focus();
   }
 
   function onEditorClosed() {
+    // A name typed into the title commits on `change`, which never fires when the overlay is torn
+    // down with the field still focused (Android Back), so take it from the field instead.
+    const title = editorHost && editorHost.querySelector(".drill-title-input");
+    const pending = title ? title.value.trim() : "";
+    if (editing && pending && pending !== editing && PROFILE_RE.test(pending) && !config.profiles[pending]) {
+      editorActions.onRename(editing, pending);
+    }
     editing = null;
+    // A keybox can be re-imported under the same name while the editor is closed; ask again on
+    // the next open rather than show what the old file stated.
+    keyboxDefaults = null;
+    ++keyboxDefaultsGen;
     editorHost = null;
     editorOverlay = null;
     renderList(); // the list may now show updated summaries / the unsaved bar
@@ -731,9 +752,8 @@ export function create(mount) {
       if (!PROFILE_RE.test(trimmed)) { toast("Name must be 1-32 chars: letters, digits, - or _."); return; }
       if (config.profiles[trimmed]) { toast("A profile named " + trimmed + " already exists."); return; }
       const fresh = emptyProfile();
-      // The first profile on a fresh install drives the system properties; a later one does not
-      // take that away from whichever profile already holds it.
-      fresh.applyProperties = Object.keys(config.profiles).length === 0;
+      // Opt-in, like every profile: writing the device's properties is asked for, never assumed.
+      fresh.applyProperties = false;
       config.profiles[trimmed] = fresh;
       dirty = true;
       revalidate();
@@ -778,7 +798,9 @@ export function create(mount) {
     // Rename is a key reassignment carrying the SAME profile object across, so the
     // app list survives and the duplicate-app check never false-positives.
     onRename(oldName, newName) {
-      if (!config.profiles[oldName] || config.profiles[newName]) return;
+      if (!config.profiles[oldName]) return;
+      if (!PROFILE_RE.test(newName)) { toast("Name must be 1-32 chars: letters, digits, - or _."); return; }
+      if (config.profiles[newName]) { toast("A profile named " + newName + " already exists."); return; }
       const next = {};
       for (const k of Object.keys(config.profiles)) {
         next[k === oldName ? newName : k] = config.profiles[k];

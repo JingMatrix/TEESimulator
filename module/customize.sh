@@ -51,15 +51,16 @@ done
 
 # Nothing TEESimulator installs waits for a boot stage: it mounts no partition and ships no
 # system.prop, and its daemon injects whatever keystore process it finds, so hotinstall.sh can
-# apply this build in place. KernelSU is the only manager with that path; elsewhere, and whenever a
-# live TrickyStore has to be rebooted out of the keystore daemon first, the module is armed by the
-# next boot — or by late-load.sh, run by hand.
-if [ "$KSU" ] && [ -z "$DISABLED_TRICKY_STORE" ]; then
+# apply this build in place. Only a KernelSU whose installer exports KSU_HAS_HOT_INSTALL has that
+# path (tiann/KernelSU#3901, which forks are taking up); elsewhere, and whenever a live TrickyStore
+# has to be rebooted out of the keystore daemon first, the module is armed by the next boot — or by
+# late-load.sh, run by hand from where this install put it.
+if [ "$KSU_HAS_HOT_INSTALL" = true ] && [ -z "$DISABLED_TRICKY_STORE" ]; then
   ui_print "- Applying without a reboot"
   export MODULE_HOT_INSTALL_REQUEST=true
   export MODULE_HOT_RUN_SCRIPT=hotinstall.sh
 elif [ "$DISABLED_TRICKY_STORE" ]; then
   ui_print "- Reboot to apply: TrickyStore was active and keeps its keystore hook until then"
 else
-  ui_print "- Reboot to apply, or run late-load.sh from the module directory"
+  ui_print "- Reboot to apply, or run: su -c $MODPATH/late-load.sh"
 fi

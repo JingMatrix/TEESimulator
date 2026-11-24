@@ -52,9 +52,7 @@ const renameId = (profile) => `rn__${profile}`;
 function foldSummary(group, fields, profile, hasErrors) {
   const nodes = [el("span", { text: group.title })];
   if (group.id === "identity") {
-    // Values only: a switch in the group would be a setting about them, not one of them.
     const setCount = fields.reduce((n, f) => {
-      if (f.type === "toggle") return n;
       const v = getPath(profile, f.path);
       return n + (v != null && v !== "" ? 1 : 0);
     }, 0);
@@ -72,7 +70,8 @@ function foldSummary(group, fields, profile, hasErrors) {
 // The keybox comes first — an RKP keybox records the device it was provisioned for, and attesting
 // this device's own value under it contradicts the keybox signing the chain — then the harvest,
 // meaning the raw capture OR the value fabricated at harvest (e.g. a serial/imei/meid read from
-// the OS because the leaf never carries it). When neither has it, the tag says the tag is omitted.
+// the OS because the leaf never carries it). When neither has it, the tag reads "omitted": the
+// attestation leaves that id out.
 //
 // `resolved[key]` is { value, source }; source is "keybox" or "harvest".
 function defaultCue(d, value, resolved) {
@@ -86,7 +85,7 @@ function defaultCue(d, value, resolved) {
   const rd = resolved[d.key] || {};
   const rv = rd.value == null ? "" : String(rd.value);
   if (rv === "") {
-    return { tag: { text: "omitted", kind: "warn", title: "Nothing harvested, so this tag is left out of the attestation." } };
+    return { tag: { text: "omitted", kind: "warn", title: "Neither the keybox nor the harvest has a value, so this tag is left out of the attestation." } };
   }
   const keybox = rd.source === "keybox";
   return {
@@ -159,7 +158,7 @@ export function renderProfileList(mount, state, actions) {
     const profile = config.profiles[name];
     const apps = getPath(profile, ["apps"]);
     const appCount = Array.isArray(apps) ? apps.length : 0;
-    // The "N apps" count counts apps[] only, which under-reports an auto-including profile; the
+    // The "N apps" figure counts apps[] only, which under-reports an auto-including profile; the
     // auto count is the rest of the truth, and this is the resting screen where that lie was loudest.
     const autoN = autoCounts.get(name) || 0;
     const bad = errorCount.get(name) || 0;
@@ -167,7 +166,8 @@ export function renderProfileList(mount, state, actions) {
     // The keybox file is often a 32-hex name, so it is elided in the middle — the ends are what
     // tells two of them apart.
     const sub = [elide(getPath(profile, ["keybox"]) || "no keybox")];
-    // "0 apps · 7 auto" tells a profile covered entirely by auto-include that it covers nothing.
+    // Drop "0 apps" when auto-include covers the profile: "0 apps · 7 auto" would read as covering
+    // nothing.
     if (appCount || !autoN) sub.push(appCount + (appCount === 1 ? " app" : " apps"));
     if (autoN) sub.push(autoN + " auto");
     list.appendChild(el("button", { class: "list-row", type: "button", onclick: () => actions.onOpen(name) }, [
@@ -202,6 +202,10 @@ export function renderProfileList(mount, state, actions) {
 export function renderProfileEditor(host, state, actions) {
   const focus = captureFocus(host);
   const scrollTop = captureScroll(host);
+  // A name being typed commits only on `change`, so a re-render under it (the keybox's defaults
+  // arriving) must carry the text over, not reset it to the committed name.
+  const typing = host.querySelector(".drill-title-input");
+  const typed = typing && typing === document.activeElement ? typing.value : null;
   clear(host);
 
   const { config, name, errors = [], keyboxFiles = [], openGroups = {}, resolved = {}, scopeMeta = null, takenBy = {}, autoCount = 0 } = state;
@@ -220,7 +224,7 @@ export function renderProfileEditor(host, state, actions) {
   // Header: a back control that closes the drill-in, and the profile's own name as the title —
   // editable in place, which is both where a name belongs and one field fewer in the body.
   const renameInput = el("input", {
-    id: renameId(name), class: "drill-title-input", type: "text", value: name,
+    id: renameId(name), class: "drill-title-input", type: "text", value: typed ?? name,
     "aria-label": "Profile name", placeholder: "profile name",
     // Sized to the name it holds, so the rule under it reads as this field's underline and not
     // as a divider across the header.
@@ -230,13 +234,15 @@ export function renderProfileEditor(host, state, actions) {
   const doRename = () => {
     const next = renameInput.value.trim();
     if (next === name) return;
-    if (!PROFILE_RE.test(next) || config.profiles[next]) { renameInput.classList.add("invalid"); return; }
+    // Marked here so the field reads as refused at once; the controller says why.
+    if (!PROFILE_RE.test(next) || config.profiles[next]) renameInput.classList.add("invalid");
     actions.onRename(name, next);
   };
   renameInput.addEventListener("change", doRename);
   renameInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); renameInput.blur(); } });
   host.appendChild(el("div", { class: "drill-head" }, [
-    el("button", { class: "iconbtn", type: "button", "aria-label": "Back to profiles", onclick: () => actions.onClose() }, [
+    // An id, so the focus the editor opens on survives the re-render its keybox's defaults cause.
+    el("button", { id: "back__" + name, class: "iconbtn", type: "button", "aria-label": "Back to profiles", onclick: () => actions.onClose() }, [
       el("span", { class: "chevron-left", "aria-hidden": "true" }),
     ]),
     renameInput,
@@ -269,6 +275,9 @@ export function renderProfileEditor(host, state, actions) {
       // What this field falls back to, whatever it holds now: a patch picker names it on its own
       // "default" option, and "custom…" opens its box on it.
       defaultValue: fallback,
+      // The field whose own box held focus before this render: a patch picker keeps its custom
+      // box open while it is being typed in, even when the text passes through "" or a token.
+      editing: focus.id === fieldId(name, d.key) + "-v",
       addApp: (pkg) => actions.onAddApp(name, pkg),
       removeApp: (pkg) => actions.onRemoveApp(name, pkg),
       // The scope widget only shows the current picks and a button that opens the picker;
@@ -307,11 +316,10 @@ export function renderProfileEditor(host, state, actions) {
     const groupFields = FIELDS.filter((f) => f.group === group.id);
     if (!groupFields.length) continue;
     const groupErrors = groupFields.some((f) => errFor(f.key).length);
-    const note = group.note ? el("p", { class: "field-help group-note", text: group.note }) : null;
 
     if (group.fold) {
       body.appendChild(disclosure(foldSummary(group, groupFields, profile, groupErrors), [
-        note, ...groupFields.map(makeField),
+        ...groupFields.map(makeField),
       ], {
         open: !!openGroups[group.id] || groupErrors,
         onToggle: () => actions.onToggleGroup(group.id),
@@ -325,7 +333,6 @@ export function renderProfileEditor(host, state, actions) {
     // of thing beside the folded sections.)
     const section = el("section", { class: "group" }, [
       el("h2", { class: "group-head", text: group.title }),
-      note,
     ]);
     for (const d of groupFields) section.appendChild(makeField(d));
     body.appendChild(section);

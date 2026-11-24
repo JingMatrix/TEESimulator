@@ -294,8 +294,9 @@ constexpr int32_t kNotYetAvailable = -85;
 
 // The TA used for operations on an existing blob of ours (begin/upgrade/etc.), at the level the op
 // arrived on. Any profile's TA can decrypt any of our blobs (the KEK is level- and profile-
-// independent), but the level must match so the reference TA finds the key's characteristics at its
-// own level; the front profile's instance for `level` serves as that default.
+// independent: kmr-ta derives it from the boot key, state and lock flag, never a profile's hash),
+// but the level must match so the reference TA finds the key's characteristics at its own level;
+// the front profile's instance for `level` serves as that default.
 //
 // It waits out the window between this library taking over keystore2's KeyMint and the daemon
 // pushing the config that builds those TAs. keystore2 resolves KeyMint — and apps start using their
@@ -1607,9 +1608,9 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
   // The root of trust this profile attests: its own when it carries one (a spoofed hash, or the one
-  // its keybox states), else the device-wide hash every other profile shares. It also keys the TA's
-  // blob encryption, so a profile with its own hash has its own key-encryption key -- which is why
-  // both of its levels are built from the SAME hash below.
+  // its keybox states), else the device-wide hash every other profile shares. Both of its levels
+  // are built from the same hash, so the root of trust a key attests does not depend on the level
+  // it was minted at. The hash is not a key-encryption-key input, which WaitForDefaultTa relies on.
   const uint8_t* vb_hash =
       p->verified_boot_hash && p->verified_boot_hash_len ? p->verified_boot_hash
                                                          : g_stage_vb_hash.data();

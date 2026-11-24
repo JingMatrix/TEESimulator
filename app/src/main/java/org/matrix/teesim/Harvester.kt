@@ -688,7 +688,7 @@ object Harvester {
             r.meid.ifBlank {
                 safeId("getMeidForSubscriber(0)") { phoneSubInfoId("getMeidForSubscriber", 0) }
             }
-        val serial = r.serial.ifBlank { DeviceProps.prop("ro.serialno", "") }
+        val serial = r.serial.ifBlank { DeviceProps.own("ro.serialno") }
         // Redacted at the source rather than on export, since a log is usually pasted rather than
         // exported. The tokens still compare, so "does the profile attest the device's own IMEI"
         // stays answerable from the log alone.
@@ -774,13 +774,14 @@ object Harvester {
     private fun devicePropId(field: String): String {
         val base = attestIdBase(field) ?: return ""
         val forAttestation =
-            DeviceProps.prop("ro.product.${base}_for_attestation", BUILD_UNKNOWN).let {
-                if (it == BUILD_UNKNOWN) DeviceProps.prop("ro.product.vendor.$base", BUILD_UNKNOWN)
+            DeviceProps.own("ro.product.${base}_for_attestation", BUILD_UNKNOWN).let {
+                if (it == BUILD_UNKNOWN) DeviceProps.own("ro.product.vendor.$base", BUILD_UNKNOWN)
                 else it
             }
+        // Through own(): a property this daemon still holds a spoof in reads as its original.
         val resolved =
             if (forAttestation.isBlank() || forAttestation == BUILD_UNKNOWN)
-                DeviceProps.prop("ro.product.$base", BUILD_UNKNOWN)
+                DeviceProps.own("ro.product.$base", BUILD_UNKNOWN)
             else forAttestation
         return resolved.trim()
     }
@@ -1487,6 +1488,9 @@ object Harvester {
         MessageDigest.getInstance("SHA-256").digest(s.toByteArray())
 
     // --- persistence ------------------------------------------------------------
+
+    /** The record harvested.json holds, without harvesting: for a helper that has no daemon. */
+    fun persisted(): Record? = loadPersisted()
 
     private fun loadPersisted(): Record? {
         val f = Const.harvestedFile

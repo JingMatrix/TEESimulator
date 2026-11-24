@@ -210,8 +210,9 @@ const ORDER = [
   "deviceLocked", "verifiedBootState", "verifiedBootKey", "verifiedBootHash",
   "attestationSecurityLevel", "keymasterSecurityLevel", "attestationVersion", "keymasterVersion",
   "moduleHash", "osVersion", "osPatchLevel", "vendorPatchLevel", "bootPatchLevel",
-  // The identity tail, in the order the Captured group lists it, so a row like a keybox-stated
-  // manufacturer sits with the other ids instead of dangling past the end of the list.
+  // The identity tail, in the order the Captured group lists it, so a supplemented id (one read
+  // from a system property because the leaf carried none) sits with the other ids instead of
+  // dangling past the end of the list.
   "brand", "device", "product", "manufacturer", "model",
   "serial", "imei", "imei2", "meid",
 ];

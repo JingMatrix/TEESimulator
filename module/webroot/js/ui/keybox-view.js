@@ -236,7 +236,7 @@ function chainNode(c, i, total) {
     return el("li", { class: "kbi-node" }, [
       el("span", { class: "kbi-node-dot kbi-node-dot--bad", text: String(i + 1) }),
       el("div", { class: "card kbi-cert-card" }, [
-        el("div", { class: "err", text: "certificate " + i + ": " + c.error }),
+        el("div", { class: "err", text: "certificate " + (i + 1) + ": " + c.error }),
       ]),
     ]);
   }
@@ -280,7 +280,7 @@ function chainNode(c, i, total) {
 // The edge between this certificate and the one above it: whose key its signature was checked
 // against, and whether that check passed. The top certificate has no parent in the file — it either
 // signs itself, or the chain simply ends below its issuer and there is nothing here to check it
-// against.
+// against. Any other one goes unchecked only when the certificate above could not be read.
 function linkNote(c, i, total) {
   const top = i === total - 1;
   if (c.signatureValid === true) {
@@ -297,7 +297,8 @@ function linkNote(c, i, total) {
   }
   return el("div", { class: "kbi-link" }, [
     el("span", { class: "kbi-link-mark", "aria-hidden": "true", text: "·" }),
-    el("span", { text: "the certificate that signed this one is not in this file" }),
+    el("span", { text: top ? "the certificate that signed this one is not in this file"
+      : "#" + (i + 2) + " could not be read, so this signature is not checked" }),
   ]);
 }
 
@@ -400,6 +401,10 @@ function verdictOf(k) {
     return { tier: "bad", icon: "✕", title: "Private key is not the leaf's",
       sub: "The key in this keybox does not belong to the certificate paired with it, so nothing it signs verifies against this chain." };
   }
+  // What the simulator itself refuses, at load or at the first signing. A keybox fails as a whole
+  // when one of its keys does, so a broken RSA block takes a good EC one down with it.
+  const unusable = taRefusal(k);
+  if (unusable) return { tier: "bad", icon: "✕", title: "The simulator cannot use this key", sub: unusable };
   const revNote = unchecked ? " · revocation list unavailable" : " · not revoked";
   switch (k.rootAuthority) {
     case "google":
@@ -415,6 +420,20 @@ function verdictOf(k) {
       return { tier: "warn", icon: "?", title: "Unknown root",
         sub: "Chain does not root in a recognized attestation authority" + (unchecked ? " · revocation list unavailable" : "") + "." };
   }
+}
+
+// Why the TA (rust/teesim-km/src/attest.rs) would refuse this key, or null. It matches the
+// algorithm attribute exactly, needs a readable private key and a chain of two or more, and signs
+// only with what KeyboxDetail.taProblem says it can.
+function taRefusal(k) {
+  const pk = k.privateKey || {};
+  if (k.algorithmRecognized === false) return "The algorithm attribute must be exactly \"ecdsa\" or \"rsa\".";
+  if (!pk.present) return "There is no private key.";
+  if (pk.error) return "The private key cannot be read: " + pk.error;
+  if (pk.algorithmAgrees === false) return "The private key is not the type the algorithm attribute names.";
+  if (pk.taProblem) return "The private key cannot be signed with: " + pk.taProblem + ".";
+  if ((k.chainLength || 0) < 2) return "The certificate chain needs two certificates or more.";
+  return null;
 }
 
 function authorityTier(a) {
@@ -434,7 +453,7 @@ function authorityLabel(a) {
 function roleOf(c) {
   if (c.index === 0) return "leaf";
   if (c.selfSigned) return "root";
-  return c.isCa ? "intermediate" : "certificate " + c.index;
+  return c.isCa ? "intermediate" : "certificate " + (c.index + 1);
 }
 
 function kv(label, value) {
@@ -446,6 +465,7 @@ function kv(label, value) {
 
 function fmtDate(ms) {
   const n = Number(ms);
-  if (!Number.isFinite(n) || n <= 0) return "—";
+  // Only a missing value is a dash: a date before 1970 is a negative time, not an absent one.
+  if (ms == null || ms === "" || !Number.isFinite(n)) return "—";
   try { return new Date(n).toISOString().slice(0, 10); } catch { return String(ms); }
 }

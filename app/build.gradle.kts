@@ -231,7 +231,8 @@ androidComponents {
                 // up-to-date across a commit and the module keeps reporting the hash it was first
                 // staged at — in the manager, in the WebUI and in a bug report. Declaring it makes
                 // a new commit re-stage the file.
-                inputs.property("moduleVersion", "$gitCommitCount-$gitCommitHash")
+                val moduleVer = "$verName ($gitCommitCount-$gitCommitHash-${variant.name})"
+                inputs.property("moduleVersion", moduleVer)
 
                 // Reject a WebUI JS syntax error before it ships (no-op when node is absent).
                 dependsOn(checkWebrootJs)
@@ -288,8 +289,7 @@ androidComponents {
                     include("module.prop")
                     expand(
                         "REPLACEMEVERCODE" to gitCommitCount.toString(),
-                        "REPLACEMEVER" to
-                            "$verName ($gitCommitCount-$gitCommitHash-${variant.name})",
+                        "REPLACEMEVER" to moduleVer,
                     )
                 }
 

@@ -96,7 +96,7 @@ const TOKEN_FILE = DIR + "/admin.token";
 // identifies a daemon INSTANCE, not the device. A daemon that restarts under an open page — a
 // late-load, a hot install, this page's own canary update, or a plain crash-and-respawn — leaves
 // the memoized copy stale, and a request carrying a stale token is DROPPED without a response
-// (tokensMatch -> return), which arrives here as a transport failure rather than a 401. So the
+// (tokensMatch -> return), which arrives here as helper exit 2 with no body rather than a 401. So the
 // memo is invalidated and re-read whenever that happens; see request().
 let tokenPromise = null;
 function getToken() {
@@ -148,8 +148,8 @@ export async function iconDataUrl(pkg, userId) {
 // One request helper: run the UDS client with the token header, parse the JSON body it prints, and
 // convert a transport failure or a daemon { ok:false } into a thrown Error carrying the daemon's
 // message when there is one. The helper's exit code encodes the HTTP status class (0 = 2xx, 2 = other
-// status with the body still on stdout, 1 = connect/transport failure).
-
+// status with the body still on stdout — or no body at all when the daemon drops a stale token —
+// 1 = connect/transport failure).
 async function request(method, path, body) {
   const t0 = Date.now();
   console.log("[keyAdmin] → %s %s", method, path);
