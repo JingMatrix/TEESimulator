@@ -38,6 +38,23 @@ The module ships a default `config.json` that targets Google Play services and t
 
 Killing the keystore daemon (`su -c 'kill $(pidof keystore2)'` on Android 12+, `keystore` on 10/11) is the recovery path: a fresh daemon starts clean, with no interception, until the module re-injects it.
 
+### Without a reboot
+
+Nothing the module installs waits for a boot stage — it mounts no partition and ships no `system.prop`, and the daemon injects whatever keystore process it finds — so an install can take effect on the system that is already running. Which path a device has depends on its root manager:
+
+* A *KernelSU* whose `ksud` supports hot install installs it in place. The installer asks for a hot install, `ksud` swaps the module directory and runs `hotinstall.sh`, and the daemon takes over from there.
+* *Magisk, APatch,* and a KernelSU without that path stage the new build in `modules_update` until the next boot, and arm it with one command — the installer prints the exact path:
+
+  ```sh
+  su -c /data/adb/modules_update/teesim/late-load.sh
+  ```
+
+  Once the module has been through a boot it lives in `/data/adb/modules/teesim`, and the script is run from there. `ksud late-load` runs the same script by itself. `--stop` is the reverse: it stops the daemon, puts back the system properties a profile wrote, and restarts the keystore service, leaving the system carrying no interceptor at all.
+
+Both arm the running system, and both have one thing a reboot does not: the keystore process in front of them may already carry an interceptor, which no library is ever unloaded from or injected over. When that one is *this* build's — a daemon that crashed and respawned, or a second `late-load.sh` — the daemon adopts it and nothing restarts. When it is an older build's, as after an update, the daemon restarts the keystore service and injects the new one into the fresh process, and apps may see a transient keystore error as it goes down. The stage prints which of the two happened, into the install log on a hot install — and when `ksud late-load` runs it at boot there is nothing to print to, so the same lines also go to the device log and show up in the daemon's log and the WebUI's Logs panel.
+
+A reboot is still needed for one case the installer reports: a *TrickyStore* that was active on this boot keeps its own keystore hook until the keystore daemon restarts, so the installer disables it and asks for the reboot rather than hot-installing over it.
+
 ## Configuration
 
 Everything lives in `/data/adb/teesim/`, owned and validated by the daemon. The keybox files carry private keys and are never shipped with the module.
@@ -51,30 +68,38 @@ A schema version and a map of named profiles. Each targeted package must appear 
   "version": 1,
   "profiles": {
     "default": {
-      "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa + ecdsa, chains >= 2)
-      "patchLevel": { "system": "today", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
+      "keybox": "keybox.xml",                // relative to /data/adb/teesim; must parse (rsa and/or ecdsa, chains >= 2)
+      "patchLevel": { "system": "", "vendor": "YYYY-MM-05", "boot": "YYYY-MM-05" },
       "osVersion": "",                       // empty = harvested | system_property | "16" | "16.0.0" | 160000
       "brand": "", "device": "", "product": "",
       "manufacturer": "", "model": "",
       "serial": "", "imei": "", "meid": "", "imei2": "",
+      "verifiedBootHash": "",                // empty = the keybox's, else this device's; or 64 hex characters
+      "applyProperties": false,              // opt-in: also write what this profile attests into the system properties
       "apps": ["com.google.android.gms", "com.android.vending"]
     }
   }
 }
 ```
 
-Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Device-identity fields fall back to the values captured from the real TEE at harvest, so an app that asks the keystore to attest the device's real ids gets a matching answer; a non-empty field overrides that, and both are omitted only when neither is set. The root of trust is never listed here — it comes from the harvest.
+Patch and OS levels accept a small mini-language the daemon resolves against the device. `harvested` reuses the value captured from the real TEE at harvest time; `system_property` reads the matching build property from `getprop` and nothing else. Both report *nothing* when their source has no value — the tag is omitted rather than sent as a made-up default. `today` is the current month for the system level and today's date for vendor and boot; `YYYY-MM-DD` / `YYYY-MM` an explicit date; `no` suppresses the level. A date may also use the tokens `YYYY` / `MM` / `DD`, resolved to today, so `YYYY-MM-05` means the 5th of the current month (the shipped default for the vendor and boot patch levels, which tracks the calendar). Every other field states what this profile attests, and what it leaves empty takes a default from one of two places. An RKP keybox records the device it was *provisioned* for — its verified boot hash, its manufacturer, and a build fingerprint, which spells out the brand, product and device names — and that comes first, because attesting this device's own values under such a keybox contradicts the keybox signing the chain. Everything it does not state falls back to the harvest: the value captured from the real TEE, or the one read from the OS when the attested leaf carried none, so an app asking the keystore to attest the device's real ids gets a matching answer. A field with neither is omitted rather than sent as a made-up default, and the editor's hint under each empty field names the value and which of the two sources it came from.
+
+`verifiedBootHash` is the hash the profile's root of trust attests. Only the attestation carries it: the key-encryption key the simulator's TA derives comes from the boot key, state and lock flag above, so changing the hash leaves every stored key readable.
+
+`applyProperties` (opt-in, off unless stated) decides whether what a profile attests is also what `getprop` *says*. With the flag set, every id, patch level and OS version the profile presents that differs from the harvest is written into the system properties it is read from, and `ro.boot.vbmeta.digest` follows the hash the profile attests; without it, the daemon writes only the harvested `ro.boot.vbmeta.*` values, as it always has. A property is written only where this device already carries it *and* it says what the harvest says: a name the device does not have is one nothing on it reads, and one that legitimately differs — the system image's own `generic` device name, a frozen vendor image's older release — describes something else. There is a single set of properties, so at most one profile may claim them (the daemon rejects a second).
+
+Nothing written this way is permanent. `resetprop` lives in memory, so a reboot restores every property on its own, and the daemon records what each one read before it first wrote it (`props.json`, scoped to one boot) so it can put them back — when a profile stops claiming a value, when `late-load.sh --stop` disarms the module, and before it harvests, which is what keeps the capture a reading of *this* device even when the daemon is restarted into a system it has already spoofed.
 
 ### `keybox.xml`
 
-A keybox carries the private keys and certificate chains the simulator signs with. It must contain *both* an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` and its `CertificateChain`:
+A keybox carries the private keys and certificate chains the simulator signs with. It must contain *at least one* of an RSA and an ECDSA key (the EC key on NIST P-256), each with a PEM `PrivateKey` — SEC1 (`EC PRIVATE KEY`) or PKCS#1 (`RSA PRIVATE KEY`), the encodings the TA signs with; the WebUI's keybox inspector flags a PKCS#8 one — and a `CertificateChain` of two certificates or more — a factory keybox carries both, while one extracted from RKP carries only the EC key. An attested key is signed by the batch key of its own algorithm where the keybox has it, and by the other one where it does not:
 
 ```xml
 <?xml version="1.0"?>
 <AndroidAttestation>
   <Keybox DeviceID="...">
     <Key algorithm="rsa">
-      <PrivateKey format="pem">-----BEGIN PRIVATE KEY-----...</PrivateKey>
+      <PrivateKey format="pem">-----BEGIN RSA PRIVATE KEY-----...</PrivateKey>
       <CertificateChain>
         <Certificate format="pem">-----BEGIN CERTIFICATE-----...</Certificate>
         <!-- ...intermediate and root... -->
@@ -121,7 +146,7 @@ The whole build is one Gradle graph. `zipRelease` (or `zipDebug`, which bundles 
 | `keymint/` | The Android 12+ interceptor: the `AIBinder_transact` hook and the router that decides, per request, whether to simulate or forward. |
 | `keystore/` | The Android 10/11 interceptor: the libbinder `ioctl` hook and the `IKeystoreService` handler that serves a target's key lifecycle from the TA. |
 | `rust/teesim-km/` | The in-process TA — the reference KeyMint TA wired to BoringSSL and keybox-based attestation, behind a small C ABI. |
-| `module/` | The flashable module: boot service, installer, `sepolicy.rule`, the default configuration, and the WebUI. |
+| `module/` | The flashable module: the stage scripts (`service.sh` at boot, `late-load.sh` and `hotinstall.sh` on a running system, all forwarding to `stage.sh`), installer, `sepolicy.rule`, the default configuration, and the WebUI. |
 | `third_party/` | Submodules: the reference KeyMint, the AIDL interfaces, `frameworks/native`, BoringSSL, and LSPlt. |
 
 ## License

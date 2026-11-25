@@ -967,11 +967,19 @@ extern "C" void teesim_cfg_begin(const TsBootInfo* boot) {
 }
 
 extern "C" bool teesim_cfg_add_profile(const TsProfile* p) {
+  // The root of trust this profile attests: its own when it carries one (a spoofed hash, or the one
+  // its keybox states), else the device-wide hash every other profile shares.
+  const uint8_t* vb_hash =
+      p->verified_boot_hash && p->verified_boot_hash_len ? p->verified_boot_hash
+                                                         : g_stage_vb_hash.data();
+  const size_t vb_hash_len = p->verified_boot_hash && p->verified_boot_hash_len
+                                 ? p->verified_boot_hash_len
+                                 : g_stage_vb_hash.size();
   Ta* ta = teesim_km_init_ex(p->keybox, p->keybox_len, p->security_level, p->os_version,
                              p->os_patchlevel, p->vendor_patchlevel, p->boot_patchlevel,
-                             g_stage_vb_key.data(), g_stage_vb_key.size(), g_stage_vb_hash.data(),
-                             g_stage_vb_hash.size(), g_stage_locked, g_stage_vb_state,
-                             g_stage_attest_version_tee, g_stage_attest_version_strongbox, p->ids);
+                             g_stage_vb_key.data(), g_stage_vb_key.size(), vb_hash, vb_hash_len,
+                             g_stage_locked, g_stage_vb_state, g_stage_attest_version_tee,
+                             g_stage_attest_version_strongbox, p->ids);
   if (!ta) {
     LOGE("teesim_cfg_add_profile: profile %s failed to build (bad keybox?)", p->id ? p->id : "?");
     return false;

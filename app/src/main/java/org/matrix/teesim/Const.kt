@@ -22,6 +22,13 @@ object Const {
      * its own, and is not managed here (the WebUI keeps it as a plain toggle).
      */
     val rkpFile = File(DATA_DIR, "rkp.json")
+    /**
+     * What this device's own system properties read before a profile that applies its properties
+     * overwrote them ({ bootId, saved: { property: value } }), so the daemon can put them back —
+     * before it harvests, and when a profile stops asking. Scoped to one boot: a resetprop lives in
+     * memory only, so after a reboot every property is the device's own again. See [PropStore].
+     */
+    val propsFile = File(DATA_DIR, "props.json")
     val adminTokenFile = File(DATA_DIR, "admin.token")
 
     /**

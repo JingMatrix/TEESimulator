@@ -71,8 +71,11 @@ import org.json.JSONObject
  * chainLength, linkage, rootAuthority(google|aosp|knox|unknown|none), googleSigned, chainVerified,
  * revoked, revocationChecked, certs:[{index, subject, issuer, serial, notBefore, notAfter, expired,
  * sigAlg, keyAlgorithm, keySize, isCa, selfSigned, signatureValid?, revocationChecked?, revoked?,
- * revocationStatus?, revocationReason?, rootAuthority?}]}] } GET /canary -> { ok, currentCode,
- * latest{...}|null, updateAvailable } POST /canary/install?tag=&variant= -> { ok, message }
+ * revocationStatus?, revocationReason?, rootAuthority?}]}] } GET /keybox/defaults?name=F -> { ok,
+ * name, fingerprint?, defaults:{ <field>:{ value, source(keybox|harvest) } } } (what a profile
+ * signing with this keybox reports for every field it leaves empty, for the editor's hints) GET
+ * /canary -> { ok, currentCode, latest{...}|null, updateAvailable } POST
+ * /canary/install?tag=&variant= -> { ok, message }
  */
 object KeyAdmin {
 
@@ -457,6 +460,11 @@ object KeyAdmin {
                             KeyboxInspector.inspect(
                                 query["name"] ?: error("name required"),
                                 query["refresh"] == "1",
+                            )
+                        method == "GET" && path == "/keybox/defaults" ->
+                            KeyboxInspector.states(
+                                query["name"] ?: error("name required"),
+                                harvest,
                             )
                         method == "GET" && path == "/canary" -> Updater.status()
                         method == "POST" && path == "/canary/install" ->

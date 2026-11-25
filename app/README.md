@@ -2,8 +2,9 @@
 
 The privileged **control daemon** — the brain of the module. Everything that needs a real
 Android framework (an attested key to harvest from, `PackageManager` to resolve uids, a
-`Context` to reach keystore) lives here, in a Kotlin process launched by the module's
-`service.sh` via `app_process`. The injected native interceptors stay pure crypto-and-routing
+`Context` to reach keystore) lives here, in a Kotlin process launched by the module's stage
+scripts via `app_process` (`module/stage.sh` starts and stops it, at boot and on a system that
+is already running). The injected native interceptors stay pure crypto-and-routing
 engines; this daemon owns the configuration, resolves it against the live device, injects the
 interceptor, and pushes the resolved profiles over the control socket. It never sits
 in the keystore hot path.

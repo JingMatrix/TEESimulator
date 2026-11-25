@@ -18,6 +18,8 @@ object ConfigStore {
     // the advanced raw-uid token uid:N.
     private val PKG_RE = Regex("^[A-Za-z0-9_.]+(@\\d+)?$")
     private val UID_RE = Regex("^uid:\\d+$")
+    /** A verified boot hash as a profile may write it: SHA-256 as 64 hex characters, lowercased. */
+    private val HEX64_RE = Regex("^[0-9a-f]{64}$")
 
     /** One profile as written by the WebUI, before resolution against the device. */
     data class ProfileConfig(
@@ -37,12 +39,22 @@ object ConfigStore {
         val imei: String,
         val meid: String,
         val imei2: String,
+        // The verified boot hash this profile attests, as 64 hex characters, or empty to take the
+        // default ([ProfileDefaults]). It is the hash the profile's root of trust attests, and
+        // nothing more: the TA's key-encryption key is built without it, so changing it leaves
+        // every key readable.
+        val verifiedBootHash: String,
         val apps: List<String>,
         // When true, the profile ALSO targets every installed user app (uid >= first app uid) that
         // no OTHER profile claims — including apps installed later, since the daemon re-resolves on
         // each package change. At most one profile may set this (checked below); it lets the apps
         // list be empty, the auto set covering it.
         val autoIncludeNewApps: Boolean,
+        // When true, every value this profile attests that differs from the harvest is written
+        // into the system property it is read from, and ro.boot.vbmeta.digest follows this
+        // profile's verified boot hash (see App.applySystemProps). There is one set of properties
+        // on the device, so at most one profile may ask (checked below). Absent means false.
+        val applyProperties: Boolean,
     )
 
     data class Config(
@@ -76,6 +88,7 @@ object ConfigStore {
             HashMap<Int, String>() // effective caller uid -> owning profile id (cross-check)
         var autoIncludeProfiles =
             0 // how many profiles set autoIncludeNewApps (at most one allowed)
+        var applyPropsProfiles = 0 // how many profiles set applyProperties (at most one allowed)
         val profiles = ArrayList<ProfileConfig>()
 
         val ids = profilesObj.keys()
@@ -96,11 +109,42 @@ object ConfigStore {
             if (mode != "patch" && mode != "generation")
                 throw ConfigException("profile '$id' has invalid mode '$mode' (patch | generation)")
 
+            // A spoofed verified boot hash is 32 bytes of hex, the shape of the real one: a
+            // malformed value would otherwise reach the TA's root of trust as a short or empty
+            // OCTET STRING and every chain it signs would be refused for a reason nothing names.
+            val bootHash = p.optString("verifiedBootHash", "").trim().lowercase()
+            if (bootHash.isNotEmpty() && !HEX64_RE.matches(bootHash))
+                throw ConfigException(
+                    "profile '$id' has an invalid verifiedBootHash '$bootHash' (64 hex characters, " +
+                        "or empty to attest what the keybox or this device states)"
+                )
+            // The all-zero hash is what a device with no verified boot reports, and attestation is
+            // refused for it — the one value this field cannot usefully hold. Refusing it here also
+            // keeps ro.boot.vbmeta.digest honest: that property is never written all-zero, so a
+            // profile attesting zeros would leave it saying something else entirely.
+            if (bootHash.isNotEmpty() && bootHash.all { it == '0' })
+                throw ConfigException(
+                    "profile '$id' sets verifiedBootHash to all zeros, which is what a device with " +
+                        "no verified boot reports and what attestation is refused for"
+                )
+
             val patch = p.optJSONObject("patchLevel") ?: JSONObject()
             val apps =
                 p.optJSONArray("apps")?.let { arr ->
                     (0 until arr.length()).map { arr.getString(it).trim() }
                 } ?: emptyList()
+
+            // One device, one set of system properties: two profiles writing them would fight over
+            // every value. Opt-in: an absent key means no, so a config written before the flag
+            // existed keeps the one write the daemon made then (ro.boot.vbmeta.*, from the harvest)
+            // and nothing more until someone asks for it.
+            val applyProperties = p.optBoolean("applyProperties", false)
+            if (applyProperties) applyPropsProfiles++
+            if (applyPropsProfiles > 1)
+                throw ConfigException(
+                    "profile '$id' also sets applyProperties, but at most one profile may write " +
+                        "the device's system properties"
+                )
 
             // A profile that auto-includes every user app may legitimately name no apps of its own;
             // otherwise it must target at least one, or it routes nothing.
@@ -169,10 +213,10 @@ object ConfigStore {
                     id = id,
                     keybox = keybox,
                     mode = mode,
-                    // Defaults for an omitted field mirror the shipped config: a current-month
-                    // system patch and the conventional YYYY-MM-05 vendor/boot patch; an absent
-                    // osVersion is left empty (reuse the harvested value).
-                    patchSystem = patch.optString("system", "today"),
+                    // Defaults for an omitted field mirror the shipped config: an empty system
+                    // patch (reuse the harvested value) and the conventional YYYY-MM-05
+                    // vendor/boot patch; an absent osVersion is likewise left empty.
+                    patchSystem = patch.optString("system", ""),
                     patchVendor = patch.optString("vendor", "YYYY-MM-05"),
                     patchBoot = patch.optString("boot", "YYYY-MM-05"),
                     osVersion =
@@ -187,8 +231,10 @@ object ConfigStore {
                     imei = p.optString("imei", ""),
                     meid = p.optString("meid", ""),
                     imei2 = p.optString("imei2", ""),
+                    verifiedBootHash = bootHash,
                     apps = apps,
                     autoIncludeNewApps = autoIncludeNewApps,
+                    applyProperties = applyProperties,
                 )
             )
         }
